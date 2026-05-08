@@ -150,16 +150,20 @@ async function probarSincronizacion() {
 
         console.log('\n✅ ¡Respuesta exitosa masiva de Siesa QA!');
         console.log(responsePost.data);
+        return responsePost.data;
 
     } catch (error) {
         console.error('\n❌ Error en la conexión con Siesa:');
         if (error.response) {
             console.error('Status:', error.response.status);
             console.error('Data:', JSON.stringify(error.response.data, null, 2));
+            throw new Error(JSON.stringify(error.response.data));
         } else {
             console.error(error.message);
+            throw error;
         }
     }
 }
 
-probarSincronizacion();
+// Exportamos la función en lugar de llamarla directamente
+module.exports = { syncPOS: probarSincronizacion };

@@ -200,14 +200,18 @@ async function syncVentas() {
 
         console.log("✅ Respuesta de Siesa:");
         console.log(JSON.stringify(response.data, null, 2));
+        return response.data;
     } catch (error) {
         console.error("❌ Error enviando a Siesa:");
         if (error.response) {
             console.error(JSON.stringify(error.response.data, null, 2));
+            throw new Error(JSON.stringify(error.response.data));
         } else {
             console.error(error.message);
+            throw error;
         }
     }
 }
 
-syncVentas();
+// Exportamos la función en lugar de llamarla directamente
+module.exports = { syncVentas };
