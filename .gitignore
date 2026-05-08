@@ -1,0 +1,5 @@
+node_modules/
+.env
+factura_generada.json
+clientes_enviados_100.json
+.DS_Store
