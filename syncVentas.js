@@ -91,21 +91,21 @@ async function syncVentas() {
     const Descuentos = [];
     const Caja = [];
 
-    Docto_ventas_comercial.push({
-        "IND_CONSECUTIVO": "1", // Manual
-        "ID_CO": enc.CoDoc,
-        "ID_TIPO_DOCTO": tipoDoctoSiesa,
-        "CONSEC_DOCTO": enc.CONSEC_DOCTO,
-        "FECHA_DOCTO": formatDate(enc.FECHA_DOCTO),
-        "ID_TERCERO": enc.NitTercero,
-        "ID_CLASE_DOCTO": enc.ID_TIPO_DOCTO === 'P03' ? "525" : "522", // 522=Factura directa, 525=Nota credito
-        "SUCURSAL_CLIENTE": "001",
-        "id_co_fact": enc.CoDoc,
-        "TERCERO_REM": enc.NitTercero,
-        // Usamos el nuevo campo IdCondPago que agregaste al query
-        "id_cond_pago": enc.IdCondPago || "001",
-        "id_caja": "001" // Punto de envío cambiado a 001 a petición del equipo
-    });
+        Docto_ventas_comercial.push({
+            "IND_CONSECUTIVO": "1", // Manual
+            "ID_CO": enc.CoDoc,
+            "ID_TIPO_DOCTO": tipoDoctoSiesa,
+            "CONSEC_DOCTO": enc.CONSEC_DOCTO,
+            "FECHA_DOCTO": formatDate(enc.FECHA_DOCTO),
+            "ID_TERCERO": enc.NitTercero,
+            "ID_CLASE_DOCTO": enc.ID_TIPO_DOCTO === 'P03' ? "525" : "522", // 522=Factura directa, 525=Nota credito
+            "SUCURSAL_CLIENTE": "001",
+            "id_co_fact": enc.CoDoc,
+            "TERCERO_REM": enc.NitTercero,
+            // Usamos el nuevo campo IdCondPago que agregaste al query
+            "id_cond_pago": enc.IdCondPago || "001",
+            "id_caja": "001" // Punto de envío cambiado a 001 a petición del equipo
+        });
 
     detalles.forEach((det, index) => {
         const lineaItem = index + 1;
