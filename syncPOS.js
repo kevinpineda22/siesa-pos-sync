@@ -8,15 +8,27 @@ function formatearFechaSiesa(fechaISO) {
     return fechaISO.split('T')[0].replace(/-/g, '');
 }
 
-async function probarSincronizacion() {
+// Trunca un string al tamaño máximo permitido por Siesa.
+// Siesa rechaza el lote completo si UN campo excede su largo.
+function truncar(valor, maxLen) {
+    if (valor === null || valor === undefined) return "";
+    const s = String(valor).trim();
+    return s.length > maxLen ? s.slice(0, maxLen) : s;
+}
+
+async function probarSincronizacion(nitsRequeridos = null) {
     try {
         console.log('----------------------------------------------------');
-        console.log('1. Consultando 100 clientes desde el API Dinámica (POS)...');
+        if (nitsRequeridos && nitsRequeridos.length > 0) {
+            console.log(`1. Consultando clientes POS (filtrando ${nitsRequeridos.length} NIT(s) faltante(s): ${nitsRequeridos.join(', ')})...`);
+        } else {
+            console.log('1. Consultando clientes POS (últimos 60 días + activos en doctos)...');
+        }
         console.log('----------------------------------------------------');
         
-        // Cambiamos tamPag a 100 para traer 100 clientes de una vez
+        // Connekta no acepta parámetros: el query trae todo el pool relevante y filtramos en Node.
         const responseGet = await axios.get(
-            'https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=7375&descripcion=merkahorro_Cliente_pos_dev&paginacion=numPag=1|tamPag=10',
+            'https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=7375&descripcion=merkahorro_Cliente_pos_dev&paginacion=numPag=1|tamPag=500',
             {
                 headers: {
                     'ConniKey': process.env.CONNI_KEY,
@@ -25,31 +37,32 @@ async function probarSincronizacion() {
             }
         );
 
-        const dataSiesa = responseGet.data; 
+        // Extraer los datos del response de Connekta (usualmente en data.detalle.Datos o data directamente)
+        const dataSiesa = responseGet.data;
+        let clientesDatos = [];
         
-        let clientesDatos = [
-            {
-                "NIT": "21683653",
-                "IND_TIPO_TERCERO": 1,
-                "ID_TIPO_IDENT": "C",
-                "RAZON_SOCIAL": "BUSTAMANTE QUICENO MARIA AURORA",
-                "NOMBRES": "MARIA AURORA",
-                "APELLIDO1": "BUSTAMANTE",
-                "FECHA_INGRESO": "2023-10-13T00:00:00"
-            },
-            {
-                "NIT": "000",
-                "IND_TIPO_TERCERO": 1,
-                "ID_TIPO_IDENT": "C",
-                "RAZON_SOCIAL": "PUNTO DE ENVIO 000",
-                "NOMBRES": "CAJA",
-                "APELLIDO1": "000",
-                "FECHA_INGRESO": "2023-10-13T00:00:00"
+        if (dataSiesa && dataSiesa.detalle && dataSiesa.detalle.Datos) {
+            clientesDatos = dataSiesa.detalle.Datos;
+        } else if (Array.isArray(dataSiesa)) {
+            clientesDatos = dataSiesa;
+        }
+
+        // Si Siesa nos dijo qué NITs faltan, filtramos solo esos. Si no, mandamos todo el pool.
+        if (nitsRequeridos && nitsRequeridos.length > 0) {
+            const setNits = new Set(nitsRequeridos.map(n => String(n).trim()));
+            const antes = clientesDatos.length;
+            clientesDatos = clientesDatos.filter(c => setNits.has(String(c.NIT).trim()));
+            console.log(`🔍 Filtrado por NITs requeridos: ${antes} → ${clientesDatos.length} cliente(s) a enviar.`);
+
+            const encontrados = new Set(clientesDatos.map(c => String(c.NIT).trim()));
+            const noEncontrados = [...setNits].filter(n => !encontrados.has(n));
+            if (noEncontrados.length > 0) {
+                console.warn(`⚠️ ${noEncontrados.length} NIT(s) NO existen en la maestra POS y no se podrán crear en Siesa: ${noEncontrados.join(', ')}`);
             }
-        ];
+        }
 
         if (clientesDatos.length === 0) {
-            console.log('\n⚠️ No se encontraron clientes.');
+            console.log('\n⚠️ No se encontraron clientes para sincronizar.');
             return;
         }
 
@@ -69,39 +82,44 @@ async function probarSincronizacion() {
             const fechaSiesa = formatearFechaSiesa(cliente.FECHA_INGRESO);
 
             let tipoTercero = cliente.IND_TIPO_TERCERO;
-            if (tipoTercero === 0 || tipoTercero === "0") {
-                tipoTercero = (cliente.ID_TIPO_IDENT === 'C' || cliente.NOMBRES) ? 1 : 2;
+            if (tipoTercero === 0 || tipoTercero === "0" || tipoTercero === 1 || tipoTercero === "1") {
+                // Forzar 2 (Empresa) si el tipo de identificación es NIT (N) o si no tiene nombres pero tiene razón social, o si tiene O (Otro)
+                if (cliente.ID_TIPO_IDENT === 'N' || cliente.ID_TIPO_IDENT === 'O' || (!cliente.NOMBRES && cliente.RAZON_SOCIAL)) {
+                    tipoTercero = 2;
+                } else {
+                    tipoTercero = 1;
+                }
             }
 
             payloadSiesa.Terceros.push({
-                "ID": cliente.NIT || "", 
-                "NIT": cliente.NIT || "",
+                "ID": truncar(cliente.NIT, 20),
+                "NIT": truncar(cliente.NIT, 20),
                 "ID_TIPO_IDENT": tipoTercero === 0 ? "" : (cliente.ID_TIPO_IDENT || ""),
                 "IND_TIPO_TERCERO": tipoTercero,
-                "RAZON_SOCIAL": cliente.RAZON_SOCIAL || "",
-                "APELLIDO1": cliente.APELLIDO1 || "",
-                "APELLIDO2": cliente.APELLIDO2 || "",
-                "NOMBRES": cliente.NOMBRES || "",
-                "CONTACTO": cliente.CONTACTO || "",
-                "DIRECCION1": cliente.DIRECCION1 || "",
-                "DIRECCION2": cliente.DIRECCION2 || "",
-                "DIRECCION3": cliente.DIRECCION3 || "",
+                "RAZON_SOCIAL": truncar(cliente.RAZON_SOCIAL, 40),
+                "APELLIDO1": truncar(cliente.APELLIDO1, 30),
+                "APELLIDO2": truncar(cliente.APELLIDO2, 30),
+                "NOMBRES": truncar(cliente.NOMBRES, 30),
+                "CONTACTO": truncar(cliente.CONTACTO, 40),
+                "DIRECCION1": truncar(cliente.DIRECCION1, 40),
+                "DIRECCION2": truncar(cliente.DIRECCION2, 40),
+                "DIRECCION3": truncar(cliente.DIRECCION3, 40),
                 "ID_PAIS": cliente.ID_PAIS || "",
                 "ID_DEPTO": cliente.ID_DEPTO || "",
                 "ID_CIUDAD": cliente.ID_CIUDAD || "",
-                "BARRIO": cliente.BARRIO || "",
-                "TELEFONO": cliente.TELEFONO || "",
-                "EMAIL": cliente.EMAIL || "",
+                "BARRIO": truncar(cliente.BARRIO, 30),
+                "TELEFONO": truncar(cliente.TELEFONO, 20),
+                "EMAIL": truncar(cliente.EMAIL, 60),
                 "FECHA_INGRESO": fechaSiesa,
                 "ID_CIIU": cliente.ID_CIIU || "",
-                "CELULAR": cliente.CELULAR || ""
+                "CELULAR": truncar(cliente.CELULAR, 20)
             });
 
             payloadSiesa.Clientes.push({
-                "ID_TERCERO": cliente.NIT || "", 
+                "ID_TERCERO": truncar(cliente.NIT, 20),
                 "ID_SUCURSAL": "001",
                 "IND_ESTADO_ACTIVO": 1,
-                "RAZON_SOCIAL": cliente.RAZON_SOCIAL || "",
+                "RAZON_SOCIAL": truncar(cliente.RAZON_SOCIAL, 40),
                 "ID_MONEDA": "COP",
                 "IND_CALIFICACION": "A",
                 "CUPO_CREDITO": "+000000000000000.0000",
@@ -111,18 +129,18 @@ async function probarSincronizacion() {
                 "PORC_EXCESO_VENTA": "0000.00",
                 "PORC_MIN_MARGEN": "0000.00",
                 "PORC_MAX_MARGEN": "0000.00",
-                "CONTACTO": cliente.CONTACTO || "",
-                "DIRECCION1": cliente.DIRECCION1 || "",
-                "DIRECCION2": cliente.DIRECCION2 || "",
-                "DIRECCION3": cliente.DIRECCION3 || "",
+                "CONTACTO": truncar(cliente.CONTACTO, 40),
+                "DIRECCION1": truncar(cliente.DIRECCION1, 40),
+                "DIRECCION2": truncar(cliente.DIRECCION2, 40),
+                "DIRECCION3": truncar(cliente.DIRECCION3, 40),
                 "ID_PAIS": cliente.ID_PAIS || "",
                 "ID_DEPTO": cliente.ID_DEPTO || "",
                 "ID_CIUDAD": cliente.ID_CIUDAD || "",
-                "BARRIO": cliente.BARRIO || "",
-                "TELEFONO": cliente.TELEFONO || "",
-                "EMAIL": cliente.EMAIL || "",
+                "BARRIO": truncar(cliente.BARRIO, 30),
+                "TELEFONO": truncar(cliente.TELEFONO, 20),
+                "EMAIL": truncar(cliente.EMAIL, 60),
                 "FECHA_INGRESO": fechaSiesa,
-                "CELULAR": cliente.CELULAR || "",
+                "CELULAR": truncar(cliente.CELULAR, 20),
                 "FRECUENCIA_ENTREGA": "1111111",
                 "VALIDA_CUPO_DESPACHO": 0
             });
