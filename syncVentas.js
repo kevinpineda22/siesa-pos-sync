@@ -344,7 +344,7 @@ function formatTasa(number) {
     return parseFloat(number).toFixed(4).padStart(8, '0');
 }
 
-async function ejecutarPaso(pasoActual) {
+async function ejecutarPaso(pasoActual, consecsOverride = null) {
     console.log("==========================================");
     console.log("🚀 Iniciando Sincronización de Ventas POS");
     console.log("==========================================");
@@ -395,13 +395,17 @@ async function ejecutarPaso(pasoActual) {
     // (sort DESC por consec; el orden CFE/CNC entre pasos lo controla el caller)
     const todasLasFacturas = Object.keys(facturas).sort((a, b) => parseInt(b) - parseInt(a));
 
-    // APLICAR FILTRO POR CONSECS ESPECÍFICOS (si está definido en .env).
+    // APLICAR FILTRO POR CONSECS ESPECÍFICOS.
+    // Prioridad: 1) parámetro `consecsOverride` (vía HTTP), 2) variable de entorno CONSEC_ESPECIFICOS.
     // Útil para reprocesar facturas puntuales sin depender del rango de fechas.
     const consecsEnv = (process.env.CONSEC_ESPECIFICOS || '').trim();
+    const consecsActivos = Array.isArray(consecsOverride) && consecsOverride.length > 0
+        ? consecsOverride.map(c => String(c).trim()).filter(Boolean).join(',')
+        : consecsEnv;
     let facturasFiltradas = todasLasFacturas;
     let modoEspecificos = false;
-    if (consecsEnv.length > 0) {
-        const lista = consecsEnv.split(',').map(c => c.trim()).filter(Boolean);
+    if (consecsActivos.length > 0) {
+        const lista = consecsActivos.split(',').map(c => c.trim()).filter(Boolean);
         const setConsecs = new Set(lista);
         facturasFiltradas = todasLasFacturas.filter(c => setConsecs.has(String(c)));
         modoEspecificos = true;
@@ -809,13 +813,30 @@ async function ejecutarPaso(pasoActual) {
     return resultados;
 }
 
-module.exports = { syncVentas: async () => {
+module.exports = { syncVentas: async (opciones = {}) => {
+    // opciones.consecs: array opcional de consecs específicos para reprocesar.
+    // Si se pasa, ignora LIMITE_FACTURAS y CONSEC_ESPECIFICOS del .env.
+    const consecsOverride = Array.isArray(opciones.consecs) ? opciones.consecs : null;
+
+    // opciones.limite: sobrescribe LIMITE_FACTURAS solo para esta corrida.
+    // Útil para que el dashboard pida "procesar las próximas N facturas".
+    // Se restablece al valor original al terminar (incluso si hay error).
+    const limiteOverride = Number.isFinite(Number(opciones.limite)) && Number(opciones.limite) > 0
+        ? String(parseInt(opciones.limite, 10))
+        : null;
+    const limiteOriginal = process.env.LIMITE_FACTURAS;
+    if (limiteOverride) {
+        process.env.LIMITE_FACTURAS = limiteOverride;
+        console.log(`🎛️  Override LIMITE_FACTURAS=${limiteOverride} (solo esta corrida)`);
+    }
+    try {
+
     // Orden nuevo: primero CFE (facturas), después CNC (notas crédito).
     // Esto evita que las CNC devuelvan stock antes de tiempo y que el
     // ajuste de inventario tenga que pelearse contra movimientos de entrada
     // posteriores en el mismo lote.
-    const resCFE = (await ejecutarPaso(3)) || []; // CFE - Facturas de venta
-    const resCNC = (await ejecutarPaso(1)) || []; // CNC - Notas crédito
+    const resCFE = (await ejecutarPaso(3, consecsOverride)) || []; // CFE - Facturas de venta
+    const resCNC = (await ejecutarPaso(1, consecsOverride)) || []; // CNC - Notas crédito
 
     const todos = [...resCFE, ...resCNC];
     const okCount = todos.filter(r => r.ok).length;
@@ -851,4 +872,11 @@ module.exports = { syncVentas: async () => {
     }
 
     return { total: todos.length, ok: okCount, fail: failCount, detalle: todos };
+    } finally {
+        // Restaurar LIMITE_FACTURAS al valor original aunque haya habido error.
+        if (limiteOverride) {
+            if (limiteOriginal === undefined) delete process.env.LIMITE_FACTURAS;
+            else process.env.LIMITE_FACTURAS = limiteOriginal;
+        }
+    }
 }};

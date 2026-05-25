@@ -37,8 +37,29 @@ app.post('/api/sync-clientes', async (req, res) => {
 
 app.post('/api/sync-ventas', async (req, res) => {
     try {
-        console.log('--- 🔄 Recibida petición HTTP para sincronizar ventas ---');
-        const result = await syncVentas();
+        // Body opcional:
+        //   { consecs: ["63951", "63952"] } → reprocesa esos consecs (ignora límite).
+        //   { limite: 5 }                   → procesa los próximos 5 (sobrescribe LIMITE_FACTURAS solo esta vez).
+        // Si no se envía nada, corre el flujo normal con LIMITE_FACTURAS del .env.
+        const consecs = Array.isArray(req.body?.consecs) ? req.body.consecs.filter(Boolean).map(String) : null;
+        const limiteRaw = req.body?.limite;
+        const limite = Number.isFinite(Number(limiteRaw)) && Number(limiteRaw) > 0
+            ? parseInt(limiteRaw, 10)
+            : null;
+
+        const opciones = {};
+        if (consecs && consecs.length > 0) opciones.consecs = consecs;
+        if (limite && !opciones.consecs) opciones.limite = limite; // consecs tiene prioridad
+
+        if (opciones.consecs) {
+            console.log(`--- 🔄 Recibida petición HTTP para reprocesar consecs: ${opciones.consecs.join(', ')} ---`);
+        } else if (opciones.limite) {
+            console.log(`--- 🔄 Recibida petición HTTP para sincronizar ${opciones.limite} factura(s) ---`);
+        } else {
+            console.log('--- 🔄 Recibida petición HTTP para sincronizar ventas (modo normal) ---');
+        }
+
+        const result = await syncVentas(opciones);
         res.status(200).json({ success: true, data: result });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
