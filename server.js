@@ -12,6 +12,23 @@ const PORT = process.env.PORT || 4000;
 app.use(cors());
 app.use(express.json());
 
+// Ruta raíz: health-check
+app.get('/', (req, res) => {
+    res.status(200).json({
+        nombre: 'Siesa POS Sync API',
+        estado: 'operacional',
+        version: '1.0.0',
+        entornos: {
+            sincronizar_ventas: { metodo: 'POST', ruta: '/api/sync-ventas' },
+            sincronizar_clientes: { metodo: 'POST', ruta: '/api/sync-clientes' },
+            logs_facturas: { metodo: 'GET', ruta: '/api/logs' },
+            historial_corridas: { metodo: 'GET', ruta: '/api/logs/corridas' }
+        },
+        documentacion: 'https://github.com/kevinpineda22/siesa-pos-sync',
+        timestamp: new Date().toISOString()
+    });
+});
+
 // Helper: lee un JSON del directorio de logs sin reventar si no existe.
 // (Ya no se usa localmente, pero se deja por retrocompatibilidad con scripts viejos si los hay)
 function leerLog(nombreArchivo) {
