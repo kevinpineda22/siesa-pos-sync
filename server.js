@@ -1,8 +1,6 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
 const { syncPOS } = require('./syncPOS');
 const { syncVentas } = require('./syncVentas');
 const logger = require('./logger');
@@ -163,16 +161,21 @@ app.get('/api/logs/corridas', async (req, res) => {
     }
 });
 
-// Iniciar el servidor
-app.listen(PORT, () => {
-    console.log(`=================================================`);
-    console.log(`🚀 Servidor API de Integración POS <-> Siesa`);
-    console.log(`📡 Corriendo en http://localhost:${PORT}`);
-    console.log(`=================================================`);
-    console.log(`Rutas disponibles para tu Frontend en React:`);
-    console.log(`- POST http://localhost:${PORT}/api/sync-clientes`);
-    console.log(`- POST http://localhost:${PORT}/api/sync-ventas`);
-    console.log(`- GET  http://localhost:${PORT}/api/logs`);
-    console.log(`- GET  http://localhost:${PORT}/api/logs/corridas`);
-    console.log(`=================================================`);
-});
+// Iniciar el servidor (solo en local; en Vercel corre como serverless)
+if (!process.env.VERCEL) {
+    app.listen(PORT, () => {
+        console.log(`=================================================`);
+        console.log(`🚀 Servidor API de Integración POS <-> Siesa`);
+        console.log(`📡 Corriendo en http://localhost:${PORT}`);
+        console.log(`=================================================`);
+        console.log(`Rutas disponibles para tu Frontend en React:`);
+        console.log(`- POST http://localhost:${PORT}/api/sync-clientes`);
+        console.log(`- POST http://localhost:${PORT}/api/sync-ventas`);
+        console.log(`- GET  http://localhost:${PORT}/api/logs`);
+        console.log(`- GET  http://localhost:${PORT}/api/logs/corridas`);
+        console.log(`=================================================`);
+    });
+}
+
+// Exportar la app para Vercel (serverless)
+module.exports = app;
