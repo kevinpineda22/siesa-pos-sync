@@ -1,43 +1,11 @@
-// logger.js
-// Persistencia estructurada del estado de cada factura procesada/fallida.
-// Diseñado para soportar idempotencia y trazabilidad.
+const { createClient } = require('@supabase/supabase-js');
+require('dotenv').config();
 
-const fs = require('fs');
-const path = require('path');
+const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY
+);
 
-const LOG_DIR = path.join(__dirname, 'logs');
-const FILE_PROCESADAS = path.join(LOG_DIR, 'facturas_procesadas.json');
-const FILE_PENDIENTES = path.join(LOG_DIR, 'facturas_pendientes.json');
-const FILE_ERRORES_MAESTRAS = path.join(LOG_DIR, 'errores_maestras_siesa.txt');
-
-// Asegura que la carpeta logs/ exista.
-function ensureDir() {
-    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
-}
-
-// Lectura segura (devuelve [] si no existe o está corrupto).
-function leerJSON(file) {
-    try {
-        if (!fs.existsSync(file)) return [];
-        const txt = fs.readFileSync(file, 'utf8');
-        if (!txt.trim()) return [];
-        return JSON.parse(txt);
-    } catch (e) {
-        console.warn(`⚠️ Log corrupto en ${file}, se reinicia. (${e.message})`);
-        return [];
-    }
-}
-
-// Escritura atómica: escribe a .tmp y renombra.
-// Si el proceso muere a mitad, el archivo original queda intacto.
-function escribirJSON(file, data) {
-    ensureDir();
-    const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-    fs.renameSync(tmp, file);
-}
-
-// Categoriza un error de Siesa en una clase semántica para agrupación.
 function categorizarError(detalleSiesa) {
     if (!Array.isArray(detalleSiesa) || detalleSiesa.length === 0) {
         return { categoria: 'OTRO', resumen: 'Error sin detalle' };
@@ -45,7 +13,7 @@ function categorizarError(detalleSiesa) {
 
     const txt = detalleSiesa.map(d => (d.f_detalle || '') + ' ' + (d.f_valor || '')).join(' | ').toLowerCase();
 
-    if (txt.includes('cliente no existe') || txt.includes('sucursal del cliente')) {
+    if (txt.includes('cliente no existe') || txt.includes('sucursal del cliente') || txt.includes('la sucursal de la remisión')) {
         return { categoria: 'CLIENTE_FALTANTE', resumen: 'Cliente o sucursal no existe en Siesa' };
     }
     if (txt.includes('item sin cantidad') || txt.includes('cantidad disponible')) {
@@ -61,167 +29,174 @@ function categorizarError(detalleSiesa) {
         return { categoria: 'EQUIVALENCIA_FALTA', resumen: 'Falta equivalencia de inventario/ventas' };
     }
     if (txt.includes('punto de envio')) {
-        return { categoria: 'PUNTO_ENVIO_FALTA', resumen: 'Punto de envío no existe' };
+        return { categoria: 'PUNTO_ENVIO_FALTA', resumen: 'Punto de envio no existe' };
     }
     if (txt.includes('valor unitario')) {
-        return { categoria: 'DATO_INVALIDO', resumen: 'Valor unitario inválido en línea' };
+        return { categoria: 'DATO_INVALIDO', resumen: 'Valor unitario invalido en linea' };
     }
     if (txt.includes('tama') && txt.includes('permitido')) {
-        return { categoria: 'CAMPO_LARGO', resumen: 'Campo excede tamaño permitido' };
+        return { categoria: 'CAMPO_LARGO', resumen: 'Campo excede tamano permitido' };
+    }
+    if (txt.includes('la base de datos no existe')) {
+        return { categoria: 'ERROR_CONEXION_SIESA', resumen: 'Siesa QA caido o DB no existe' };
     }
     return { categoria: 'OTRO', resumen: detalleSiesa[0]?.f_detalle?.slice(0, 120) || 'Error desconocido' };
 }
 
-// Parsea el mensaje crudo de error que devuelve syncVentas a un objeto con detalle.
 function parsearError(mensajeRaw) {
     if (!mensajeRaw) return { detalle: [], categoria: 'OTRO', resumen: 'Sin mensaje' };
     try {
-        const limpio = mensajeRaw.replace(/^Reintento falló: /, '');
+        const limpio = mensajeRaw.replace(/^Reintento falló: /, '').replace(/^Reintento fall: /, '');
         const obj = JSON.parse(limpio);
         const detalle = obj.detalle || [];
         const cat = categorizarError(detalle);
         return { detalle, ...cat, mensaje_siesa: obj.mensaje || 'Error' };
     } catch (e) {
-        return { detalle: [], categoria: 'OTRO', resumen: mensajeRaw.slice(0, 200), mensaje_siesa: null };
+        // En caso de que sea un string de conexión de Siesa y no JSON (ej. "La base de datos...")
+        const isDbError = mensajeRaw.toLowerCase().includes('base de datos no existe');
+        const cat = isDbError ? 'ERROR_CONEXION_SIESA' : 'OTRO';
+        return { detalle: [], categoria: cat, resumen: mensajeRaw.slice(0, 200), mensaje_siesa: null };
     }
 }
 
-// ===== API pública =====
-
-// Devuelve el Set de consecs ya procesados con estado OK (para skip de idempotencia).
-function obtenerConsecsExitosos() {
-    const historial = leerJSON(FILE_PROCESADAS);
-    return new Set(historial.filter(r => r.estado === 'OK').map(r => `${r.tipo}:${r.consec}`));
+async function obtenerConsecsExitosos() {
+    const { data, error } = await supabase
+        .from('sps_facturas')
+        .select('tipo, consec')
+        .eq('estado', 'OK');
+        
+    if (error) {
+        console.error('⚠️ Error leyendo consecs exitosos de Supabase:', error.message);
+        return new Set();
+    }
+    return new Set(data.map(r => `${r.tipo}:${r.consec}`));
 }
 
-// Registra/actualiza el resultado de una factura procesada.
-// resultado = { consecutivo, tipo, ok, mensaje }
-// meta = { fecha_factura, cliente_nit, items, neto, automatizaciones }
-function registrarResultado(resultado, meta = {}) {
-    ensureDir();
-    const historial = leerJSON(FILE_PROCESADAS);
-    const clave = `${resultado.tipo}:${resultado.consecutivo}`;
-    const ahora = new Date().toISOString();
-
-    const existente = historial.find(r => `${r.tipo}:${r.consec}` === clave);
+async function registrarResultado(resultado, meta = {}) {
+    const id = `${resultado.tipo}:${resultado.consecutivo}`;
     const errorInfo = resultado.ok ? null : parsearError(resultado.mensaje);
+    
+    // Primero, obtener el registro actual (para incrementar intentos)
+    const { data: existente } = await supabase
+        .from('sps_facturas')
+        .select('intentos, automatizaciones_aplicadas')
+        .eq('id', id)
+        .single();
+        
+    const payload = {
+        id,
+        consec: String(resultado.consecutivo),
+        tipo: resultado.tipo,
+        estado: resultado.ok ? 'OK' : 'FALLO',
+        intentos: existente ? (existente.intentos || 1) + 1 : 1,
+        ultima_corrida: new Date().toISOString(),
+        categoria_error: errorInfo ? errorInfo.categoria : null,
+        error: errorInfo
+    };
 
-    if (existente) {
-        existente.estado = resultado.ok ? 'OK' : 'FALLO';
-        existente.intentos = (existente.intentos || 1) + 1;
-        existente.ultima_corrida = ahora;
-        existente.error = errorInfo;
-        existente.automatizaciones_aplicadas = meta.automatizaciones || existente.automatizaciones_aplicadas || [];
-        if (meta.fecha_factura) existente.fecha_factura = meta.fecha_factura;
-        if (meta.cliente_nit) existente.cliente_nit = meta.cliente_nit;
-        if (meta.items) existente.items = meta.items;
-        if (meta.neto !== undefined) existente.neto = meta.neto;
-    } else {
-        historial.push({
-            consec: resultado.consecutivo,
-            tipo: resultado.tipo,
-            fecha_factura: meta.fecha_factura || null,
-            cliente_nit: meta.cliente_nit || null,
-            items: meta.items || null,
-            neto: meta.neto || null,
-            estado: resultado.ok ? 'OK' : 'FALLO',
-            intentos: 1,
-            primera_corrida: ahora,
-            ultima_corrida: ahora,
-            automatizaciones_aplicadas: meta.automatizaciones || [],
-            error: errorInfo
-        });
+    if (meta.fecha_factura) payload.fecha_factura = meta.fecha_factura;
+    if (meta.cliente_nit) payload.cliente_nit = meta.cliente_nit;
+    if (meta.items) payload.items = meta.items;
+    if (meta.neto !== undefined) payload.neto = meta.neto;
+    
+    if (meta.automatizaciones && meta.automatizaciones.length > 0) {
+        const prevAuto = existente ? (existente.automatizaciones_aplicadas || []) : [];
+        payload.automatizaciones_aplicadas = [...new Set([...prevAuto, ...meta.automatizaciones])];
     }
 
-    escribirJSON(FILE_PROCESADAS, historial);
+    if (!existente) {
+        payload.primera_corrida = payload.ultima_corrida;
+        if (!payload.automatizaciones_aplicadas) payload.automatizaciones_aplicadas = [];
+    }
 
-    // Actualizar pendientes (solo los FALLO).
-    const pendientes = historial.filter(r => r.estado === 'FALLO');
-    escribirJSON(FILE_PENDIENTES, pendientes);
+    const { error } = await supabase
+        .from('sps_facturas')
+        .upsert(payload, { onConflict: 'id' });
+        
+    if (error) {
+        console.error(`⚠️ Error guardando factura ${id} en Supabase:`, error.message);
+    }
 }
 
-// Guarda snapshot de una corrida individual con timestamp.
-function guardarCorrida(resumen) {
-    ensureDir();
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const file = path.join(LOG_DIR, `corrida_${stamp}.json`);
-    escribirJSON(file, { timestamp: new Date().toISOString(), ...resumen });
-    return file;
+async function guardarCorrida(resumen) {
+    const payload = {
+        total: resumen.total || 0,
+        ok: resumen.ok || 0,
+        fail: resumen.fail || 0,
+        resultados: resumen.detalle || []
+    };
+    
+    const { data, error } = await supabase
+        .from('sps_corridas')
+        .insert(payload)
+        .select('id')
+        .single();
+        
+    if (error) {
+        console.error('⚠️ Error guardando corrida en Supabase:', error.message);
+    }
+    
+    return data ? data.id : null;
 }
 
-// Genera el reporte de "errores de maestras Siesa" para que contabilidad/inventario actúe.
-function generarReporteMaestras() {
-    const historial = leerJSON(FILE_PROCESADAS);
-    const fallidas = historial.filter(r => r.estado === 'FALLO' && r.error);
+async function generarReporteMaestras() {
+    // Buscar facturas fallidas que tengan error jsonb
+    const { data: fallidas, error } = await supabase
+        .from('sps_facturas')
+        .select('consec, tipo, error')
+        .eq('estado', 'FALLO')
+        .not('error', 'is', null);
 
-    // Agrupar por categoría > valor específico.
-    const items = new Set();
-    const ums = new Set();
-    const equivalencias = new Set();
-    const puntosEnvio = new Set();
-    const sucursales = new Set();
-    const otros = [];
+    if (error) return;
+
+    const mensajesNuevos = new Set();
+    const mapeo = [];
 
     for (const f of fallidas) {
-        for (const d of (f.error.detalle || [])) {
+        if (!f.error || !f.error.detalle) continue;
+        for (const d of f.error.detalle) {
             const txt = (d.f_detalle || '').toLowerCase();
             const val = (d.f_valor || '').trim();
             if (!val) continue;
-            if (txt.includes('el item') && txt.includes('no existe')) items.add(val);
-            else if (txt.includes('unidad de medida')) ums.add(val);
-            else if (txt.includes('no existe equivalencia')) equivalencias.add(val);
-            else if (txt.includes('punto de envio')) puntosEnvio.add(val);
-            else if (txt.includes('sucursal')) sucursales.add(val);
-            else otros.push(`[${f.tipo} ${f.consec}] ${d.f_detalle} (${val})`);
+            
+            let msg = '';
+            if (txt.includes('el item') && txt.includes('no existe')) msg = `ITEM MAESTRA FALTANTE: ${val}`;
+            else if (txt.includes('unidad de medida')) msg = `UM INEXISTENTE: ${val}`;
+            else if (txt.includes('no existe equivalencia')) msg = `EQUIVALENCIA FALTANTE: ${val}`;
+            else if (txt.includes('punto de envio')) msg = `PUNTO ENVIO FALTANTE: ${val}`;
+            else if (txt.includes('sucursal')) msg = `SUCURSAL FALTANTE: ${val}`;
+            else continue; // Solo nos interesan maestras puras
+
+            mensajesNuevos.add(msg);
+            mapeo.push({ consec: `${f.tipo} ${f.consec}`, msg });
         }
     }
 
-    const lineas = [];
-    lineas.push('=================================================');
-    lineas.push(' REPORTE DE MAESTRAS FALTANTES EN SIESA QA');
-    lineas.push(` Generado: ${new Date().toISOString()}`);
-    lineas.push(' Acción: enviar al equipo de contabilidad/inventario');
-    lineas.push('=================================================\n');
+    if (mensajesNuevos.size === 0) return;
 
-    lineas.push(`ITEMS QUE NO EXISTEN EN MAESTRA (${items.size}):`);
-    [...items].sort().forEach(i => lineas.push(`  - ${i}`));
-    lineas.push('');
+    // Obtener los actuales
+    const { data: actuales } = await supabase.from('sps_errores_maestras').select('mensaje');
+    const setActuales = new Set((actuales || []).map(a => a.mensaje));
 
-    lineas.push(`UNIDADES DE MEDIDA QUE NO EXISTEN (${ums.size}):`);
-    [...ums].sort().forEach(u => lineas.push(`  - ${u}`));
-    lineas.push('');
-
-    lineas.push(`EQUIVALENCIAS FALTANTES (${equivalencias.size}):`);
-    [...equivalencias].sort().forEach(e => lineas.push(`  - ${e}`));
-    lineas.push('');
-
-    lineas.push(`SUCURSALES FALTANTES (${sucursales.size}):`);
-    [...sucursales].sort().forEach(s => lineas.push(`  - ${s}`));
-    lineas.push('');
-
-    lineas.push(`PUNTOS DE ENVÍO FALTANTES (${puntosEnvio.size}):`);
-    [...puntosEnvio].sort().forEach(p => lineas.push(`  - ${p}`));
-    lineas.push('');
-
-    if (otros.length > 0) {
-        lineas.push(`OTROS ERRORES (${otros.length}):`);
-        otros.forEach(o => lineas.push(`  - ${o}`));
+    const inserts = [];
+    for (const msg of mensajesNuevos) {
+        if (!setActuales.has(msg)) {
+            const m = mapeo.find(x => x.msg === msg);
+            inserts.push({ mensaje: msg, consec: m ? m.consec : null });
+        }
     }
 
-    ensureDir();
-    fs.writeFileSync(FILE_ERRORES_MAESTRAS, lineas.join('\n'), 'utf8');
-    return FILE_ERRORES_MAESTRAS;
+    if (inserts.length > 0) {
+        await supabase.from('sps_errores_maestras').insert(inserts);
+    }
 }
 
 module.exports = {
+    supabase,
     obtenerConsecsExitosos,
     registrarResultado,
     guardarCorrida,
     generarReporteMaestras,
     categorizarError,
-    parsearError,
-    LOG_DIR,
-    FILE_PROCESADAS,
-    FILE_PENDIENTES,
-    FILE_ERRORES_MAESTRAS
+    parsearError
 };

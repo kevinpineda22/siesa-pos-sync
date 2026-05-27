@@ -1,6 +1,5 @@
 require('dotenv').config();
 const axios = require('axios');
-const fs = require('fs');
 
 // Función para formatear fecha de "2023-10-13T00:00:00" a "20231013"
 function formatearFechaSiesa(fechaISO) {
@@ -148,9 +147,7 @@ async function probarSincronizacion(nitsRequeridos = null) {
 
         console.log(`Se armaron ${payloadSiesa.Terceros.length} Terceros y ${payloadSiesa.Clientes.length} Clientes.`);
 
-        // Guardar el JSON generado en un archivo local para que el usuario pueda revisarlo
-        fs.writeFileSync('clientes_enviados_100.json', JSON.stringify(payloadSiesa, null, 2));
-        console.log('\n✅ Archivo "clientes_enviados_100.json" generado en esta carpeta para que puedas corroborar en Siesa.');
+        // Se omite respaldo local (ahora todo se persiste en Supabase via logger.js)
 
         console.log('\n----------------------------------------------------');
         console.log('3. Haciendo el POST MASIVO a Siesa QA...');

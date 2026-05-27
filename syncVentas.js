@@ -1,5 +1,4 @@
 const axios = require('axios');
-const fs = require('fs');
 const { syncPOS } = require('./syncPOS');
 const logger = require('./logger');
 require('dotenv').config();
@@ -191,6 +190,8 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
                 }
             }
         }
+        console.log(`🔎 [CPE] Error Siesa item raw: ${match[1]}, errorIdStr: ${errorIdStr}, itemsMap keys (top 5): ${Object.keys(itemsMap).slice(0,5).join(',')}`);
+        console.log(`🔎 [CPE] Match test - itemsMap["${errorIdStr}"]=${itemsMap[errorIdStr]!==undefined}, itemsMap[${parseInt(errorIdStr)}]=${itemsMap[parseInt(errorIdStr)]!==undefined}`);
         console.log(`Procesando error item Siesa: ${match[1]}, encontrado idItem Connekta: ${idItem}`);
         if (!idItem) {
             console.warn(`⚠️ No se pudo mapear el item ${errorIdStr} a un id_item de Connekta.`);
@@ -658,8 +659,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
     // Función que envía 1 factura a Siesa con reintento automático ante cliente/inventario faltante.
     const enviarFacturaASiesa = async (consecutivo, payload, detallesFactura, tipoDoctoSiesa, meta) => {
         const automatizaciones = [];
-        const registrar = (resultado) => {
-            logger.registrarResultado(resultado, { ...meta, automatizaciones });
+        const registrar = async (resultado) => {
+            await logger.registrarResultado(resultado, { ...meta, automatizaciones });
             return resultado;
         };
         try {
@@ -671,11 +672,15 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
                 }
             });
 
-            return registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: true, mensaje: responseSiesa.data.mensaje || 'OK' });
+            return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: true, mensaje: responseSiesa.data.mensaje || 'OK' });
         } catch (error) {
             if (error.response && error.response.data && error.response.data.detalle) {
                 const errores = error.response.data.detalle;
-                const faltaCliente = Array.isArray(errores) && errores.some(e => e.f_detalle && e.f_detalle.toLowerCase().includes('cliente no existe'));
+                const faltaCliente = Array.isArray(errores) && errores.some(e => e.f_detalle && (
+                    e.f_detalle.toLowerCase().includes('cliente no existe') ||
+                    e.f_detalle.toLowerCase().includes('sucursal del cliente') ||
+                    e.f_detalle.toLowerCase().includes('sucursal de la')
+                ));
                 const faltaInventario = Array.isArray(errores) && errores.some(e => e.f_detalle && e.f_detalle.includes('Item sin cantidad disponible'));
 
                 if (faltaCliente) {
@@ -686,7 +691,11 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
                     // "Documento venta comercial: El cliente no existe.".
                     const nitsFaltantes = [...new Set(
                         errores
-                            .filter(e => e.f_detalle && e.f_detalle.toLowerCase().includes('cliente no existe'))
+                            .filter(e => e.f_detalle && (
+                                e.f_detalle.toLowerCase().includes('cliente no existe') ||
+                                e.f_detalle.toLowerCase().includes('sucursal del cliente') ||
+                                e.f_detalle.toLowerCase().includes('sucursal de la')
+                            ))
                             .map(e => {
                                 // f_valor puede venir como "42683051" o "42683051-001" (NIT-sucursal).
                                 // Nos quedamos solo con el NIT base (antes del primer guión).
@@ -723,22 +732,22 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
                                 'Content-Type': 'application/json'
                             }
                         });
-                        return registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: true, mensaje: (retryResponse.data.mensaje || 'OK') + ' (tras automatización)' });
+                        return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: true, mensaje: (retryResponse.data.mensaje || 'OK') + ' (tras automatización)' });
                     } catch (retryError) {
                         const detalle = retryError.response?.data ? JSON.stringify(retryError.response.data) : retryError.message;
-                        return registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: `Reintento falló: ${detalle}` });
+                        return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: `Reintento falló: ${detalle}` });
                     }
                 }
-                return registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: JSON.stringify(error.response.data) });
+                return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: JSON.stringify(error.response.data) });
             }
-            return registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: error.message });
+            return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: error.message });
         }
     };
 
     // Construir la lista de tareas (1 por factura aplicable a este paso).
-    // Aplica idempotencia: si una factura YA está como OK en logs/facturas_procesadas.json
+    // Aplica idempotencia: si una factura YA está como OK en Supabase
     // (para este tipo CFE/CNC), se omite silenciosamente. Las que están en FALLO sí se reintentan.
-    const consecsExitosos = logger.obtenerConsecsExitosos();
+    const consecsExitosos = await logger.obtenerConsecsExitosos();
     const omitidas = [];
     const tareas = [];
     facturasOrdenadas.forEach(consecutivo => {
@@ -782,8 +791,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
         return [];
     }
 
-    // Guardar el último payload generado para auditoría (solo el último por simplicidad).
-    fs.writeFileSync('factura_generada.json', JSON.stringify(tareas[tareas.length - 1].payload, null, 2));
+    // Se omite respaldo local (ahora todo se persiste en Supabase via logger.js)
 
     // Procesar con pool de concurrencia configurable.
     const CONCURRENCIA = Math.max(1, parseInt(process.env.CONCURRENCIA || '2'));
@@ -795,7 +803,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
         const resLote = await Promise.allSettled(
             lote.map(t => enviarFacturaASiesa(t.consecutivo, t.payload, t.detalles, t.tipo, t.meta))
         );
-        resLote.forEach((r, idx) => {
+        for (let idx = 0; idx < resLote.length; idx++) {
+            const r = resLote[idx];
             if (r.status === 'fulfilled') {
                 resultados.push(r.value);
                 const icon = r.value.ok ? '✅' : '❌';
@@ -803,11 +812,11 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
             } else {
                 const t = lote[idx];
                 const fallo = { consecutivo: t.consecutivo, tipo: t.tipo, ok: false, mensaje: r.reason?.message || 'Error desconocido' };
-                logger.registrarResultado(fallo, t.meta);
+                await logger.registrarResultado(fallo, t.meta);
                 resultados.push(fallo);
                 console.log(`❌ [${t.tipo} ${t.consecutivo}] ${r.reason?.message || 'Error desconocido'}`);
             }
-        });
+        }
     }
 
     return resultados;
@@ -828,6 +837,16 @@ module.exports = { syncVentas: async (opciones = {}) => {
     if (limiteOverride) {
         process.env.LIMITE_FACTURAS = limiteOverride;
         console.log(`🎛️  Override LIMITE_FACTURAS=${limiteOverride} (solo esta corrida)`);
+    }
+
+    // Si el dashboard pidió un "limite" (modo cantidad) o no pasó consecs explícitos,
+    // ignoramos CONSEC_ESPECIFICOS del .env para esta corrida. Así el .env deja de
+    // "secuestrar" las corridas normales. Se restaura en el finally.
+    const consecEnvOriginal = process.env.CONSEC_ESPECIFICOS;
+    const ignorarConsecEnv = limiteOverride !== null || !consecsOverride;
+    if (ignorarConsecEnv && consecEnvOriginal) {
+        process.env.CONSEC_ESPECIFICOS = '';
+        console.log(`🎛️  CONSEC_ESPECIFICOS del .env ignorado (solo esta corrida)`);
     }
     try {
 
@@ -855,18 +874,17 @@ module.exports = { syncVentas: async (opciones = {}) => {
 
     // Snapshot de la corrida y reporte de maestras faltantes (Siesa contable/inventario).
     try {
-        const archivoCorrida = logger.guardarCorrida({
+        const idCorrida = await logger.guardarCorrida({
             total: todos.length,
             ok: okCount,
             fail: failCount,
-            resultados: todos
+            detalle: todos
         });
-        const archivoMaestras = logger.generarReporteMaestras();
-        console.log(`📝 Logs actualizados:`);
-        console.log(`   - Histórico: logs/facturas_procesadas.json`);
-        console.log(`   - Pendientes: logs/facturas_pendientes.json`);
-        console.log(`   - Snapshot:  ${archivoCorrida.replace(/.*[\\\/]/, 'logs/')}`);
-        console.log(`   - Maestras Siesa: ${archivoMaestras.replace(/.*[\\\/]/, 'logs/')}\n`);
+        await logger.generarReporteMaestras();
+        console.log(`📝 Logs actualizados en Supabase:`);
+        console.log(`   - Corrida ID: ${idCorrida}`);
+        console.log(`   - Histórico de facturas actualizado`);
+        console.log(`   - Maestras Siesa faltantes sincronizadas\n`);
     } catch (e) {
         console.warn(`⚠️ Error guardando logs: ${e.message}`);
     }
@@ -877,6 +895,10 @@ module.exports = { syncVentas: async (opciones = {}) => {
         if (limiteOverride) {
             if (limiteOriginal === undefined) delete process.env.LIMITE_FACTURAS;
             else process.env.LIMITE_FACTURAS = limiteOriginal;
+        }
+        // Restaurar CONSEC_ESPECIFICOS al valor original.
+        if (ignorarConsecEnv && consecEnvOriginal) {
+            process.env.CONSEC_ESPECIFICOS = consecEnvOriginal;
         }
     }
 }};

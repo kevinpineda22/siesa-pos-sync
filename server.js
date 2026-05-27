@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
@@ -14,14 +15,9 @@ app.use(cors());
 app.use(express.json());
 
 // Helper: lee un JSON del directorio de logs sin reventar si no existe.
+// (Ya no se usa localmente, pero se deja por retrocompatibilidad con scripts viejos si los hay)
 function leerLog(nombreArchivo) {
-    try {
-        const ruta = path.join(logger.LOG_DIR, nombreArchivo);
-        if (!fs.existsSync(ruta)) return [];
-        return JSON.parse(fs.readFileSync(ruta, 'utf8'));
-    } catch (err) {
-        return [];
-    }
+    return [];
 }
 
 // Endpoints (Rutas)
@@ -86,63 +82,47 @@ app.post('/api/sync-ventas', async (req, res) => {
  *   errores_maestras: "texto plano del reporte para contabilidad"
  * }
  */
-app.get('/api/logs', (req, res) => {
+app.get('/api/logs', async (req, res) => {
     try {
         const { estado, tipo, categoria, consec, limit, solo_pendientes } = req.query;
 
-        let procesadas = leerLog('facturas_procesadas.json');
-        const pendientes = leerLog('facturas_pendientes.json');
+        let query = logger.supabase.from('sps_facturas').select('*');
 
         // Filtros
-        if (consec) {
-            procesadas = procesadas.filter(f => String(f.consec) === String(consec));
-        }
-        if (solo_pendientes === '1' || estado === 'FALLO') {
-            procesadas = procesadas.filter(f => f.estado === 'FALLO');
-        } else if (estado === 'OK') {
-            procesadas = procesadas.filter(f => f.estado === 'OK');
-        }
-        if (tipo) {
-            procesadas = procesadas.filter(f => f.tipo === tipo.toUpperCase());
-        }
-        if (categoria) {
-            procesadas = procesadas.filter(f =>
-                (f.categoria_error || '').toUpperCase() === categoria.toUpperCase()
-            );
-        }
+        if (consec) query = query.eq('consec', consec);
+        if (solo_pendientes === '1' || estado === 'FALLO') query = query.eq('estado', 'FALLO');
+        else if (estado === 'OK') query = query.eq('estado', 'OK');
+        if (tipo) query = query.eq('tipo', tipo.toUpperCase());
+        if (categoria) query = query.eq('categoria_error', categoria.toUpperCase());
 
-        // Ordena por última corrida descendente (más reciente primero)
-        procesadas.sort((a, b) => {
-            const fa = new Date(a.ultima_corrida || 0).getTime();
-            const fb = new Date(b.ultima_corrida || 0).getTime();
-            return fb - fa;
-        });
-
-        // Limite
+        // Orden y limite
         const max = limit ? parseInt(limit, 10) : 200;
-        const truncadas = isNaN(max) || max <= 0 ? procesadas : procesadas.slice(0, max);
+        query = query.order('ultima_corrida', { ascending: false }).limit(isNaN(max) || max <= 0 ? 200 : max);
+
+        const { data: truncadas, error } = await query;
+        if (error) throw error;
 
         // Resumen rápido
-        const todas = leerLog('facturas_procesadas.json');
+        const { count: total } = await logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true });
+        const { count: ok } = await logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'OK');
+        const { count: fallo } = await logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'FALLO');
+        
+        const { data: ultima } = await logger.supabase.from('sps_facturas').select('ultima_corrida').order('ultima_corrida', { ascending: false }).limit(1).single();
+
         const resumen = {
-            total: todas.length,
-            ok: todas.filter(f => f.estado === 'OK').length,
-            fallo: todas.filter(f => f.estado === 'FALLO').length,
-            pendientes_unicos: pendientes.length,
-            ultima_corrida: todas.reduce((max, f) => {
-                const t = f.ultima_corrida || '';
-                return t > max ? t : max;
-            }, '')
+            total: total || 0,
+            ok: ok || 0,
+            fallo: fallo || 0,
+            pendientes_unicos: fallo || 0,
+            ultima_corrida: ultima ? ultima.ultima_corrida : ''
         };
 
-        // Reporte de maestras (texto plano para contabilidad)
-        let erroresMaestras = '';
-        try {
-            const ruta = path.join(logger.LOG_DIR, 'errores_maestras_siesa.txt');
-            if (fs.existsSync(ruta)) {
-                erroresMaestras = fs.readFileSync(ruta, 'utf8');
-            }
-        } catch (_) { /* opcional */ }
+        // Reporte de maestras
+        const { data: maestras } = await logger.supabase.from('sps_errores_maestras').select('*').order('fecha', { ascending: false });
+        let erroresMaestras = 'Reporte de Maestras Faltantes en Siesa\\n===============================\\n';
+        if (maestras && maestras.length > 0) {
+            erroresMaestras += maestras.map(m => `[${new Date(m.fecha).toLocaleDateString()}] ${m.consec ? '('+m.consec+') ' : ''}${m.mensaje}`).join('\\n');
+        }
 
         res.status(200).json({
             success: true,
@@ -160,29 +140,24 @@ app.get('/api/logs', (req, res) => {
  * GET /api/logs/corridas
  * Lista los snapshots de corridas individuales (archivos corrida_*.json).
  */
-app.get('/api/logs/corridas', (req, res) => {
+app.get('/api/logs/corridas', async (req, res) => {
     try {
-        if (!fs.existsSync(logger.LOG_DIR)) {
-            return res.status(200).json({ success: true, data: [] });
-        }
-        const archivos = fs.readdirSync(logger.LOG_DIR)
-            .filter(f => f.startsWith('corrida_') && f.endsWith('.json'))
-            .sort()
-            .reverse(); // más reciente primero
-
         const limit = req.query.limit ? parseInt(req.query.limit, 10) : 20;
-        const seleccion = archivos.slice(0, limit);
+        const { data, error } = await logger.supabase
+            .from('sps_corridas')
+            .select('*')
+            .order('fecha', { ascending: false })
+            .limit(limit);
 
-        const data = seleccion.map(nombre => {
-            try {
-                const contenido = JSON.parse(fs.readFileSync(path.join(logger.LOG_DIR, nombre), 'utf8'));
-                return { archivo: nombre, ...contenido };
-            } catch (_) {
-                return { archivo: nombre, error: 'no se pudo parsear' };
-            }
-        });
+        if (error) throw error;
 
-        res.status(200).json({ success: true, count: data.length, data });
+        // Formatear para que el frontend lo lea igual (espera {archivo, total, ok, fail, ...})
+        const dataFormateada = data.map(c => ({
+            archivo: `corrida_${new Date(c.fecha).toISOString().replace(/[:.]/g, '-').slice(0, 19)}.json`,
+            ...c
+        }));
+
+        res.status(200).json({ success: true, count: dataFormateada.length, data: dataFormateada });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
