@@ -131,14 +131,14 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
     const itemsMap = {};
     itemsFactura.forEach(det => { itemsMap[det.id_item] = det; });
 
-    // Consultar inventario para obtener costo promedio real
+    // Consultar inventario para obtener disponibilidad por bodega
     let inventarioDatos = [];
     try {
-        console.log("🔍 Consultando costos promedio en Siesa (merkahorro_consulta_inventario, paginado)...");
+        console.log("🔍 Consultando inventario en Siesa (merkahorro_consulta_inventario, paginado)...");
         inventarioDatos = await fetchInventarioCompleto();
         console.log(`✅ Inventario cargado: ${inventarioDatos.length} registros totales`);
     } catch (e) {
-        console.warn("⚠️ No se pudo obtener el inventario, se usará el costo estimado.");
+        console.warn("⚠️ No se pudo obtener el inventario.");
     }
     const inventarioMap = {};
     inventarioDatos.forEach(inv => {
@@ -147,14 +147,12 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
             const itemStr = itemId.toString();
             const bodegaVal = inv.idbodega || inv.IdBodega;
             const bodegaStr = bodegaVal ? bodegaVal.toString().trim() : 'DEFAULT';
-            const costoVal = inv.costoprom || inv.CostoProm || 0;
             const cantDisp = inv.CantidadDisponible !== undefined ? parseFloat(inv.CantidadDisponible) : (inv.Cantidad !== undefined ? parseFloat(inv.Cantidad) : 0);
             
             if (!inventarioMap[itemStr]) inventarioMap[itemStr] = {};
-            // Guardamos el costo asegurando que no sea negativo y la cantidad disponible
             inventarioMap[itemStr][bodegaStr] = {
-                costo: Math.max(parseFloat(costoVal), 0),
-                disponible: cantDisp
+                disponible: cantDisp,
+                costo: parseFloat(inv.CostoProm || inv.costoprom || inv.Costo_Promedio || 0)
             };
         }
     });
@@ -209,54 +207,26 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
         const faltante = faltanteMatch ? Math.abs(parseFloat(faltanteMatch[1])) : 10;
         const det = itemsMap[idItem];
         const unidad = det ? det.UNIDAD_MEDIDA.trim() : "UND";
-        
+
+        // Buscar costo real desde inventarioMap (CostoProm de merkahorro_consulta_inventario)
         let costo = 0;
-        let dispQty = 0;
-        let bodegaCostoEncontrado = null;
-        
         if (inventarioMap[idItemStr]) {
-            // Obtener cantidad disponible de la bodega original del error
-            if (inventarioMap[idItemStr][bodega]) {
-                dispQty = inventarioMap[idItemStr][bodega].disponible;
-            }
-
-            // BÚSQUEDA INTELIGENTE DEL COSTO PROMEDIO:
-            // 1. Primero intentamos la bodega del error (PV001 normalmente).
-            // 2. Si no, recorremos TODAS las demás bodegas que tengan ese ítem registrado
-            //    con costo > 0 (sin importar si tienen stock).
-            // 3. Esto aprovecha que tu Query trae el inventario de toda la compañía.
+            const bodegasDisponibles = Object.keys(inventarioMap[idItemStr]);
             const bodegasPrioritarias = [bodega, 'PV001', '00301', '00201', '00701'];
-            const todasLasBodegas = Object.keys(inventarioMap[idItemStr]);
-            // Ordenamos: primero las prioritarias, luego el resto sin duplicar
-            const ordenBusqueda = [
-                ...bodegasPrioritarias,
-                ...todasLasBodegas.filter(b => !bodegasPrioritarias.includes(b))
-            ];
-
+            const ordenBusqueda = [...new Set([...bodegasPrioritarias, ...bodegasDisponibles])];
             for (const bod of ordenBusqueda) {
-                if (inventarioMap[idItemStr][bod] && inventarioMap[idItemStr][bod].costo > 0) {
-                    costo = inventarioMap[idItemStr][bod].costo;
-                    bodegaCostoEncontrado = bod;
-                    console.log(`💰 Costo encontrado para item ${idItemStr} en bodega ${bod}: ${costo}`);
+                const entry = inventarioMap[idItemStr][bod];
+                if (entry && entry.costo > 0) {
+                    costo = entry.costo;
+                    console.log(`💰 Costo item ${idItemStr} bodega ${bod}: ${costo}`);
                     break;
                 }
             }
         }
 
         if (!costo || costo <= 0) {
-            // FALLBACK MEJORADO: Como Connekta trunca a 1000 items y no permite filtrar por item específico,
-            // si el item no está en la primera página, deducimos un costo razonable a partir del precio de venta (75%).
-            // Esto evita inyectar inventario a $1 peso, lo cual destruiría el costo promedio en el ERP.
-            const precioVenta = det && det.PrecioUnitDet ? parseFloat(det.PrecioUnitDet) : 
-                               (det && det.VALOR_BRUTO && det.CANTIDAD ? parseFloat(det.VALOR_BRUTO) / parseFloat(det.CANTIDAD) : 0);
-            
-            if (precioVenta > 0) {
-                costo = precioVenta * 0.75; // Asumimos un 25% de margen comercial
-                console.warn(`⚠️ No se encontró costo en inventario para item ${idItemStr}. Se dedujo costo aproximado (75% del PV): ${costo.toFixed(2)}`);
-            } else {
-                console.warn(`⚠️ No se encontró costo en inventario ni PV para item ${idItemStr}. Se asignará costo mínimo de 1.`);
-                costo = 1;
-            }
+            console.warn(`⚠️ Sin costo real para item ${idItemStr}. Se omite del ajuste de inventario.`);
+            return;
         }
 
         const inyectar = faltanteMatch ? Math.abs(parseFloat(faltanteMatch[1])) : 10;
