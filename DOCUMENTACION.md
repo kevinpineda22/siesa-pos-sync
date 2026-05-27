@@ -733,3 +733,63 @@ Cualquier modificación al query `merkahorro_consulta_inventario` debe respetar 
 - **NO agregar `ORDER BY`** (Connekta lo prohíbe en su subconsulta interna).
 - **Mantener `f400_cant_existencia_1 > 0`** (reduce el dataset 10x).
 - **Mantener `f150_id_cia = 1`** (filtra sucursales operativas).
+
+---
+
+## 17. Estado actual del proyecto (Mayo 2026)
+
+### 17.1 Supabase (100% operativo)
+La persistencia migro completamente de archivos JSON locales a PostgreSQL en Supabase.
+
+| Tabla | Proposito | PK |
+|-------|-----------|----|
+| sps_facturas | Historial de cada factura procesada (idempotencia + auditoria) | id text (tipo:consec) |
+| sps_corridas | Snapshot de cada ejecucion | id uuid |
+| sps_errores_maestras | Errores de maestras Siesa para contabilidad | id uuid |
+
+- Se usa SUPABASE_SERVICE_KEY (rol service) para saltar RLS.
+- logger.js reescrito para usar @supabase/supabase-js con upsert().
+- Los archivos locales (logs/, erLog.js, actura_generada.json, clientes_enviados_100.json) fueron eliminados.
+
+### 17.2 Vercel (desplegado)
+URL: https://siesa-pos-sync.vercel.app
+
+Archivos de configuracion:
+- ercel.json: usa @vercel/node como builder, apunta a server.js.
+- server.js: exporta module.exports = app para Vercel serverless. En local usa pp.listen() envuelto en if (!process.env.VERCEL).
+
+**Para hacer deploy:**
+1. git push origin main (Vercel auto-detects el push y redeployea).
+2. Las variables de entorno (CONNI_KEY, SUPABASE_URL, etc.) se configuran en el dashboard de Vercel.
+
+### 17.3 Frontend React
+El proyecto frontend vive en: \C:\Users\PC\Desktop\merkaPage\Pagina-web_React\
+
+- Pagina: src/pages/SiesaPosSync/SiesaPosSync.jsx
+- Servicio: src/services/siesaPosSyncService.js
+- La URL del backend se configura via variable de entorno VITE: VITE_SIESA_POS_SYNC_URL
+- En local usa http://localhost:4000, en produccion la URL de Vercel.
+
+### 17.4 Costo promedio en ajustes de inventario (pendiente de decision)
+
+#### Como funciona hoy
+En justarInventario() (CPE, dentro de syncVentas.js):
+
+1. Llama a etchCostosPromedio() que usa la query merkahorro_costo_promedio_dev.
+2. merkahorro_costo_promedio_dev consulta \	132_mc_items_instalacion.f132_costo_prom_uni\.
+3. Si el item tiene costo > 0, lo usa.
+4. Si no tiene costo, omite el item del ajuste (NO hay fallback de estimacion).
+
+#### Problema detectado
+La query merkahorro_costo_promedio_dev devuelve 100,000 registros pero **todos con CostoPromInst = 0.0**. No tiene datos utiles de costo.
+
+La query existente merkahorro_consulta_inventario SI tiene costos reales (CostoProm con valores como 4066.66, 2700, etc.) desde \	400_cm_existencia.f400_costo_prom_uni\, con 91 de cada 100 registros con costo > 0.
+
+#### Opciones
+- **A)** Descartar merkahorro_costo_promedio_dev y usar el CostoProm de merkahorro_consulta_inventario como fuente primaria, eliminando el fallback del 75%.
+- **B)** El DBA de Siesa debe modificar la query merkahorro_costo_promedio_dev para que traiga costos reales (posiblemente desde \	400_cm_existencia\ en lugar de \	132_mc_items_instalacion\).
+
+### 17.5 Pendientes
+- [ ] Decidir que fuente de costo promedio usar (opcion A vs B).
+- [ ] Hacer deploy del frontend React a Vercel con la variable VITE_SIESA_POS_SYNC_URL.
+- [ ] Implementar job programado (cron) si se requiere sincronizacion automatica.
