@@ -374,8 +374,8 @@ async function generarPDF(datos) {
     // =====================================================================
     // FOOTER (todas las páginas)
     // =====================================================================
-    const totalPaginas = doc.bufferedPageRange().count;
-    for (let i = 0; i < totalPaginas; i++) {
+    const pageRange = doc.bufferedPageRange();
+    for (let i = pageRange.start; i < pageRange.start + pageRange.count; i++) {
         doc.switchToPage(i);
 
         // Línea footer
