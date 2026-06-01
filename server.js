@@ -4,6 +4,7 @@ const cors = require('cors');
 const { syncPOS } = require('./syncPOS');
 const { syncVentas } = require('./syncVentas');
 const logger = require('./logger');
+const reportes = require('./reportes');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -178,6 +179,86 @@ app.get('/api/logs/corridas', async (req, res) => {
     }
 });
 
+// =============================================================================
+// ENDPOINTS DE REPORTES
+// =============================================================================
+
+/**
+ * POST /api/reportes/generar
+ * Genera y envía el reporte PDF por correo.
+ *
+ * Body opcional:
+ *   { periodo: 'diario' | 'semanal' }
+ *   { fecha_inicio, fecha_fin }  → override de fechas
+ *   { destinatarios: [...] }     → override de destinatarios
+ *
+ * Si no se envía nada, usa la configuración guardada en Supabase.
+ */
+app.post('/api/reportes/generar', async (req, res) => {
+    try {
+        const { periodo, fecha_inicio, fecha_fin, destinatarios } = req.body || {};
+        console.log('--- 📊 Generando reporte PDF ---');
+        const resultado = await reportes.generarYEnviar({
+            periodo,
+            fechaInicio: fecha_inicio,
+            fechaFin: fecha_fin,
+            destinatarios,
+        });
+        res.status(200).json({ success: true, data: resultado });
+    } catch (error) {
+        console.error('❌ Error generando reporte:', error.message);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * GET /api/reportes/config
+ * Devuelve la configuración actual de reportes.
+ */
+app.get('/api/reportes/config', async (req, res) => {
+    try {
+        const config = await reportes.getConfig();
+        res.status(200).json({ success: true, data: config });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * POST /api/reportes/config
+ * Guarda la configuración de reportes.
+ *
+ * Body:
+ *   { destinatarios: ["correo@dominio.com", ...],
+ *     programacion: 'diario' | 'semanal',
+ *     hora_envio: '08:00',
+ *     dia_semana: 1,
+ *     activo: true }
+ */
+app.post('/api/reportes/config', async (req, res) => {
+    try {
+        const config = await reportes.saveConfig(req.body);
+        console.log('--- 💾 Configuración de reportes guardada ---');
+        res.status(200).json({ success: true, data: config });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * GET /api/reportes/historial
+ * Devuelve el historial de reportes enviados.
+ */
+app.get('/api/reportes/historial', async (req, res) => {
+    try {
+        const limit = req.query.limit ? parseInt(req.query.limit, 10) : 20;
+        const historial = await reportes.getHistorial(limit);
+        res.status(200).json({ success: true, count: historial.length, data: historial });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // Iniciar el servidor (solo en local; en Vercel corre como serverless)
 if (!process.env.VERCEL) {
     app.listen(PORT, () => {
@@ -190,6 +271,10 @@ if (!process.env.VERCEL) {
         console.log(`- POST http://localhost:${PORT}/api/sync-ventas`);
         console.log(`- GET  http://localhost:${PORT}/api/logs`);
         console.log(`- GET  http://localhost:${PORT}/api/logs/corridas`);
+        console.log(`- POST http://localhost:${PORT}/api/reportes/generar`);
+        console.log(`- GET  http://localhost:${PORT}/api/reportes/config`);
+        console.log(`- POST http://localhost:${PORT}/api/reportes/config`);
+        console.log(`- GET  http://localhost:${PORT}/api/reportes/historial`);
         console.log(`=================================================`);
     });
 }

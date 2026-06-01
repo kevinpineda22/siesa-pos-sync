@@ -793,3 +793,128 @@ La query existente merkahorro_consulta_inventario SI tiene costos reales (CostoP
 - [ ] Decidir que fuente de costo promedio usar (opcion A vs B).
 - [ ] Hacer deploy del frontend React a Vercel con la variable VITE_SIESA_POS_SYNC_URL.
 - [ ] Implementar job programado (cron) si se requiere sincronizacion automatica.
+
+---
+
+## 18. Sistema de Reportes Profesionales (Nuevo)
+
+A partir de junio 2026 el sistema incluye un módulo de **reportes profesionales en PDF** con envío automático por correo SMTP.
+
+### 18.1 Visión general
+
+El módulo `reportes.js` genera un documento PDF profesional con:
+- **Header corporativo** de Merkahorro
+- **4 tarjetas KPI**: Procesadas, Exitosas, Fallidas, Efectividad
+- **Resumen detallado** del período (desglose CFE/CNC/CPE, total neto)
+- **Tabla de facturas** con estado, cliente, neto, intentos
+- **Sección de automatizaciones** aplicadas (clientes creados, inventario inyectado)
+- **Errores de maestras** que requieren acción manual del equipo Siesa
+- **Footer** con marca de agua y timestamp
+
+El PDF se envía como adjunto por **SMTP corporativo** con un cuerpo HTML profesional.
+
+### 18.2 Arquitectura
+
+```
+Frontend (ReportesPanel.jsx)                    Backend (reportes.js)
+┌─────────────────────┐                    ┌──────────────────────┐
+│ Configuración       │  POST /config      │  saveConfig()        │
+│ · Destinatarios     │ ──────────────────→│  · Guarda en Supabase│
+│ · Programación      │ ←──────────────────│  sps_config_reportes │
+│ · Hora / Día        │                    └──────────────────────┘
+│ Estado ON/OFF       │
+├─────────────────────┤                    ┌──────────────────────┐
+│ Generar Reporte     │  POST /generar     │  generarYEnviar()     │
+│ · Hoy               │ ──────────────────→│  · Consulta facturas  │
+│ · Esta semana       │ ←──────────────────│  · Genera PDF (pdfkit)│
+│ · Personalizado     │                    │  · Envía SMTP         │
+├─────────────────────┤                    │  · Guarda historial   │
+│ Historial           │  GET /historial    └──────────────────────┘
+│ · Fecha, período    │ ──────────────────→
+│ · KPIs, estado      │ ←──────────────────
+│ · Expandible        │
+└─────────────────────┘
+```
+
+### 18.3 Endpoints del API
+
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| `POST` | `/api/reportes/generar` | Genera y envía el reporte PDF. Body opcional: `{ periodo, fecha_inicio, fecha_fin, destinatarios }` |
+| `GET`  | `/api/reportes/config`  | Obtiene la configuración actual (destinatarios, programación, hora) |
+| `POST` | `/api/reportes/config`  | Guarda la configuración. Body: `{ destinatarios, programacion, hora_envio, dia_semana, activo }` |
+| `GET`  | `/api/reportes/historial` | Historial de reportes enviados. Query: `?limit=20` |
+
+### 18.4 Variables de entorno (.env)
+
+Adicionales a las existentes, se requieren estas variables para el envío SMTP:
+
+```env
+# Servidor SMTP corporativo
+SMTP_HOST=smtp.correo-empresa.com
+SMTP_PORT=587
+SMTP_SECURE=false      # true para 465, false para 587
+SMTP_USER=tu-correo@empresa.com
+SMTP_PASS=tu-contraseña
+SMTP_FROM=reportes@empresa.com  # Opcional, default = SMTP_USER
+```
+
+Para la creación de tablas en Supabase se necesita adicionalmente:
+
+```env
+# Connection string de PostgreSQL (para setup inicial)
+DATABASE_URL=postgresql://postgres:****@db.pitpougbnibmfrjyk.supabase.co:5432/postgres
+```
+
+### 18.5 Setup inicial
+
+1. **Crear tablas en Supabase**:
+   ```bash
+   node setup_reportes.js
+   ```
+   O manualmente desde el SQL Editor de Supabase con el contenido de `setup_reportes.sql`.
+
+2. **Configurar SMTP** en el archivo `.env` (ver sección 18.4).
+
+3. **Configurar destinatarios** desde el frontend (pestaña "Reportes" → Configuración).
+
+4. **Programar envío automático** (opcional):
+   - Usar Vercel Cron Jobs (si está disponible)
+   - O un servicio externo como cron-job.org que llame a `POST /api/reportes/generar` periódicamente.
+   - El frontend permite activar/desactivar la programación.
+
+### 18.6 Archivos del módulo
+
+| Archivo | Ubicación | Propósito |
+|---------|-----------|-----------|
+| `reportes.js` | Backend (raíz) | Lógica de generación PDF (pdfkit) + envío SMTP (nodemailer) + configuración/historial en Supabase |
+| `setup_reportes.js` | Backend (raíz) | Script para crear tablas en Supabase automáticamente |
+| `setup_reportes.sql` | Backend (raíz) | SQL para crear tablas manualmente desde el Supabase Dashboard |
+| `ReportesPanel.jsx` | Frontend (`src/pages/SiesaPosSync/`) | Componente React con 3 tabs: Configuración, Generar, Historial |
+| `ReportesPanel.css` | Frontend (`src/pages/SiesaPosSync/`) | Estilos consistentes con el dashboard principal (dark mode, verde/azul) |
+
+### 18.7 Dependencias nuevas
+
+| Paquete | Versión | Uso |
+|---------|---------|-----|
+| `pdfkit` | ^0.15.x | Generación de PDF profesional en servidor |
+| `nodemailer` | ^6.x | Envío de correos SMTP con adjunto PDF |
+| `pg` | ^8.x | Conexión directa a PostgreSQL para setup de tablas |
+
+### 18.8 Personalización del reporte
+
+El PDF generado por `reportes.js` usa estas constantes de diseño editables:
+
+```javascript
+const COLORS = {
+    verde:      '#2ecc71',
+    azul:       '#210d65',
+    rojo:       '#e74c3c',
+    gris:       '#7f8c8d',
+    fondo:      '#fafafa',
+    texto:      '#2c3e50',
+    textoSec:   '#7f8c8d',
+    borde:      '#dcdde1',
+    blanco:     '#ffffff',
+};
+```
