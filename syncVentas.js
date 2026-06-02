@@ -11,6 +11,7 @@ const URL_VENTAS_PAGOS = `https://servicios.siesacloud.com/api/connekta/v3/ejecu
 const URL_VENTAS_IMPUESTOS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_imptos_pos_dev`;
 const URL_CAJAS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_cajas_pos_dev`;
 const URL_CONSULTA_INVENTARIO_BASE = `https://serviciosqa.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_consulta_inventario`;
+const URL_COSTO_PROMEDIO_BASE = `https://serviciosqa.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_costo_promedio_dev`;
 const INVENTARIO_TAM_PAGINA = parseInt(process.env.INVENTARIO_TAM_PAGINA || '1000');
 const INVENTARIO_MAX_PAGINAS = parseInt(process.env.INVENTARIO_MAX_PAGINAS || '100');
 
@@ -60,7 +61,7 @@ async function fetchInventarioCompleto() {
     let reintentosConsecutivos = 0;
     const MAX_REINTENTOS = 3;
 
-    while (pagina <= totalPaginasReales && pagina <= INVENTARIO_MAX_PAGINAS) {
+    while (pagina <= totalPaginasReales && pagina <= 2000) {
         const url = `${URL_CONSULTA_INVENTARIO_BASE}&paginacion=numPag=${pagina}|tamPag=${INVENTARIO_TAM_PAGINA}`;
         
         try {
@@ -79,7 +80,7 @@ async function fetchInventarioCompleto() {
                 if (pagina === 1) {
                     console.log(`   🔎 [debug] Claves de respuesta: ${JSON.stringify(detalleKeys)}`);
                 }
-                const keyTotalPag = detalleKeys.find(k => k.toLowerCase().includes('total') && k.toLowerCase().includes('gina'));
+                const keyTotalPag = detalleKeys.find(k => k.toLowerCase().includes('total_p') || k.toLowerCase().includes('página') || k.toLowerCase().includes('pagina'));
                 if (keyTotalPag && data.detalle[keyTotalPag]) {
                     totalPaginasReales = parseInt(data.detalle[keyTotalPag]);
                     if (pagina === 1) console.log(`   🔎 [debug] total_páginas detectado: ${totalPaginasReales}`);
@@ -125,17 +126,147 @@ async function fetchInventarioCompleto() {
     return todas;
 }
 
+async function fetchCostoPromedioCompleto() {
+    // Carga el costo promedio por instalación, paginado y secuencial.
+    const todas = [];
+    let pagina = 1;
+    let totalPaginasReales = INVENTARIO_MAX_PAGINAS;
+    let reintentosConsecutivos = 0;
+    const MAX_REINTENTOS = 3;
+
+    while (pagina <= totalPaginasReales && pagina <= 2000) {
+        const url = `${URL_COSTO_PROMEDIO_BASE}&paginacion=numPag=${pagina}|tamPag=${INVENTARIO_TAM_PAGINA}`;
+        try {
+            const response = await axios.get(url, {
+                headers: { 'ConniKey': process.env.CONNI_KEY, 'ConniToken': process.env.CONNI_TOKEN },
+                timeout: 60000
+            });
+
+            const data = response.data;
+            let registros = [];
+            if (data.detalle && data.detalle.Datos) {
+                registros = data.detalle.Datos;
+                const detalleKeys = Object.keys(data.detalle);
+                if (pagina === 1) {
+                    console.log(`   🔎 [debug] Claves de respuesta costo: ${JSON.stringify(detalleKeys)}`);
+                }
+                const keyTotalPag = detalleKeys.find(k => k.toLowerCase().includes('total_p') || k.toLowerCase().includes('página') || k.toLowerCase().includes('pagina'));
+                if (keyTotalPag && data.detalle[keyTotalPag]) {
+                    totalPaginasReales = parseInt(data.detalle[keyTotalPag]);
+                    if (pagina === 1) console.log(`   🔎 [debug] total_páginas costo detectado: ${totalPaginasReales}`);
+                }
+            } else if (data.detalle && data.detalle.Table) {
+                registros = data.detalle.Table;
+            } else if (data.Table) {
+                registros = data.Table;
+            }
+
+            if (!registros || registros.length === 0) {
+                console.log(`   📦 Página costo ${pagina}: vacía, fin.`);
+                break;
+            }
+
+            todas.push(...registros);
+            reintentosConsecutivos = 0;
+
+            if (pagina % 5 === 0 || pagina === totalPaginasReales) {
+                console.log(`   📦 Página costo ${pagina}/${totalPaginasReales}: ${registros.length} registros (acumulado=${todas.length})`);
+            }
+
+            if (registros.length < INVENTARIO_TAM_PAGINA) {
+                console.log(`   📦 Página costo ${pagina}: última (${registros.length} < ${INVENTARIO_TAM_PAGINA}).`);
+                break;
+            }
+
+            pagina++;
+        } catch (error) {
+            reintentosConsecutivos++;
+            console.warn(`⚠️ Error costo en página ${pagina} (intento ${reintentosConsecutivos}/${MAX_REINTENTOS}): ${error.message}`);
+            if (reintentosConsecutivos >= MAX_REINTENTOS) {
+                console.error(`❌ Página costo ${pagina} falló ${MAX_REINTENTOS} veces. Avanzando.`);
+                reintentosConsecutivos = 0;
+                pagina++;
+            } else {
+                await new Promise(r => setTimeout(r, 1500));
+            }
+        }
+    }
+
+    return todas;
+}
+
+// Caché global para evitar descargas masivas concurrentes
+let _inventarioPromise = null;
+let _inventarioData = null;
+let _inventarioTimestamp = 0;
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutos
+
+async function getInventarioCached() {
+    if (_inventarioData && (Date.now() - _inventarioTimestamp < CACHE_TTL)) {
+        console.log("♻️ Usando caché de inventario (válido por 5 min)...");
+        return _inventarioData;
+    }
+    if (!_inventarioPromise) {
+        console.log("🔍 Consultando inventario en Siesa (merkahorro_consulta_inventario, paginado)...");
+        _inventarioPromise = fetchInventarioCompleto().then(data => {
+            _inventarioData = data;
+            _inventarioTimestamp = Date.now();
+            _inventarioPromise = null;
+            return data;
+        }).catch(err => {
+            _inventarioPromise = null;
+            throw err;
+        });
+    } else {
+        console.log("⏳ Esperando descarga de inventario en curso...");
+    }
+    return _inventarioPromise;
+}
+
+let _costoPromise = null;
+let _costoData = null;
+let _costoTimestamp = 0;
+
+async function getCostoCached() {
+    if (_costoData && (Date.now() - _costoTimestamp < CACHE_TTL)) {
+        console.log("♻️ Usando caché de costos promedio (válido por 5 min)...");
+        return _costoData;
+    }
+    if (!_costoPromise) {
+        console.log("🔍 Consultando costos promedio en Siesa (merkahorro_costo_promedio_dev, paginado)...");
+        _costoPromise = fetchCostoPromedioCompleto().then(data => {
+            _costoData = data;
+            _costoTimestamp = Date.now();
+            _costoPromise = null;
+            return data;
+        }).catch(err => {
+            _costoPromise = null;
+            throw err;
+        });
+    } else {
+        console.log("⏳ Esperando descarga de costos promedio en curso...");
+    }
+    return _costoPromise;
+}
+
 async function ajustarInventario(errores, itemsFactura, consecDocto) {
     const fecha = new Date().toISOString().split('T')[0].replace(/-/g, '');
     const baseConsec = parseInt(consecDocto) || 99999;
     const itemsMap = {};
     itemsFactura.forEach(det => { itemsMap[det.id_item] = det; });
 
+    const mapBodegaAInstalacion = (bodega) => {
+        if (!bodega) return null;
+        const raw = bodega.toString().trim();
+        if (/^\d{5}$/.test(raw)) return raw.substring(0, 3);
+        if (/^PV\d{3}$/i.test(raw)) return raw.substring(2, 5);
+        return raw.substring(0, 3);
+    };
+
     // Consultar inventario para obtener disponibilidad por bodega
     let inventarioDatos = [];
     try {
-        console.log("🔍 Consultando inventario en Siesa (merkahorro_consulta_inventario, paginado)...");
-        inventarioDatos = await fetchInventarioCompleto();
+        inventarioDatos = await getInventarioCached();
         console.log(`✅ Inventario cargado: ${inventarioDatos.length} registros totales`);
     } catch (e) {
         console.warn("⚠️ No se pudo obtener el inventario.");
@@ -155,6 +286,27 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
                 costo: parseFloat(inv.CostoProm || inv.costoprom || inv.Costo_Promedio || 0)
             };
         }
+    });
+
+    // Consultar costos promedio por instalación (fallback cuando inventario no trae costo)
+    let costosDatos = [];
+    try {
+        costosDatos = await getCostoCached();
+        console.log(`✅ Costos promedio cargados: ${costosDatos.length} registros totales`);
+    } catch (e) {
+        console.warn("⚠️ No se pudo obtener costos promedio.");
+    }
+
+    const costoMap = {};
+    costosDatos.forEach(c => {
+        const itemId = c.IdItem || c.iditem || c.id_item;
+        const instId = c.IdInstalacion || c.id_instalacion || c.idinstalacion;
+        if (!itemId || !instId) return;
+        const itemStr = itemId.toString().trim();
+        const instStr = instId.toString().trim().padStart(3, '0');
+        if (!costoMap[itemStr]) costoMap[itemStr] = {};
+        const costo = parseFloat(c.CostoPromInst || c.costo_prom_inst || c.CostoProm || 0);
+        if (costo > 0) costoMap[itemStr][instStr] = costo;
     });
 
     const movimientos = [];
@@ -208,19 +360,21 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
         const det = itemsMap[idItem];
         const unidad = det ? det.UNIDAD_MEDIDA.trim() : "UND";
 
-        // Buscar costo real desde inventarioMap (CostoProm de merkahorro_consulta_inventario)
+        // Buscar costo REAL siempre desde merkahorro_costo_promedio_dev (NUNCA de merkahorro_consulta_inventario)
         let costo = 0;
-        if (inventarioMap[idItemStr]) {
-            const bodegasDisponibles = Object.keys(inventarioMap[idItemStr]);
-            const bodegasPrioritarias = [bodega, 'PV001', '00301', '00201', '00701'];
-            const ordenBusqueda = [...new Set([...bodegasPrioritarias, ...bodegasDisponibles])];
-            for (const bod of ordenBusqueda) {
-                const entry = inventarioMap[idItemStr][bod];
-                if (entry && entry.costo > 0) {
-                    costo = entry.costo;
-                    console.log(`💰 Costo item ${idItemStr} bodega ${bod}: ${costo}`);
-                    break;
-                }
+        const instPrincipal = mapBodegaAInstalacion(bodega);
+        const prioridad = ['001', '003', '002', '007'];
+        const costosItem = costoMap[idItemStr] || {};
+        const candidatos = [];
+        if (instPrincipal) candidatos.push(instPrincipal);
+        prioridad.forEach(p => { if (!candidatos.includes(p)) candidatos.push(p); });
+        Object.keys(costosItem).forEach(inst => { if (!candidatos.includes(inst)) candidatos.push(inst); });
+
+        for (const inst of candidatos) {
+            if (costosItem[inst] && costosItem[inst] > 0) {
+                costo = costosItem[inst];
+                console.log(`💰 Costo item ${idItemStr} instalacion ${inst}: ${costo}`);
+                break;
             }
         }
 
@@ -241,7 +395,7 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
             "BODEGA": bodega,
             "f470_id_concepto": 601,
             "f470_id_motivo": "03",
-            "ind_naturaleza": 1,
+            "ind_naturaleza": 2,
             "C.O MOVIMIENTO": "001",
             "UNIDAD_MEDIDA": unidad,
             "CANTIDAD": formatDecimal(inyectarFinal, true),
@@ -260,36 +414,81 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
             "f350_id_clase_docto": 61,
             "f450_id_concepto": 601,
             "f350_consec_docto": "0",
+            "F_CONSEC_AUTO_REG": "1",
             "FECHA_DOCTO": fecha,
             "BODEGA": [...bodegas][0]
         }],
         "Movimientos": movimientos
     };
 
-    console.log("📦 Inyectando inventario automáticamente...");
-    try {
-        const response = await axios.post(URL_AJUSTE_INVENTARIO, payload, {
-            headers: {
-                'ConniKey': process.env.CONNI_KEY,
-                'ConniToken': process.env.CONNI_TOKEN,
-                'Content-Type': 'application/json'
+    let intentosAjuste = 0;
+    const MAX_INTENTOS_AJUSTE = 3;
+    let ajusteExitoso = false;
+
+    while (intentosAjuste < MAX_INTENTOS_AJUSTE && !ajusteExitoso) {
+        intentosAjuste++;
+        console.log(`📦 Inyectando inventario automáticamente (Intento ${intentosAjuste}/${MAX_INTENTOS_AJUSTE})...`);
+        try {
+            const response = await axios.post(URL_AJUSTE_INVENTARIO, payload, {
+                headers: {
+                    'ConniKey': process.env.CONNI_KEY,
+                    'ConniToken': process.env.CONNI_TOKEN,
+                    'Content-Type': 'application/json'
+                }
+            });
+            console.log(`✅ Inventario inyectado: ${response.data.mensaje}`);
+            ajusteExitoso = true;
+        } catch (error) {
+            if (error.response && error.response.data && error.response.data.detalle) {
+                const erroresAjuste = error.response.data.detalle;
+                let recalculoHecho = false;
+                
+                // Buscar si Siesa nos rechazó el ajuste por seguir debiendo inventario
+                if (Array.isArray(erroresAjuste)) {
+                    erroresAjuste.forEach(errAjuste => {
+                        const matchFaltante = errAjuste.f_detalle && errAjuste.f_detalle.match(/Faltante Inv\.:\s*(-?[\d.]+)/);
+                        const matchItem = errAjuste.f_valor && errAjuste.f_valor.match(/Item:(\d+)Bodega:(\w+)/);
+                        
+                        if (matchFaltante && matchItem) {
+                            const errorIdStr = matchItem[1].substring(0, 7).replace(/^0+/, '');
+                            const faltanteAdicional = Math.abs(parseFloat(matchFaltante[1]));
+                            
+                            // Buscar el movimiento en el payload y sumarle el faltante adicional
+                            const movToUpdate = payload.Movimientos.find(m => m.ITEM.replace(/^0+/, '') === errorIdStr);
+                            if (movToUpdate && faltanteAdicional > 0) {
+                                const cantidadActual = parseFloat(movToUpdate.CANTIDAD);
+                                const nuevaCantidad = cantidadActual + faltanteAdicional;
+                                const isUnd = movToUpdate.UNIDAD_MEDIDA.trim() === 'UND';
+                                const cantidadFinalFormateada = isUnd ? Math.ceil(nuevaCantidad) : nuevaCantidad;
+                                
+                                movToUpdate.CANTIDAD = formatDecimal(cantidadFinalFormateada, true);
+                                console.log(`🔄 Auto-corrección de Ajuste Siesa: Ítem ${errorIdStr} requiere ${faltanteAdicional} adicionales. Nueva cantidad a inyectar: ${movToUpdate.CANTIDAD}`);
+                                recalculoHecho = true;
+                            }
+                        }
+                    });
+                }
+
+                if (recalculoHecho && intentosAjuste < MAX_INTENTOS_AJUSTE) {
+                    console.log(`⚠️ Siesa demandó más stock. Reintentando inyección con cantidades actualizadas...`);
+                    continue; // Pasa a la siguiente iteración del while para reintentar con el payload modificado
+                }
             }
-        });
-        console.log(`✅ Inventario inyectado: ${response.data.mensaje}`);
-    } catch (error) {
-        console.error("❌ Error en ajuste de inventario:");
-        if (error.response) {
-            console.error("[AJUSTE] Status:", error.response.status);
-            console.error("[AJUSTE] Payload enviado:", JSON.stringify(payload, null, 2));
-            console.error("[AJUSTE] Respuesta Siesa:", JSON.stringify(error.response.data, null, 2));
-        } else if (error.request) {
-            console.error("[AJUSTE] Sin respuesta del servidor (timeout/red).");
-            console.error("[AJUSTE] Code:", error.code, "Message:", error.message);
-        } else {
-            console.error("[AJUSTE] Error JS:", error.message);
-            console.error(error.stack);
+
+            console.error("❌ Error en ajuste de inventario (abortado tras reintentos):");
+            if (error.response) {
+                console.error("[AJUSTE] Status:", error.response.status);
+                console.error("[AJUSTE] Payload enviado:", JSON.stringify(payload, null, 2));
+                console.error("[AJUSTE] Respuesta Siesa:", JSON.stringify(error.response.data, null, 2));
+            } else if (error.request) {
+                console.error("[AJUSTE] Sin respuesta del servidor (timeout/red).");
+                console.error("[AJUSTE] Code:", error.code, "Message:", error.message);
+            } else {
+                console.error("[AJUSTE] Error JS:", error.message);
+                console.error(error.stack);
+            }
+            throw error; // Propaga el error para que la factura principal sepa que la inyección falló
         }
-        throw error;
     }
 }
 
@@ -420,10 +619,15 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
         const Caja = [];
 
         const esSimulacionCNC = (tipoDocumentoSimulado === 'CNC');
-        const tipoDoctoSiesa = esSimulacionCNC ? 'CNC' : (enc.ID_TIPO_DOCTO === 'P03' ? 'CNC' : 'CFE');
+        const tipoDoctoSiesa = esSimulacionCNC ? 'CNC' : 'CFE';
         // Para diferenciar las consecuciones y que Siesa no se confunda, a la simulacion le ponemos el mismo consecutivo
         // Ya que ID_TIPO_DOCTO es distinto, Siesa las agrupa por separado.
         const consecDoc = enc.CONSEC_DOCTO; 
+
+        const absIfCNC = (val) => {
+            if (val === null || val === undefined) return val;
+            return esSimulacionCNC ? Math.abs(parseFloat(val)) : parseFloat(val);
+        };
 
         Docto_ventas_comercial.push({
             "ID_CO": enc.CoDoc,
@@ -431,7 +635,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
             "CONSEC_DOCTO": consecDoc,
             "FECHA_DOCTO": formatDate(enc.FECHA_DOCTO),
             "ID_TERCERO": enc.NitTercero,
-            "ID_CLASE_DOCTO": esSimulacionCNC ? 525 : (enc.ID_TIPO_DOCTO === 'P03' ? 525 : 522),
+            "ID_CLASE_DOCTO": esSimulacionCNC ? 525 : 522,
             "SUCURSAL_CLIENTE": "001",
             "id_co_fact": enc.CoDoc,
             "TERCERO_REM": enc.NitTercero,
@@ -449,13 +653,13 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
                 "consec_docto": consecDoc,
                 "nro_registro": lineaItem,
                 "BODEGA": det.BODEGA || "MG001",
-                "id_concepto": esSimulacionCNC ? 502 : (({"1201": 501, "1202": 502}[det.Concepto]) || (det.ID_TIPO_DOCTO === 'P03' ? 502 : 501)),
+                "id_concepto": esSimulacionCNC ? 502 : ({"1201": 501, "1202": 502}[det.Concepto] || 501),
                 "id_motivo": "01",
-                "ind_naturaleza": esSimulacionCNC ? 1 : (det.ID_TIPO_DOCTO === 'P03' ? 1 : 2),
+                "ind_naturaleza": esSimulacionCNC ? 1 : 2,
                 "id_co_movto": enc.CoDoc,
                 "UNIDAD_MEDIDA": det.UNIDAD_MEDIDA ? det.UNIDAD_MEDIDA.trim() : "UND",
-                "CANTIDAD": formatDecimal(det.CANTIDAD || det.cant_1, true),
-                "VALOR_BRUTO": formatDecimal(det.VALOR_BRUTO),
+                "CANTIDAD": formatDecimal(absIfCNC(det.CANTIDAD || det.cant_1), true),
+                "VALOR_BRUTO": formatDecimal(absIfCNC(det.VALOR_BRUTO)),
                 "id_item": det.id_item,
                 "id_un_movto": "001"
             });
@@ -472,22 +676,22 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
                     "PORCENTAJE_BASE": formatTasa(imp.PORCENTAJE_BASE), 
                     "TASA": formatTasa(imp.TASA),
                     "VLR_UNI": formatDecimal(0),
-                    "VALOR_TOTAL": formatDecimal(imp.VALOR_TOTAL) 
+                    "VALOR_TOTAL": formatDecimal(absIfCNC(imp.VALOR_TOTAL)) 
                 });
             });
 
             // DESCUENTOS
-            if (det.vlr_tot_dscto > 0) {
-                const totalDescuentoItem = det.vlr_tot_dscto;
-                const vlrUniDscto = (det.vlr_uni_dscto > 0) ? det.vlr_uni_dscto : (totalDescuentoItem / (det.CANTIDAD || det.cant_1 || 1));
+            if (det.vlr_tot_dscto && Math.abs(parseFloat(det.vlr_tot_dscto)) > 0) {
+                const totalDescuentoItem = parseFloat(det.vlr_tot_dscto);
+                const vlrUniDscto = (det.vlr_uni_dscto && Math.abs(parseFloat(det.vlr_uni_dscto)) > 0) ? parseFloat(det.vlr_uni_dscto) : (totalDescuentoItem / parseFloat(det.CANTIDAD || det.cant_1 || 1));
                 
                 Descuentos.push({
                     "id_co": enc.CoDoc,
                     "id_tipo_docto": tipoDoctoSiesa,
                     "consec_docto": consecDoc,
                     "nro_registro": lineaItem,
-                    "vlr_uni": formatDecimal(vlrUniDscto),
-                    "vlr_tot": formatDecimal(totalDescuentoItem)
+                    "vlr_uni": formatDecimal(absIfCNC(vlrUniDscto)),
+                    "vlr_tot": formatDecimal(absIfCNC(totalDescuentoItem))
                 });
             }
         });
@@ -541,7 +745,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
             }
         });
         
-        Object.values(cajaConsolidada).filter(p => p.neto > 0).forEach(p => posCaja += p.neto);
+        Object.values(cajaConsolidada).filter(p => esSimulacionCNC ? Math.abs(p.neto) > 0 : p.neto > 0).forEach(p => posCaja += absIfCNC(p.neto));
         
         // Total Siesa = bruto - descuentos + impuestos (igual al pie de la factura en el ERP).
         // Con los impuestos del POS sin tocar, totalSiesa debería coincidir con posCaja al peso.
@@ -562,7 +766,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
                     cajaConsolidada["EFE"].neto += dif;
                     console.log(`💰 AJUSTE CAJA [${tipoDoctoSiesa}] consec ${consecDoc}: ${dif} pesos restados del EFE original. Total ${totalSiesa} vs Caja ${posCaja}.`);
                 } else {
-                    const medios = Object.values(cajaConsolidada).filter(p => p.neto > 0);
+                    const medios = Object.values(cajaConsolidada).filter(p => esSimulacionCNC ? Math.abs(p.neto) > 0 : p.neto > 0);
                     if (medios.length > 0) {
                         medios[0].neto += dif;
                         console.log(`💰 AJUSTE CAJA [${tipoDoctoSiesa}] consec ${consecDoc}: ${dif} pesos restados del medio de pago ${medios[0].ID_MEDIOS_PAGO} (no había EFE). Total ${totalSiesa} vs Caja ${posCaja}.`);
@@ -577,13 +781,13 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
             console.log(`✅ Cuadre exacto [${tipoDoctoSiesa}] consec ${consecDoc}: Total ${totalSiesa} = Caja ${posCaja}.`);
         }
 
-        Object.values(cajaConsolidada).filter(p => p.neto > 0).forEach(pago => {
+        Object.values(cajaConsolidada).filter(p => esSimulacionCNC ? Math.abs(p.neto) > 0 : p.neto > 0).forEach(pago => {
             Caja.push({
                 "ID_CO": enc.CoDoc,
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
                 "CONSEC_DOCTO": consecDoc,
                 "ID_MEDIOS_PAGO": esSimulacionCNC ? "EFE" : pago.ID_MEDIOS_PAGO,
-                "VLR_MEDIO_PAGO": formatDecimal(pago.neto),
+                "VLR_MEDIO_PAGO": formatDecimal(absIfCNC(pago.neto)),
                 "NRO_CUENTA": pago.NRO_CUENTA || "1",
                 "NRO_CHEQUE": "1",
                 "REFERENCIA": "1",
@@ -740,15 +944,14 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
             const payload = generarPayloadDocumento(fac, enc, 'CNC');
             tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDocto, meta });
         } else if (pasoActual === 3) {
-            // CFE: solo facturas P01 (no P03).
-            if (enc.ID_TIPO_DOCTO !== 'P03') {
-                if (consecsExitosos.has(`CFE:${consecutivo}`)) {
-                    omitidas.push(`CFE ${consecutivo}`);
-                    return;
-                }
-                const payload = generarPayloadDocumento(fac, enc, 'CFE');
-                tareas.push({ consecutivo, payload, detalles: fac.items, tipo: 'CFE', meta });
+            // CFE: documento real
+            const tipoDoc = 'CFE';
+            if (consecsExitosos.has(`${tipoDoc}:${consecutivo}`)) {
+                omitidas.push(`${tipoDoc} ${consecutivo}`);
+                return;
             }
+            const payload = generarPayloadDocumento(fac, enc, 'CFE');
+            tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDoc, meta });
         }
     });
 
@@ -793,6 +996,13 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
 }
 
 module.exports = { syncVentas: async (opciones = {}) => {
+    // Resetear caché de inventario y costos al inicio de cada corrida
+    _inventarioPromise = null;
+    _inventarioData = null;
+    _inventarioTimestamp = 0;
+    _costoPromise = null;
+    _costoData = null;
+    _costoTimestamp = 0;
     // opciones.consecs: array opcional de consecs específicos para reprocesar.
     // Si se pasa, ignora LIMITE_FACTURAS y CONSEC_ESPECIFICOS del .env.
     const consecsOverride = Array.isArray(opciones.consecs) ? opciones.consecs : null;
@@ -820,14 +1030,25 @@ module.exports = { syncVentas: async (opciones = {}) => {
     }
     try {
 
-    // Orden nuevo: primero CFE (facturas), después CNC (notas crédito).
-    // Esto evita que las CNC devuelvan stock antes de tiempo y que el
-    // ajuste de inventario tenga que pelearse contra movimientos de entrada
-    // posteriores en el mismo lote.
-    const resCFE = (await ejecutarPaso(3, consecsOverride)) || []; // CFE - Facturas de venta
-    const resCNC = (await ejecutarPaso(1, consecsOverride)) || []; // CNC - Notas crédito
+    // Orden dinámico según entorno (QA vs PROD)
+    // PROD: Primero CNC, luego CFE.
+    // QA: Primero CFE, luego CNC.
+    const entornoSiesa = (process.env.ENTORNO_SIESA || 'QA').toUpperCase();
+    
+    let resCFE = [];
+    let resCNC = [];
+    
+    if (entornoSiesa === 'PROD') {
+        console.log("🌍 Entorno: PROD -> Ejecutando primero Notas Crédito (CNC) y luego Facturas (CFE)");
+        resCNC = (await ejecutarPaso(1, consecsOverride)) || []; // CNC - Notas crédito
+        resCFE = (await ejecutarPaso(3, consecsOverride)) || []; // CFE - Facturas de venta
+    } else {
+        console.log("🌍 Entorno: QA -> Ejecutando primero Facturas (CFE) y luego Notas Crédito (CNC)");
+        resCFE = (await ejecutarPaso(3, consecsOverride)) || []; // CFE - Facturas de venta
+        resCNC = (await ejecutarPaso(1, consecsOverride)) || []; // CNC - Notas crédito
+    }
 
-    const todos = [...resCFE, ...resCNC];
+    const todos = entornoSiesa === 'PROD' ? [...resCNC, ...resCFE] : [...resCFE, ...resCNC];
     const okCount = todos.filter(r => r.ok).length;
     const failCount = todos.length - okCount;
 

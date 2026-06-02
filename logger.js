@@ -37,6 +37,9 @@ function categorizarError(detalleSiesa) {
     if (txt.includes('tama') && txt.includes('permitido')) {
         return { categoria: 'CAMPO_LARGO', resumen: 'Campo excede tamano permitido' };
     }
+    if (txt.includes('la fecha del documento debe estar abierta') || txt.includes('periodo cerrado')) {
+        return { categoria: 'PERIODO_CERRADO', resumen: 'La fecha del documento corresponde a un periodo cerrado en Siesa' };
+    }
     if (txt.includes('la base de datos no existe')) {
         return { categoria: 'ERROR_CONEXION_SIESA', resumen: 'Siesa QA caido o DB no existe' };
     }
