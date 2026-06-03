@@ -1,5 +1,5 @@
 # Estado Actual del Proyecto: Sincronizador POS → Siesa QA
-**Última actualización:** 02 de Junio de 2026
+**Última actualización:** 03 de Junio de 2026
 
 Este documento resume el estado actual del proyecto, las lógicas implementadas recientemente, las correcciones aplicadas y las tareas pendientes, sirviendo como contexto para desarrolladores o IAs futuras.
 
@@ -9,8 +9,7 @@ El flujo cuenta con auto-corrección para inyectar inventario faltante (CPE) y s
 
 ## 2. Lógica y Arquitectura Actual
 - **Entornos y Orden de Ejecución:**
-  - **QA:** Ejecuta primero Facturas Reales (`CFE` - Paso 3) y luego Notas Crédito (`CNC` - Paso 1).
-  - **PROD:** Ejecutará primero Notas Crédito (Simulación) y luego Facturas.
+  - **QA y PROD:** Ejecutan primero Notas Crédito (Simulación - Paso 1) y luego Facturas Reales (`CFE` - Paso 3).
 - **Mapeo de Documentos:**
   - Toda venta del POS genera un documento contable de clase **522 (CFE)** con naturaleza **2 (Salida)**.
   - Toda simulación de venta genera un documento contable de clase **525 (CNC)** con naturaleza **1 (Entrada)**.
@@ -30,6 +29,18 @@ El flujo cuenta con auto-corrección para inyectar inventario faltante (CPE) y s
    - Se agregó `"F_CONSEC_AUTO_REG": "1"` en la cabecera del CPE, para indicar a Siesa que debe auto-numerar el documento internamente basándose en sus tablas, evitando colisiones.
 4. **Costo Promedio Estricto:**
    - Para valorizar las inyecciones de inventario, el sistema lee los costos exclusivamente de `merkahorro_costo_promedio_dev`. `merkahorro_consulta_inventario` se usa únicamente para saber en qué bodegas hay disponibilidad de stock.
+5. **Paginación Concurrente (más rápida y segura):**
+   - Las funciones de paginado (`fetchInventarioCompleto`, `fetchCostoPromedioCompleto`) se unificaron en un solo helper `fetchPaginadoCompleto`.
+   - Ya **no** es 100% secuencial: descarga la página 1 para conocer `total_páginas` y luego baja el resto en un **pool de concurrencia acotada** (`PAGINACION_CONCURRENCIA`, default `4`).
+   - Cada página tiene **reintento + backoff incremental** (3 intentos). Si una página falla con `ECONNRESET`, se reintenta sola; nunca se pierde data. Si Connekta colapsa, bajar `PAGINACION_CONCURRENCIA` a `2` o `1`.
+6. **Auto-corrección en bucle acotado (reintento profesional):**
+   - `enviarFacturaASiesa` reintenta el envío en un **bucle de hasta `MAX_RONDAS_AJUSTE` rondas** (default `3`), inyectando en cada ronda lo NUEVO que pida Siesa.
+   - Cubre el caso de que un reintento revele una falta **adicional** (ítem distinto o más cantidad). Funciona igual para CNC y CFE (la función es compartida).
+   - Si el error no es automatizable (maestras, valor inválido) o una ronda no puede hacer nada nuevo → FALLO inmediato (no gasta rondas).
+7. **Instrumentación del Costo en el CPE (trazabilidad):**
+   - `ajustarInventario` ahora loguea el `COSTO_PROMEDIO` exacto que se envía por ítem/bodega/instalación (`🧾 [CPE movimiento]`, `📤 [CPE payload]`), tanto en éxito como en error.
+   - Cross-check defensivo: avisa con `⚠️ [DIVERGENCIA COSTO]` si el costo por instalación (`t132`) difiere del costo por bodega (`t400`/`consulta_inventario`).
+   - **Hallazgo:** con los datos actuales de la query (todas las instalaciones del ítem 773 en `5975`), el código **selecciona y envía 5975 correctamente**. El `5894` observado en Siesa NO sale del código actual → es un movimiento de una corrida vieja, o un **recálculo de Siesa** (promedio ponderado sobre stock residual en el motivo `03 ENTRADA INCONSISTENCIA`). Pendiente confirmar en una corrida en vivo leyendo el log del costo enviado.
 
 ## 4. Tareas Pendientes / Bloqueos Actuales
 El código fuente ya opera correctamente, pero existen bloqueos a nivel de datos y reglas de negocio:
@@ -46,6 +57,7 @@ Las siguientes facturas fallan por falta de configuración en el ERP, lo cual no
 - **Estado:** En pausa. A la espera de que el usuario decida la regla de negocio (Opción A: eliminarlos del plano; Opción B: enviarlos con valor $1; Opción C: mapearlos a un concepto diferente de Siesa).
 
 ## 5. Notas para IAs Futuras
-- **Regla de Oro:** **NO modifiques** el archivo `syncVentas.js` para reintroducir reglas basadas en `P03` para `CNC`. Todo es `CFE` (paso 3) o `CNC` (paso 1).
-- **Timeouts:** Ten cuidado si modificas la función `fetchInventarioCompleto` o `fetchCostoPromedioCompleto`. Connekta no soporta paralelismo pesado ni `TOP/ORDER BY` directo. Respeta el paginado secuencial implementado.
+- **Regla de Oro:** **NO modifiques** el archivo `syncVentas.js` para reintroducir reglas basadas en `P03` para `CNC`. Todo es `CFE` (paso 3) o `CNC` (paso 1). El código de caja (`P03`/`P05`/`P01`) NO se usa en la lógica; solo cambia qué facturas trae el query.
+- **Paginación:** el paginado vive en `fetchPaginadoCompleto`. Connekta **sí colapsa con paralelismo pesado** (todas las páginas a la vez), pero tolera un **pool acotado**. La concurrencia es configurable con `PAGINACION_CONCURRENCIA`; ante `ECONNRESET` repetido, bajarla. NO subir `tamPag` por encima de `1000` (Connekta devuelve 400) ni meter `TOP/ORDER BY` en el query.
+- **Variables de entorno nuevas:** `PAGINACION_CONCURRENCIA` (default 4) y `MAX_RONDAS_AJUSTE` (default 3).
 - El sistema de base de datos actual es **Supabase (PostgreSQL)**, ya no se usan los archivos locales `logs/` para la persistencia.

@@ -51,148 +51,108 @@ async function fetchFromConnekta(url) {
     }
 }
 
-async function fetchInventarioCompleto() {
-    // Carga el inventario página por página de forma SECUENCIAL.
-    // Connekta de Siesa devuelve 400/ECONNRESET cuando se le piden varias páginas en paralelo,
-    // así que vamos despacio pero seguros. Cada página son 1000 registros máx.
-    const todas = [];
-    let pagina = 1;
-    let totalPaginasReales = INVENTARIO_MAX_PAGINAS;
-    let reintentosConsecutivos = 0;
+// Descarga UNA página de un query paginado de Connekta. Devuelve { registros, totalPaginas }.
+async function fetchPagina(baseUrl, pagina) {
+    const url = `${baseUrl}&paginacion=numPag=${pagina}|tamPag=${INVENTARIO_TAM_PAGINA}`;
+    const response = await axios.get(url, {
+        headers: { 'ConniKey': process.env.CONNI_KEY, 'ConniToken': process.env.CONNI_TOKEN },
+        timeout: 60000
+    });
+    const data = response.data;
+    let registros = [];
+    let totalPaginas = null;
+    if (data.detalle && data.detalle.Datos) {
+        registros = data.detalle.Datos;
+        // total_páginas: la "á" puede traer problemas de encoding -> búsqueda robusta por substring.
+        const detalleKeys = Object.keys(data.detalle);
+        const keyTotalPag = detalleKeys.find(k => k.toLowerCase().includes('total_p') || k.toLowerCase().includes('página') || k.toLowerCase().includes('pagina'));
+        if (keyTotalPag && data.detalle[keyTotalPag]) totalPaginas = parseInt(data.detalle[keyTotalPag]);
+    } else if (data.detalle && data.detalle.Table) {
+        registros = data.detalle.Table;
+    } else if (data.Table) {
+        registros = data.Table;
+    }
+    return { registros: registros || [], totalPaginas };
+}
+
+// Descarga una página con reintento + backoff. NUNCA lanza: si agota reintentos
+// devuelve registros vacíos (para no tumbar toda la descarga por una página).
+async function fetchPaginaConReintento(baseUrl, pagina, etiqueta) {
     const MAX_REINTENTOS = 3;
-
-    while (pagina <= totalPaginasReales && pagina <= 2000) {
-        const url = `${URL_CONSULTA_INVENTARIO_BASE}&paginacion=numPag=${pagina}|tamPag=${INVENTARIO_TAM_PAGINA}`;
-        
+    for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
         try {
-            const response = await axios.get(url, {
-                headers: { 'ConniKey': process.env.CONNI_KEY, 'ConniToken': process.env.CONNI_TOKEN },
-                timeout: 60000
-            });
-            
-            const data = response.data;
-            let registros = [];
-            if (data.detalle && data.detalle.Datos) {
-                registros = data.detalle.Datos;
-                // Buscamos total_páginas de forma robusta (la "á" puede causar problemas).
-                // Inspeccionamos todas las claves del detalle.
-                const detalleKeys = Object.keys(data.detalle);
-                if (pagina === 1) {
-                    console.log(`   🔎 [debug] Claves de respuesta: ${JSON.stringify(detalleKeys)}`);
-                }
-                const keyTotalPag = detalleKeys.find(k => k.toLowerCase().includes('total_p') || k.toLowerCase().includes('página') || k.toLowerCase().includes('pagina'));
-                if (keyTotalPag && data.detalle[keyTotalPag]) {
-                    totalPaginasReales = parseInt(data.detalle[keyTotalPag]);
-                    if (pagina === 1) console.log(`   🔎 [debug] total_páginas detectado: ${totalPaginasReales}`);
-                }
-            } else if (data.detalle && data.detalle.Table) {
-                registros = data.detalle.Table;
-            } else if (data.Table) {
-                registros = data.Table;
-            }
-
-            if (!registros || registros.length === 0) {
-                console.log(`   📦 Página ${pagina}: vacía, fin.`);
-                break;
-            }
-
-            todas.push(...registros);
-            reintentosConsecutivos = 0;
-            
-            if (pagina % 5 === 0 || pagina === totalPaginasReales) {
-                console.log(`   📦 Página ${pagina}/${totalPaginasReales}: ${registros.length} registros (acumulado=${todas.length})`);
-            }
-            
-            if (registros.length < INVENTARIO_TAM_PAGINA) {
-                console.log(`   📦 Página ${pagina}: última (${registros.length} < ${INVENTARIO_TAM_PAGINA}).`);
-                break;
-            }
-            
-            pagina++;
+            return await fetchPagina(baseUrl, pagina);
         } catch (error) {
-            reintentosConsecutivos++;
-            console.warn(`⚠️ Error en página ${pagina} (intento ${reintentosConsecutivos}/${MAX_REINTENTOS}): ${error.message}`);
-            if (reintentosConsecutivos >= MAX_REINTENTOS) {
-                console.error(`❌ Página ${pagina} falló ${MAX_REINTENTOS} veces. Avanzando.`);
-                reintentosConsecutivos = 0;
-                pagina++;
-            } else {
-                // Esperar antes de reintentar
-                await new Promise(r => setTimeout(r, 1500));
+            console.warn(`⚠️ ${etiqueta} pág ${pagina} (intento ${intento}/${MAX_REINTENTOS}): ${error.message}`);
+            if (intento === MAX_REINTENTOS) {
+                console.error(`❌ ${etiqueta} pág ${pagina} falló ${MAX_REINTENTOS} veces. Se omite esa página.`);
+                return { registros: [], totalPaginas: null };
             }
+            await new Promise(r => setTimeout(r, 1000 * intento)); // backoff incremental
+        }
+    }
+    return { registros: [], totalPaginas: null };
+}
+
+// Descarga TODO un query paginado de Connekta.
+// Estrategia: 1) página 1 secuencial para conocer el total; 2) páginas 2..N en
+// POOL de concurrencia acotada (configurable con PAGINACION_CONCURRENCIA, default 4).
+// El orden de los registros no importa (luego se indexan por item/bodega), así que
+// el paralelismo es seguro para la correctitud. El reintento+backoff por página
+// garantiza que ninguna página se pierda aunque Connekta dé ECONNRESET puntual.
+async function fetchPaginadoCompleto(baseUrl, etiqueta) {
+    const CONC = Math.max(1, parseInt(process.env.PAGINACION_CONCURRENCIA || '4'));
+    const TOPE_PAGINAS = 2000; // tope duro de seguridad
+
+    // 1) Página 1 (secuencial) -> nos dice el total de páginas.
+    const primera = await fetchPaginaConReintento(baseUrl, 1, etiqueta);
+    const todas = [...primera.registros];
+
+    if (primera.registros.length === 0) {
+        console.log(`   📦 ${etiqueta}: página 1 vacía, fin.`);
+        return todas;
+    }
+    if (primera.registros.length < INVENTARIO_TAM_PAGINA) {
+        console.log(`   📦 ${etiqueta}: única página (${primera.registros.length} registros).`);
+        return todas;
+    }
+
+    // total_páginas reportado por Connekta; si no vino, caemos a INVENTARIO_MAX_PAGINAS.
+    let totalPaginas = primera.totalPaginas && primera.totalPaginas > 0 ? primera.totalPaginas : INVENTARIO_MAX_PAGINAS;
+    totalPaginas = Math.min(totalPaginas, TOPE_PAGINAS);
+    console.log(`   📦 ${etiqueta}: ${totalPaginas} páginas estimadas, descargando 2..${totalPaginas} con concurrencia=${CONC}...`);
+
+    // 2) Páginas 2..total en lotes concurrentes.
+    let cursor = 2;
+    while (cursor <= totalPaginas) {
+        const lote = [];
+        for (let k = 0; k < CONC && cursor <= totalPaginas; k++, cursor++) lote.push(cursor);
+        const resultados = await Promise.all(lote.map(p => fetchPaginaConReintento(baseUrl, p, etiqueta)));
+        let registrosLote = 0;
+        for (const r of resultados) {
+            if (r.registros.length > 0) { todas.push(...r.registros); registrosLote += r.registros.length; }
+        }
+        console.log(`   📦 ${etiqueta}: lote hasta pág ${cursor - 1}/${totalPaginas} (+${registrosLote}, acumulado=${todas.length})`);
+
+        // Corte temprano: si el total reportado no era confiable y el lote completo vino
+        // vacío, no tiene sentido seguir pidiendo páginas inexistentes.
+        if (registrosLote === 0) {
+            console.log(`   📦 ${etiqueta}: lote vacío, se asume fin de datos.`);
+            break;
         }
     }
 
+    console.log(`   ✅ ${etiqueta}: descarga completa, ${todas.length} registros.`);
     return todas;
 }
 
+// Wrappers con los nombres usados por el resto del código.
+async function fetchInventarioCompleto() {
+    return fetchPaginadoCompleto(URL_CONSULTA_INVENTARIO_BASE, 'Inventario');
+}
+
 async function fetchCostoPromedioCompleto() {
-    // Carga el costo promedio por instalación, paginado y secuencial.
-    const todas = [];
-    let pagina = 1;
-    let totalPaginasReales = INVENTARIO_MAX_PAGINAS;
-    let reintentosConsecutivos = 0;
-    const MAX_REINTENTOS = 3;
-
-    while (pagina <= totalPaginasReales && pagina <= 2000) {
-        const url = `${URL_COSTO_PROMEDIO_BASE}&paginacion=numPag=${pagina}|tamPag=${INVENTARIO_TAM_PAGINA}`;
-        try {
-            const response = await axios.get(url, {
-                headers: { 'ConniKey': process.env.CONNI_KEY, 'ConniToken': process.env.CONNI_TOKEN },
-                timeout: 60000
-            });
-
-            const data = response.data;
-            let registros = [];
-            if (data.detalle && data.detalle.Datos) {
-                registros = data.detalle.Datos;
-                const detalleKeys = Object.keys(data.detalle);
-                if (pagina === 1) {
-                    console.log(`   🔎 [debug] Claves de respuesta costo: ${JSON.stringify(detalleKeys)}`);
-                }
-                const keyTotalPag = detalleKeys.find(k => k.toLowerCase().includes('total_p') || k.toLowerCase().includes('página') || k.toLowerCase().includes('pagina'));
-                if (keyTotalPag && data.detalle[keyTotalPag]) {
-                    totalPaginasReales = parseInt(data.detalle[keyTotalPag]);
-                    if (pagina === 1) console.log(`   🔎 [debug] total_páginas costo detectado: ${totalPaginasReales}`);
-                }
-            } else if (data.detalle && data.detalle.Table) {
-                registros = data.detalle.Table;
-            } else if (data.Table) {
-                registros = data.Table;
-            }
-
-            if (!registros || registros.length === 0) {
-                console.log(`   📦 Página costo ${pagina}: vacía, fin.`);
-                break;
-            }
-
-            todas.push(...registros);
-            reintentosConsecutivos = 0;
-
-            if (pagina % 5 === 0 || pagina === totalPaginasReales) {
-                console.log(`   📦 Página costo ${pagina}/${totalPaginasReales}: ${registros.length} registros (acumulado=${todas.length})`);
-            }
-
-            if (registros.length < INVENTARIO_TAM_PAGINA) {
-                console.log(`   📦 Página costo ${pagina}: última (${registros.length} < ${INVENTARIO_TAM_PAGINA}).`);
-                break;
-            }
-
-            pagina++;
-        } catch (error) {
-            reintentosConsecutivos++;
-            console.warn(`⚠️ Error costo en página ${pagina} (intento ${reintentosConsecutivos}/${MAX_REINTENTOS}): ${error.message}`);
-            if (reintentosConsecutivos >= MAX_REINTENTOS) {
-                console.error(`❌ Página costo ${pagina} falló ${MAX_REINTENTOS} veces. Avanzando.`);
-                reintentosConsecutivos = 0;
-                pagina++;
-            } else {
-                await new Promise(r => setTimeout(r, 1500));
-            }
-        }
-    }
-
-    return todas;
+    return fetchPaginadoCompleto(URL_COSTO_PROMEDIO_BASE, 'Costo');
 }
 
 // Caché global para evitar descargas masivas concurrentes
@@ -266,8 +226,10 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
     // Consultar inventario para obtener disponibilidad por bodega
     let inventarioDatos = [];
     try {
+        // El conteo ya se loguea en fetchPaginadoCompleto (descarga real) o en getInventarioCached
+        // (cache hit). No re-loguear aquí para no duplicar la salida cuando varias facturas
+        // concurrentes consumen la misma caché.
         inventarioDatos = await getInventarioCached();
-        console.log(`✅ Inventario cargado: ${inventarioDatos.length} registros totales`);
     } catch (e) {
         console.warn("⚠️ No se pudo obtener el inventario.");
     }
@@ -291,8 +253,8 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
     // Consultar costos promedio por instalación (fallback cuando inventario no trae costo)
     let costosDatos = [];
     try {
+        // Mismo criterio que el inventario: el conteo se loguea en la capa de caché/descarga.
         costosDatos = await getCostoCached();
-        console.log(`✅ Costos promedio cargados: ${costosDatos.length} registros totales`);
     } catch (e) {
         console.warn("⚠️ No se pudo obtener costos promedio.");
     }
@@ -362,6 +324,7 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
 
         // Buscar costo REAL siempre desde merkahorro_costo_promedio_dev (NUNCA de merkahorro_consulta_inventario)
         let costo = 0;
+        let instElegida = null;
         const instPrincipal = mapBodegaAInstalacion(bodega);
         const prioridad = ['001', '003', '002', '007'];
         const costosItem = costoMap[idItemStr] || {};
@@ -373,19 +336,31 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
         for (const inst of candidatos) {
             if (costosItem[inst] && costosItem[inst] > 0) {
                 costo = costosItem[inst];
-                console.log(`💰 Costo item ${idItemStr} instalacion ${inst}: ${costo}`);
+                instElegida = inst;
+                console.log(`💰 Costo item ${idItemStr} instalacion ${inst}: ${costo} (t132/costo_promedio_dev). Candidatos disponibles: ${JSON.stringify(costosItem)}`);
                 break;
             }
         }
 
         if (!costo || costo <= 0) {
-            console.warn(`⚠️ Sin costo real para item ${idItemStr}. Se omite del ajuste de inventario.`);
+            console.warn(`⚠️ Sin costo real para item ${idItemStr} (bodega ${bodega}, instPrincipal ${instPrincipal}). costoMap[${idItemStr}]=${JSON.stringify(costosItem)}. Se omite del ajuste de inventario.`);
             return;
+        }
+
+        // Cross-check defensivo: comparar el costo por instalación (t132) con el costo por
+        // bodega (t400 / consulta_inventario) que ya descargamos en inventarioMap. Si difieren
+        // de forma significativa, lo avisamos para detectar divergencias como 5894 vs 5975.
+        const costoBodega = inventarioMap[idItemStr] && inventarioMap[idItemStr][bodega]
+            ? inventarioMap[idItemStr][bodega].costo
+            : null;
+        if (costoBodega && costoBodega > 0 && Math.abs(costoBodega - costo) > 1) {
+            console.warn(`⚠️ [DIVERGENCIA COSTO] item ${idItemStr} bodega ${bodega}: t132(inst ${instElegida})=${costo} vs t400(bodega)=${costoBodega}. Se usa el de t132 (${costo}).`);
         }
 
         const inyectar = faltanteMatch ? Math.abs(parseFloat(faltanteMatch[1])) : 10;
         const inyectarFinal = unidad === 'UND' ? Math.ceil(inyectar) : inyectar;
         const costoFinal = Math.round(Math.max(costo, 1));
+        console.log(`🧾 [CPE movimiento] ITEM ${idItemStr.padStart(7, '0')} | BODEGA ${bodega} | inst ${instElegida} | costo crudo ${costo} | COSTO_PROMEDIO enviado ${formatDecimal(costoFinal)} (${costoFinal}) | CANTIDAD ${inyectarFinal}`);
 
         movimientos.push({
             "C.O.": "001",
@@ -428,6 +403,8 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
     while (intentosAjuste < MAX_INTENTOS_AJUSTE && !ajusteExitoso) {
         intentosAjuste++;
         console.log(`📦 Inyectando inventario automáticamente (Intento ${intentosAjuste}/${MAX_INTENTOS_AJUSTE})...`);
+        // Trazabilidad: resumen de lo que ENVIAMOS en este intento (item -> costo/cantidad).
+        console.log(`📤 [CPE payload] Movimientos a enviar: ${payload.Movimientos.map(m => `${m.ITEM}:cost=${m.COSTO_PROMEDIO}:cant=${m.CANTIDAD}`).join(' | ')}`);
         try {
             const response = await axios.post(URL_AJUSTE_INVENTARIO, payload, {
                 headers: {
@@ -837,18 +814,30 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
             await logger.registrarResultado(resultado, { ...meta, automatizaciones });
             return resultado;
         };
-        try {
-            const responseSiesa = await axios.post(URL_SIESA_POST, payload, {
-                headers: {
-                    'ConniKey': process.env.CONNI_KEY,
-                    'ConniToken': process.env.CONNI_TOKEN,
-                    'Content-Type': 'application/json'
+        // Bucle acotado de automatización: reintenta el envío mientras el error siga siendo
+        // "automatizable" (cliente faltante o inventario insuficiente), inyectando en CADA
+        // ronda lo NUEVO que Siesa reporte (sirve igual para CNC y CFE, y cubre el caso de
+        // que un reintento revele una falta adicional). Tope de rondas para evitar bucles infinitos.
+        const MAX_RONDAS = Math.max(1, parseInt(process.env.MAX_RONDAS_AJUSTE || '3'));
+        let clientesSincronizados = false;
+        for (let ronda = 0; ronda <= MAX_RONDAS; ronda++) {
+            try {
+                const responseSiesa = await axios.post(URL_SIESA_POST, payload, {
+                    headers: {
+                        'ConniKey': process.env.CONNI_KEY,
+                        'ConniToken': process.env.CONNI_TOKEN,
+                        'Content-Type': 'application/json'
+                    }
+                });
+                const sufijo = automatizaciones.length > 0 ? ' (tras automatización)' : '';
+                return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: true, mensaje: (responseSiesa.data.mensaje || 'OK') + sufijo });
+            } catch (error) {
+                // Error sin detalle estructurado de Siesa (red, timeout, 500, etc.) -> no automatizable.
+                if (!(error.response && error.response.data && error.response.data.detalle)) {
+                    const msg = error.response?.data ? JSON.stringify(error.response.data) : error.message;
+                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: msg });
                 }
-            });
 
-            return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: true, mensaje: responseSiesa.data.mensaje || 'OK' });
-        } catch (error) {
-            if (error.response && error.response.data && error.response.data.detalle) {
                 const errores = error.response.data.detalle;
                 const faltaCliente = Array.isArray(errores) && errores.some(e => e.f_detalle && (
                     e.f_detalle.toLowerCase().includes('cliente no existe') ||
@@ -857,12 +846,22 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
                 ));
                 const faltaInventario = Array.isArray(errores) && errores.some(e => e.f_detalle && e.f_detalle.includes('Item sin cantidad disponible'));
 
-                if (faltaCliente) {
+                // Error no automatizable (maestras, valor inválido, etc.) -> fallo definitivo.
+                if (!faltaCliente && !faltaInventario) {
+                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: JSON.stringify(error.response.data) });
+                }
+
+                // Sin rondas restantes y Siesa sigue pidiendo automatización -> fallo.
+                if (ronda >= MAX_RONDAS) {
+                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: `Agotadas ${MAX_RONDAS} ronda(s) de automatización: ${JSON.stringify(error.response.data)}` });
+                }
+
+                let accionTomada = false;
+
+                if (faltaCliente && !clientesSincronizados) {
                     console.log(`⚠️ [${tipoDoctoSiesa} ${consecutivo}] Cliente no existe en Siesa. Ejecutando syncPOS()...`);
-                    // Extraer los NITs específicos que Siesa reportó como faltantes.
-                    // Siesa devuelve el NIT en el campo `f_valor` (ej. "42683051"),
-                    // mientras que `f_detalle` solo contiene el mensaje genérico
-                    // "Documento venta comercial: El cliente no existe.".
+                    // Siesa devuelve el NIT en `f_valor` (ej. "42683051" o "42683051-001"); nos
+                    // quedamos con el NIT base (antes del guión). `f_detalle` solo trae el mensaje genérico.
                     const nitsFaltantes = [...new Set(
                         errores
                             .filter(e => e.f_detalle && (
@@ -871,8 +870,6 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
                                 e.f_detalle.toLowerCase().includes('sucursal de la')
                             ))
                             .map(e => {
-                                // f_valor puede venir como "42683051" o "42683051-001" (NIT-sucursal).
-                                // Nos quedamos solo con el NIT base (antes del primer guión).
                                 const raw = String(e.f_valor || '').trim();
                                 if (!raw) return null;
                                 return raw.split('-')[0].trim();
@@ -881,41 +878,40 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
                     )];
                     console.log(`🎯 [${tipoDoctoSiesa} ${consecutivo}] NIT(s) faltante(s) detectado(s): ${nitsFaltantes.join(', ') || '(ninguno extraído)'}`);
                     automatizaciones.push(`sync_cliente:${nitsFaltantes.join(',') || 'all'}`);
-                    try { await syncPOS(nitsFaltantes.length > 0 ? nitsFaltantes : null); } catch (syncError) {
+                    try {
+                        await syncPOS(nitsFaltantes.length > 0 ? nitsFaltantes : null);
+                        clientesSincronizados = true; // no reintentar syncPOS en rondas siguientes
+                        accionTomada = true;
+                    } catch (syncError) {
                         console.error(`❌ [${tipoDoctoSiesa} ${consecutivo}] Error en syncPOS:`, syncError.message);
                     }
                 }
+
                 if (faltaInventario) {
-                    console.log(`⚠️ [${tipoDoctoSiesa} ${consecutivo}] Inventario insuficiente. Inyectando stock...`);
+                    console.log(`⚠️ [${tipoDoctoSiesa} ${consecutivo}] Inventario insuficiente (ronda ${ronda + 1}/${MAX_RONDAS}). Inyectando lo que reporta Siesa...`);
                     automatizaciones.push(`ajuste_inventario:${consecutivo}`);
                     try {
                         const consecAjuste = parseInt(Date.now().toString().slice(-7));
                         await ajustarInventario(errores, detallesFactura, consecAjuste);
+                        accionTomada = true;
                     } catch (ajusteError) {
                         console.error(`❌ [${tipoDoctoSiesa} ${consecutivo}] Error en ajuste de inventario:`, ajusteError.message);
                     }
                 }
 
-                if (faltaCliente || faltaInventario) {
-                    console.log(`🔁 [${tipoDoctoSiesa} ${consecutivo}] Reintentando envío...`);
-                    try {
-                        const retryResponse = await axios.post(URL_SIESA_POST, payload, {
-                            headers: {
-                                'ConniKey': process.env.CONNI_KEY,
-                                'ConniToken': process.env.CONNI_TOKEN,
-                                'Content-Type': 'application/json'
-                            }
-                        });
-                        return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: true, mensaje: (retryResponse.data.mensaje || 'OK') + ' (tras automatización)' });
-                    } catch (retryError) {
-                        const detalle = retryError.response?.data ? JSON.stringify(retryError.response.data) : retryError.message;
-                        return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: `Reintento falló: ${detalle}` });
-                    }
+                // Si en esta ronda no se pudo hacer nada nuevo (ej. cliente ya sincronizado pero
+                // sigue rebotando, o el ajuste falló), no tiene sentido seguir reintentando.
+                if (!accionTomada) {
+                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: `Sin más automatización posible: ${JSON.stringify(error.response.data)}` });
                 }
-                return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: JSON.stringify(error.response.data) });
+
+                console.log(`🔁 [${tipoDoctoSiesa} ${consecutivo}] Reintentando envío (ronda ${ronda + 1})...`);
+                // El for vuelve a iterar -> nuevo POST con el inventario/cliente ya corregido.
             }
-            return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: error.message });
         }
+
+        // Salvaguarda (no debería alcanzarse): salimos del for sin retornar.
+        return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: 'No se pudo enviar tras agotar reintentos.' });
     };
 
     // Construir la lista de tareas (1 por factura aplicable a este paso).
@@ -1030,9 +1026,8 @@ module.exports = { syncVentas: async (opciones = {}) => {
     }
     try {
 
-    // Orden dinámico según entorno (QA vs PROD)
-    // PROD: Primero CNC, luego CFE.
-    // QA: Primero CFE, luego CNC.
+    // Orden de ejecución: en AMBOS entornos se procesa primero la Nota Crédito (CNC,
+    // simulación / paso 1) y luego la Factura real (CFE, paso 3).
     const entornoSiesa = (process.env.ENTORNO_SIESA || 'QA').toUpperCase();
     
     let resCFE = [];
@@ -1043,12 +1038,13 @@ module.exports = { syncVentas: async (opciones = {}) => {
         resCNC = (await ejecutarPaso(1, consecsOverride)) || []; // CNC - Notas crédito
         resCFE = (await ejecutarPaso(3, consecsOverride)) || []; // CFE - Facturas de venta
     } else {
-        console.log("🌍 Entorno: QA -> Ejecutando primero Facturas (CFE) y luego Notas Crédito (CNC)");
-        resCFE = (await ejecutarPaso(3, consecsOverride)) || []; // CFE - Facturas de venta
+        console.log("🌍 Entorno: QA -> Ejecutando primero Notas Crédito (CNC) y luego Facturas (CFE)");
         resCNC = (await ejecutarPaso(1, consecsOverride)) || []; // CNC - Notas crédito
+        resCFE = (await ejecutarPaso(3, consecsOverride)) || []; // CFE - Facturas de venta
     }
 
-    const todos = entornoSiesa === 'PROD' ? [...resCNC, ...resCFE] : [...resCFE, ...resCNC];
+    // Orden del resumen = orden de ejecución (CNC primero, luego CFE) en ambos entornos.
+    const todos = [...resCNC, ...resCFE];
     const okCount = todos.filter(r => r.ok).length;
     const failCount = todos.length - okCount;
 

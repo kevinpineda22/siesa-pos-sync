@@ -76,7 +76,7 @@ siesa-pos-sync/
 | Archivo | Responsabilidad |
 |---------|-----------------|
 | `server.js` | Expone los endpoints `POST /api/sync-clientes` y `POST /api/sync-ventas`. Llama a `syncVentas()` o `syncPOS()`. |
-| `syncVentas.js` | Orquesta toda la lógica: lee facturas de Connekta, arma los planos para Siesa, calcula cuadre de caja, recalcula impuestos, ejecuta CFE → CNC, dispara auto-correcciones. |
+| `syncVentas.js` | Orquesta toda la lógica: lee facturas de Connekta, arma los planos para Siesa, calcula cuadre de caja, recalcula impuestos, ejecuta CNC → CFE, dispara auto-correcciones. |
 | `syncPOS.js` | Lee los clientes del POS, los trunca a los límites varchar de Siesa, y los envía como `GenericTransfer` al ERP. Acepta una lista de NITs específicos para reducir el payload. |
 | `logger.js` | Lee/escribe los archivos en `logs/` de forma **atómica** (`.tmp` + rename). Categoriza errores. Mantiene contadores de intentos y automatizaciones aplicadas. |
 | `verLog.js` | CLI para consultar logs. |
@@ -109,6 +109,14 @@ CONSEC_ESPECIFICOS=
 # Paginación del query de inventario (Connekta NO acepta tamPag > 1000).
 INVENTARIO_TAM_PAGINA=1000
 INVENTARIO_MAX_PAGINAS=100
+
+# Páginas que se descargan EN PARALELO del inventario/costo (pool acotado).
+# Subir = más rápido; bajar a 2 o 1 si Connekta da ECONNRESET. Default 4.
+PAGINACION_CONCURRENCIA=4
+
+# Máx. rondas de auto-corrección (inyección de stock / sync cliente) por factura
+# antes de marcarla en FALLO. Cada ronda inyecta lo NUEVO que reporte Siesa. Default 3.
+MAX_RONDAS_AJUSTE=3
 
 # Puerto del servidor Express
 PORT=4000
@@ -359,7 +367,7 @@ WHERE dbo.t150_mc_bodegas.f150_id_cia = 1
 
 **Total registros que retorna actualmente:** ~47,900 (48 páginas de 1000).
 
-**Cómo se usa:** el backend pagina secuencialmente (1 página a la vez, no en paralelo — Connekta colapsa con paralelismo en queries grandes) hasta agotar el inventario. Construye un mapa `{ idItem → { bodega → { costo, disponible } } }` que se usa al inyectar stock vía CPE.
+**Cómo se usa:** el backend pagina con el helper unificado `fetchPaginadoCompleto`: pide la página 1 para conocer `total_páginas` y luego baja el resto en un **pool de concurrencia acotada** (`PAGINACION_CONCURRENCIA`, default 4), con **reintento + backoff por página**. El paralelismo pesado (todas las páginas a la vez) sí tumba a Connekta, pero un pool pequeño lo tolera y es ~4× más rápido que secuencial. El orden de los registros no importa porque luego se indexan en un mapa `{ idItem → { bodega → { costo, disponible } } }` que se usa al inyectar stock vía CPE.
 
 ---
 
@@ -372,7 +380,7 @@ Connekta tiene comportamientos no documentados que afectan el diseño:
 | **No acepta parámetros (`@variable`)** en queries | Toca traer un superset y filtrar en Node.js. |
 | **No acepta `ORDER BY` sin `TOP/OFFSET`** dentro del query | El query del inventario va sin `ORDER BY`. |
 | **`tamPag` máximo permitido: 1000** | Pedir `tamPag=2000` o más devuelve HTTP 400. |
-| **Paralelismo en queries grandes colapsa con `ECONNRESET`** | El paginado del inventario debe ser secuencial. |
+| **Paralelismo PESADO en queries grandes colapsa con `ECONNRESET`** | El paginado usa un pool de concurrencia ACOTADA (`PAGINACION_CONCURRENCIA`, default 4) con reintento+backoff por página. NO disparar todas las páginas a la vez. |
 | **El campo `condicion=` no se aplica en algunos queries** | No depender de filtros server-side; verificar caso por caso. |
 | **Las claves del response tienen tildes** (`tamaño_página`, `total_páginas`) | El código las busca de forma case-insensitive y por substring para evitar problemas de encoding. |
 | **El response anida los datos en `detalle.Datos`** (no en `data` ni en `Table`) | El fetcher inspecciona varias rutas posibles. |
@@ -387,31 +395,33 @@ Connekta tiene comportamientos no documentados que afectan el diseño:
 ┌──────────────────────────────────────────────────────────────┐
 │ syncVentas()                                                 │
 │                                                              │
-│  PASO 1: ejecutarPaso(3)  →  Procesa CFE (Facturas)          │
+│  PASO 1: ejecutarPaso(1)  →  Procesa CNC (Notas Crédito)     │
 │    │                                                         │
 │    ├─ Lee Connekta (4 queries: ventas, pagos, imptos, cajas) │
 │    ├─ Agrupa por CONSEC_DOCTO                                │
 │    ├─ Filtra exitosos previos (idempotencia)                 │
 │    ├─ Recalcula impuestos (sin redondear por línea)          │
 │    ├─ Aplica cuadre de caja direccional                      │
-│    ├─ Arma plano (registros tipo 100/210/220/230/235/250)    │
+│    ├─ Arma plano (concepto 502, ind_naturaleza 1, pago EFE)  │
 │    └─ Envía POST a Siesa con concurrencia paralela           │
 │         ├─ Si falla por CLIENTE  → syncPOS() → reintenta     │
 │         ├─ Si falla por INVENT.  → CPE (241913) → reintenta  │
 │         └─ Si pasa → guarda OK en logger                     │
 │                                                              │
-│  PASO 2: ejecutarPaso(1)  →  Procesa CNC (Notas Crédito)     │
+│  PASO 2: ejecutarPaso(3)  →  Procesa CFE (Facturas)          │
 │    │                                                         │
-│    └─ Mismo flujo, pero con concepto 502 e ind_naturaleza 1  │
-│       y método de pago forzado a EFE                         │
+│    └─ Mismo flujo, pero con ind_naturaleza 2 (salida) y los  │
+│       medios de pago reales de la caja                       │
 │                                                              │
 │  PASO 3: logger.guardarCorrida()  +  reporteMaestras         │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### ¿Por qué CFE primero y CNC después?
+### ¿Por qué CNC primero y CFE después?
 
-Si se procesan al revés, la CNC devuelve el inventario antes de que la CFE lo saque, generando descuadre de stock en el ERP. El flujo correcto es: CFE saca → CNC devuelve.
+La CNC (simulación, `ind_naturaleza` 1 = **ENTRADA**) ingresa/asegura el stock primero. Así, cuando el CFE (factura real, `ind_naturaleza` 2 = **SALIDA**) consume el inventario, las unidades ya existen y la factura no rebota por *"Item sin cantidad disponible"*. Si aun así faltara stock en cualquiera de los dos pasos, la auto-corrección (CPE) lo inyecta y reintenta. El flujo es: **CNC asegura stock → CFE lo consume**.
+
+> Nota histórica: una versión previa procesaba CFE → CNC con el argumento de evitar descuadre. Se cambió a CNC → CFE (junio 2026) porque al asegurar el stock primero se reducen los rebotes por inventario en la factura real.
 
 ---
 
@@ -535,7 +545,7 @@ El NIT `222222222222` está **excluido en TODOS los queries** (clientes y ventas
 
 ### 10.5 Orden de pasos
 
-**Siempre CFE → CNC**. Nunca al revés.
+**Siempre CNC → CFE** (Nota Crédito / simulación primero, luego Factura real), en QA y en PROD.
 
 ### 10.6 Concurrencia
 Las facturas se procesan en paralelo con `Promise.allSettled` (no `Promise.all`, para que un fallo no aborte el lote). La concurrencia se controla con `CONCURRENCIA` en `.env`.
@@ -770,27 +780,27 @@ El proyecto frontend vive en: \C:\Users\PC\Desktop\merkaPage\Pagina-web_React\
 - La URL del backend se configura via variable de entorno VITE: VITE_SIESA_POS_SYNC_URL
 - En local usa http://localhost:4000, en produccion la URL de Vercel.
 
-### 17.4 Costo promedio en ajustes de inventario (pendiente de decision)
+### 17.4 Costo promedio en ajustes de inventario
 
 #### Como funciona hoy
-En justarInventario() (CPE, dentro de syncVentas.js):
+En `ajustarInventario()` (CPE, dentro de syncVentas.js):
 
-1. Llama a etchCostosPromedio() que usa la query merkahorro_costo_promedio_dev.
-2. merkahorro_costo_promedio_dev consulta \	132_mc_items_instalacion.f132_costo_prom_uni\.
-3. Si el item tiene costo > 0, lo usa.
-4. Si no tiene costo, omite el item del ajuste (NO hay fallback de estimacion).
+1. Llama a `fetchCostoPromedioCompleto()` (vía caché `getCostoCached`) que usa la query merkahorro_costo_promedio_dev.
+2. Esa query lee `t132_mc_items_instalacion.f132_costo_prom_uni` → una fila por item+instalacion.
+3. Construye `costoMap = { idItem -> { instalacion -> costo } }` y elige el costo de la instalacion de la bodega del error (`PV001` -> `001`), con prioridad `001/003/002/007`.
+4. Si el item no tiene costo > 0, lo OMITE del ajuste (NO hay fallback de estimacion).
 
-#### Problema detectado
-La query merkahorro_costo_promedio_dev devuelve 100,000 registros pero **todos con CostoPromInst = 0.0**. No tiene datos utiles de costo.
+#### DECISION RESUELTA: fuente de costo = merkahorro_costo_promedio_dev (exclusiva)
+El antiguo dilema "Opcion A vs B" **ya esta resuelto**. El DBA corrigio la query (antes venia todo en `0.0`) y ahora trae costos reales; ej. el item 773 devuelve `CostoPromInst = 5975.0` en todas las instalaciones (001, 002, 003, 004, 007, 008). Se usa **exclusivamente** `merkahorro_costo_promedio_dev` para valorizar (regla de "costo estricto"); `merkahorro_consulta_inventario` solo se usa para disponibilidad por bodega (y como cross-check de divergencia, no como fuente).
 
-La query existente merkahorro_consulta_inventario SI tiene costos reales (CostoProm con valores como 4066.66, 2700, etc.) desde \	400_cm_existencia.f400_costo_prom_uni\, con 91 de cada 100 registros con costo > 0.
-
-#### Opciones
-- **A)** Descartar merkahorro_costo_promedio_dev y usar el CostoProm de merkahorro_consulta_inventario como fuente primaria, eliminando el fallback del 75%.
-- **B)** El DBA de Siesa debe modificar la query merkahorro_costo_promedio_dev para que traiga costos reales (posiblemente desde \	400_cm_existencia\ en lugar de \	132_mc_items_instalacion\).
+#### Caso investigado: 5975 (query) vs 5894 (Siesa) — junio 2026
+Se observo un CPE del item 773 con costo unitario **5894** cuando la query devuelve **5975**. Un dry-run que replica la logica de seleccion con datos reales confirmo que **el codigo actual selecciona y envia 5975** (elige instalacion `001` = 5975).
+- El `5894` **no lo produce el codigo actual** con estos datos. Solo puede venir de (A) un movimiento de una corrida vieja (el promedio cambia con cada movimiento), o (B) un **recalculo de Siesa**: el motivo `03 ENTRADA INCONSISTENCIA` sobre stock residual negativo promedia ponderadamente y estampa otro valor en la linea.
+- Para cerrar el punto ciego, `ajustarInventario` ahora **loguea el `COSTO_PROMEDIO` exacto que envia** (`🧾 [CPE movimiento]`, `📤 [CPE payload]`) y un `⚠️ [DIVERGENCIA COSTO]` si `t132` (por instalacion) difiere de `t400` (por bodega, de `consulta_inventario`).
 
 ### 17.5 Pendientes
-- [ ] Decidir que fuente de costo promedio usar (opcion A vs B).
+- [ ] Confirmar en vivo si el CPE envia 5975 (leer log `🧾 [CPE movimiento]`); actuar solo si Siesa lo recalcula (cambiar `id_motivo`/`id_concepto` o sanear stock negativo, validar con el funcional de Siesa).
+- [ ] Tunear `PAGINACION_CONCURRENCIA` en produccion segun lo que tolere Connekta (empezar en 4).
 - [ ] Hacer deploy del frontend React a Vercel con la variable VITE_SIESA_POS_SYNC_URL.
 - [ ] Implementar job programado (cron) si se requiere sincronizacion automatica.
 
