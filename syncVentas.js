@@ -11,7 +11,9 @@ const URL_VENTAS_PAGOS = `https://servicios.siesacloud.com/api/connekta/v3/ejecu
 const URL_VENTAS_IMPUESTOS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_imptos_pos_dev`;
 const URL_CAJAS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_cajas_pos_dev`;
 const URL_CONSULTA_INVENTARIO_BASE = `https://serviciosqa.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_consulta_inventario`;
-const URL_COSTO_PROMEDIO_BASE = `https://serviciosqa.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_costo_promedio_dev`;
+// OJO: el costo promedio se lee de PRODUCCIÓN (servicios, no serviciosqa) a propósito: solo se
+// CONSULTA (GET, no escribe nada) para tener el costo real. Inventario y los POST siguen en QA.
+const URL_COSTO_PROMEDIO_BASE = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_costo_promedio_dev`;
 const INVENTARIO_TAM_PAGINA = parseInt(process.env.INVENTARIO_TAM_PAGINA || '1000');
 const INVENTARIO_MAX_PAGINAS = parseInt(process.env.INVENTARIO_MAX_PAGINAS || '100');
 
@@ -322,28 +324,37 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
         const det = itemsMap[idItem];
         const unidad = det ? det.UNIDAD_MEDIDA.trim() : "UND";
 
-        // Buscar costo REAL siempre desde merkahorro_costo_promedio_dev (NUNCA de merkahorro_consulta_inventario)
+        // Buscar costo REAL siempre desde merkahorro_costo_promedio_dev (NUNCA de merkahorro_consulta_inventario).
+        // PRIORIDAD: el costo de la instalación = CO de la factura que estamos procesando va PRIMERO.
+        // Solo si ese CO no tiene costo para el ítem se buscan otras instalaciones.
         let costo = 0;
         let instElegida = null;
-        const instPrincipal = mapBodegaAInstalacion(bodega);
+        // CO de la factura (la instalación en t132 coincide con el CO: PV001 → CO 001 → instalación 001).
+        const coFactura = (itemsFactura[0] && itemsFactura[0].CoDoc != null)
+            ? itemsFactura[0].CoDoc.toString().trim().padStart(3, '0')
+            : null;
+        const instBodega = mapBodegaAInstalacion(bodega); // fallback: instalación de la bodega del error de Siesa
         const prioridad = ['001', '003', '002', '007'];
         const costosItem = costoMap[idItemStr] || {};
         const candidatos = [];
-        if (instPrincipal) candidatos.push(instPrincipal);
-        prioridad.forEach(p => { if (!candidatos.includes(p)) candidatos.push(p); });
-        Object.keys(costosItem).forEach(inst => { if (!candidatos.includes(inst)) candidatos.push(inst); });
+        if (coFactura) candidatos.push(coFactura);                                       // 1) CO de la factura -> PRIMERO
+        if (instBodega && !candidatos.includes(instBodega)) candidatos.push(instBodega); // 2) instalación de la bodega
+        prioridad.forEach(p => { if (!candidatos.includes(p)) candidatos.push(p); });    // 3) prioridad fija
+        Object.keys(costosItem).forEach(inst => { if (!candidatos.includes(inst)) candidatos.push(inst); }); // 4) cualquier otra
 
         for (const inst of candidatos) {
             if (costosItem[inst] && costosItem[inst] > 0) {
                 costo = costosItem[inst];
                 instElegida = inst;
-                console.log(`💰 Costo item ${idItemStr} instalacion ${inst}: ${costo} (t132/costo_promedio_dev). Candidatos disponibles: ${JSON.stringify(costosItem)}`);
+                const origen = inst === coFactura ? 'CO de la factura'
+                    : (inst === instBodega ? 'instalacion de la bodega' : 'fallback otra instalacion');
+                console.log(`💰 Costo item ${idItemStr} instalacion ${inst} (${origen}): ${costo} (t132). CO factura=${coFactura}. Disponibles: ${JSON.stringify(costosItem)}`);
                 break;
             }
         }
 
         if (!costo || costo <= 0) {
-            console.warn(`⚠️ Sin costo real para item ${idItemStr} (bodega ${bodega}, instPrincipal ${instPrincipal}). costoMap[${idItemStr}]=${JSON.stringify(costosItem)}. Se omite del ajuste de inventario.`);
+            console.warn(`⚠️ Sin costo real para item ${idItemStr} (bodega ${bodega}, CO factura ${coFactura}, inst bodega ${instBodega}). costoMap[${idItemStr}]=${JSON.stringify(costosItem)}. Se omite del ajuste de inventario.`);
             return;
         }
 
@@ -369,7 +380,7 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
             "f470_nro_registro": nroRegistro,
             "BODEGA": bodega,
             "f470_id_concepto": 601,
-            "f470_id_motivo": "03",
+            "f470_id_motivo": "17",
             "ind_naturaleza": 2,
             "C.O MOVIMIENTO": "001",
             "UNIDAD_MEDIDA": unidad,
@@ -491,25 +502,68 @@ function formatTasa(number) {
     return parseFloat(number).toFixed(4).padStart(8, '0');
 }
 
-async function ejecutarPaso(pasoActual, consecsOverride = null) {
+// Convierte un string "001,002" en array ["001","002"].
+// Prioridad: 1) valor explícito, 2) variable de entorno, 3) array vacío (sin filtro).
+function parseFilterParam(val, envKey) {
+    const raw = (val !== null && val !== undefined) ? String(val) : (process.env[envKey] || '');
+    return raw.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     console.log("==========================================");
     console.log("🚀 Iniciando Sincronización de Ventas POS");
     console.log("==========================================");
 
-    const detalles = await fetchFromConnekta(URL_VENTAS_DETALLE);
+    const detallesRaw = await fetchFromConnekta(URL_VENTAS_DETALLE);
     const pagosRaw = await fetchFromConnekta(URL_VENTAS_PAGOS);
     const impuestosRaw = await fetchFromConnekta(URL_VENTAS_IMPUESTOS);
     const cajasRaw = await fetchFromConnekta(URL_CAJAS);
 
+    // --- FILTROS DINÁMICOS CO / CAJA / HOY ---
+    // Si la corrida es por CONSECS específicos, NO se aplican filtros CO/Caja/hoy: el consec debe
+    // encontrarse en SU PROPIO CO/Caja, sin que un filtro lo excluya. (El usuario puede dejar el
+    // filtro puesto en el panel y aun así el consec se busca donde realmente está.)
+    const consecsEnvActivos = (process.env.CONSEC_ESPECIFICOS || '').trim();
+    const hayConsecsEspecificos = (Array.isArray(consecsOverride) && consecsOverride.length > 0) || consecsEnvActivos.length > 0;
+
+    let detalles = detallesRaw;
+    if (hayConsecsEspecificos) {
+        console.log('🎯 Modo consec específico: se IGNORAN los filtros CO/Caja/hoy (el consec se busca en su propio CO/Caja).');
+    } else {
+        // CO: normalizamos AMBOS lados a 3 dígitos (ej. "1" → "001") para evitar fallos por padding.
+        const coList = parseFilterParam(filtros.co, 'CO_FILTER').map(c => c.padStart(3, '0'));
+        // Caja: normalizamos a MAYÚSCULAS en ambos lados (ej. "p05" → "P05").
+        const cajaList = parseFilterParam(filtros.caja, 'CAJA_FILTER').map(c => c.toUpperCase());
+        if (coList.length > 0) {
+            detalles = detalles.filter(d => coList.includes((d.CoDoc ?? '').toString().trim().padStart(3, '0')));
+            console.log(`🔍 Filtrando por CO: ${coList.join(', ')} → ${detalles.length} registros de facturas`);
+        }
+        if (cajaList.length > 0) {
+            detalles = detalles.filter(d => cajaList.includes((d.ID_TIPO_DOCTO ?? '').toString().trim().toUpperCase()));
+            console.log(`🔍 Filtrando por Caja: ${cajaList.join(', ')} → ${detalles.length} registros de facturas`);
+        }
+        // Filtro "solo hoy": facturas cuya FECHA_DOCTO sea hoy en America/Bogota.
+        // 'en-CA' da formato YYYY-MM-DD para comparar directo contra FECHA_DOCTO ("2026-06-03T00:00:00" → "2026-06-03").
+        if (filtros.soloHoy) {
+            const hoyBogota = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+            detalles = detalles.filter(d => (d.FECHA_DOCTO || '').toString().split('T')[0] === hoyBogota);
+            console.log(`🔍 Filtrando por fecha = hoy (${hoyBogota}, America/Bogota) → ${detalles.length} registros de facturas`);
+        }
+    }
     if (detalles.length === 0) {
-        console.log("⚠️ No hay facturas para sincronizar. (Query vacío)");
+        console.log("⚠️ No hay facturas para sincronizar. (Filtros CO/Caja sin resultados)");
         return;
     }
+    // Filtrar arrays secundarios para que solo contengan datos de las facturas filtradas
+    const consecsValidos = new Set(detalles.map(d => d.CONSEC_DOCTO));
+    const pagosRawFiltrados = pagosRaw.filter(p => consecsValidos.has(p.CONSEC_DOCTO));
+    const impuestosRawFiltrados = impuestosRaw; // se cruza por RowidMvto, datos huérfanos se ignoran
+    const cajasRawFiltradas = cajasRaw;
 
     // MAPEO DE CAJAS POR CO
     const cajaPorCo = {};
-    if (cajasRaw && cajasRaw.length > 0) {
-        cajasRaw.forEach(c => {
+    if (cajasRawFiltradas && cajasRawFiltradas.length > 0) {
+        cajasRawFiltradas.forEach(c => {
             const co = c.f291_id_co ? c.f291_id_co.toString().trim() : '001';
             const idCaja = c.f291_id ? c.f291_id.toString().trim() : '001';
             if (!cajaPorCo[co]) cajaPorCo[co] = idCaja;
@@ -524,14 +578,14 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
         facturas[consec].items.push(det);
     });
 
-    pagosRaw.forEach(p => {
+    pagosRawFiltrados.forEach(p => {
         const consec = p.CONSEC_DOCTO;
         if (facturas[consec]) facturas[consec].pagos.push(p);
     });
 
     // Mapear impuestos por RowidMvto para búsqueda rápida
     const impuestosPorRowid = {};
-    impuestosRaw.forEach(imp => {
+    impuestosRawFiltrados.forEach(imp => {
         if (imp.ID_LLAVE_IMPUESTO && imp.ID_LLAVE_IMPUESTO !== 'null' && imp.VALOR_TOTAL > 0) {
             if (!impuestosPorRowid[imp.RowidMvto]) impuestosPorRowid[imp.RowidMvto] = [];
             impuestosPorRowid[imp.RowidMvto].push(imp);
@@ -539,7 +593,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
     });
 
     // ORDENAR FACTURAS: dentro de cada paso, las más recientes primero
-    // (sort DESC por consec; el orden CFE/CNC entre pasos lo controla el caller)
+    // (sort DESC por consec; el orden CFZ/CNZ entre pasos lo controla el caller)
     const todasLasFacturas = Object.keys(facturas).sort((a, b) => parseInt(b) - parseInt(a));
 
     // APLICAR FILTRO POR CONSECS ESPECÍFICOS.
@@ -565,9 +619,13 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
         }
     }
 
-    // APLICAR LÍMITE de facturas a procesar (solo en modo normal; en modo específicos respetamos la lista exacta).
+    // APLICAR LÍMITE de facturas a procesar.
+    // - modo específicos (consecs puntuales): respetamos la lista exacta.
+    // - filtros.todas (job automático): procesamos TODAS las filtradas (idempotencia evita repetir OK).
+    // - modo normal: tope LIMITE_FACTURAS (las más recientes).
     const LIMITE = parseInt(process.env.LIMITE_FACTURAS || '1');
-    const facturasOrdenadas = modoEspecificos ? facturasFiltradas : facturasFiltradas.slice(0, LIMITE);
+    const sinTope = modoEspecificos || filtros.todas === true;
+    const facturasOrdenadas = sinTope ? facturasFiltradas : facturasFiltradas.slice(0, LIMITE);
 
     // MOSTRAR LISTADO DE FACTURAS DETECTADAS (solo en el primer paso para no duplicar log)
     if (pasoActual === 3) {
@@ -595,15 +653,15 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
         const Descuentos = [];
         const Caja = [];
 
-        const esSimulacionCNC = (tipoDocumentoSimulado === 'CNC');
-        const tipoDoctoSiesa = esSimulacionCNC ? 'CNC' : 'CFE';
+        const esSimulacionCNZ = (tipoDocumentoSimulado === 'CNZ');
+        const tipoDoctoSiesa = esSimulacionCNZ ? 'CNZ' : 'CFZ';
         // Para diferenciar las consecuciones y que Siesa no se confunda, a la simulacion le ponemos el mismo consecutivo
         // Ya que ID_TIPO_DOCTO es distinto, Siesa las agrupa por separado.
         const consecDoc = enc.CONSEC_DOCTO; 
 
-        const absIfCNC = (val) => {
+        const absIfCNZ = (val) => {
             if (val === null || val === undefined) return val;
-            return esSimulacionCNC ? Math.abs(parseFloat(val)) : parseFloat(val);
+            return esSimulacionCNZ ? Math.abs(parseFloat(val)) : parseFloat(val);
         };
 
         Docto_ventas_comercial.push({
@@ -612,7 +670,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
             "CONSEC_DOCTO": consecDoc,
             "FECHA_DOCTO": formatDate(enc.FECHA_DOCTO),
             "ID_TERCERO": enc.NitTercero,
-            "ID_CLASE_DOCTO": esSimulacionCNC ? 525 : 522,
+            "ID_CLASE_DOCTO": esSimulacionCNZ ? 525 : 522,
             "SUCURSAL_CLIENTE": "001",
             "id_co_fact": enc.CoDoc,
             "TERCERO_REM": enc.NitTercero,
@@ -630,13 +688,13 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
                 "consec_docto": consecDoc,
                 "nro_registro": lineaItem,
                 "BODEGA": det.BODEGA || "MG001",
-                "id_concepto": esSimulacionCNC ? 502 : ({"1201": 501, "1202": 502}[det.Concepto] || 501),
-                "id_motivo": "01",
-                "ind_naturaleza": esSimulacionCNC ? 1 : 2,
+                "id_concepto": esSimulacionCNZ ? 502 : ({"1201": 501, "1202": 502}[det.Concepto] || 501),
+                "id_motivo": "03",
+                "ind_naturaleza": esSimulacionCNZ ? 1 : 2,
                 "id_co_movto": enc.CoDoc,
                 "UNIDAD_MEDIDA": det.UNIDAD_MEDIDA ? det.UNIDAD_MEDIDA.trim() : "UND",
-                "CANTIDAD": formatDecimal(absIfCNC(det.CANTIDAD || det.cant_1), true),
-                "VALOR_BRUTO": formatDecimal(absIfCNC(det.VALOR_BRUTO)),
+                "CANTIDAD": formatDecimal(absIfCNZ(det.CANTIDAD || det.cant_1), true),
+                "VALOR_BRUTO": formatDecimal(absIfCNZ(det.VALOR_BRUTO)),
                 "id_item": det.id_item,
                 "id_un_movto": "001"
             });
@@ -653,7 +711,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
                     "PORCENTAJE_BASE": formatTasa(imp.PORCENTAJE_BASE), 
                     "TASA": formatTasa(imp.TASA),
                     "VLR_UNI": formatDecimal(0),
-                    "VALOR_TOTAL": formatDecimal(absIfCNC(imp.VALOR_TOTAL)) 
+                    "VALOR_TOTAL": formatDecimal(absIfCNZ(imp.VALOR_TOTAL)) 
                 });
             });
 
@@ -667,8 +725,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
                     "id_tipo_docto": tipoDoctoSiesa,
                     "consec_docto": consecDoc,
                     "nro_registro": lineaItem,
-                    "vlr_uni": formatDecimal(absIfCNC(vlrUniDscto)),
-                    "vlr_tot": formatDecimal(absIfCNC(totalDescuentoItem))
+                    "vlr_uni": formatDecimal(absIfCNZ(vlrUniDscto)),
+                    "vlr_tot": formatDecimal(absIfCNZ(totalDescuentoItem))
                 });
             }
         });
@@ -722,7 +780,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
             }
         });
         
-        Object.values(cajaConsolidada).filter(p => esSimulacionCNC ? Math.abs(p.neto) > 0 : p.neto > 0).forEach(p => posCaja += absIfCNC(p.neto));
+        Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0).forEach(p => posCaja += absIfCNZ(p.neto));
         
         // Total Siesa = bruto - descuentos + impuestos (igual al pie de la factura en el ERP).
         // Con los impuestos del POS sin tocar, totalSiesa debería coincidir con posCaja al peso.
@@ -743,7 +801,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
                     cajaConsolidada["EFE"].neto += dif;
                     console.log(`💰 AJUSTE CAJA [${tipoDoctoSiesa}] consec ${consecDoc}: ${dif} pesos restados del EFE original. Total ${totalSiesa} vs Caja ${posCaja}.`);
                 } else {
-                    const medios = Object.values(cajaConsolidada).filter(p => esSimulacionCNC ? Math.abs(p.neto) > 0 : p.neto > 0);
+                    const medios = Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0);
                     if (medios.length > 0) {
                         medios[0].neto += dif;
                         console.log(`💰 AJUSTE CAJA [${tipoDoctoSiesa}] consec ${consecDoc}: ${dif} pesos restados del medio de pago ${medios[0].ID_MEDIOS_PAGO} (no había EFE). Total ${totalSiesa} vs Caja ${posCaja}.`);
@@ -758,13 +816,13 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
             console.log(`✅ Cuadre exacto [${tipoDoctoSiesa}] consec ${consecDoc}: Total ${totalSiesa} = Caja ${posCaja}.`);
         }
 
-        Object.values(cajaConsolidada).filter(p => esSimulacionCNC ? Math.abs(p.neto) > 0 : p.neto > 0).forEach(pago => {
+        Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0).forEach(pago => {
             Caja.push({
                 "ID_CO": enc.CoDoc,
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
                 "CONSEC_DOCTO": consecDoc,
-                "ID_MEDIOS_PAGO": esSimulacionCNC ? "EFE" : pago.ID_MEDIOS_PAGO,
-                "VLR_MEDIO_PAGO": formatDecimal(absIfCNC(pago.neto)),
+                "ID_MEDIOS_PAGO": esSimulacionCNZ ? "EFE" : pago.ID_MEDIOS_PAGO,
+                "VLR_MEDIO_PAGO": formatDecimal(absIfCNZ(pago.neto)),
                 "NRO_CUENTA": pago.NRO_CUENTA || "1",
                 "NRO_CHEQUE": "1",
                 "REFERENCIA": "1",
@@ -816,7 +874,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
         };
         // Bucle acotado de automatización: reintenta el envío mientras el error siga siendo
         // "automatizable" (cliente faltante o inventario insuficiente), inyectando en CADA
-        // ronda lo NUEVO que Siesa reporte (sirve igual para CNC y CFE, y cubre el caso de
+        // ronda lo NUEVO que Siesa reporte (sirve igual para CNZ y CFZ, y cubre el caso de
         // que un reintento revele una falta adicional). Tope de rondas para evitar bucles infinitos.
         const MAX_RONDAS = Math.max(1, parseInt(process.env.MAX_RONDAS_AJUSTE || '3'));
         let clientesSincronizados = false;
@@ -916,7 +974,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
 
     // Construir la lista de tareas (1 por factura aplicable a este paso).
     // Aplica idempotencia: si una factura YA está como OK en Supabase
-    // (para este tipo CFE/CNC), se omite silenciosamente. Las que están en FALLO sí se reintentan.
+    // (para este tipo CFZ/CNZ), se omite silenciosamente. Las que están en FALLO sí se reintentan.
     const consecsExitosos = await logger.obtenerConsecsExitosos();
     const omitidas = [];
     const tareas = [];
@@ -927,26 +985,28 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
             fecha_factura: enc.FECHA_DOCTO ? enc.FECHA_DOCTO.split('T')[0] : null,
             cliente_nit: enc.NitTercero,
             items: fac.items.length,
-            neto: enc.VrNetoDocto
+            neto: enc.VrNetoDocto,
+            co: enc.CoDoc?.toString().trim() || null,
+            caja: enc.ID_TIPO_DOCTO?.toString().trim() || null
         };
 
         if (pasoActual === 1) {
-            // CNC: la simulación CNC corre para TODAS (las P01 también se simulan como CNC).
-            const tipoDocto = 'CNC';
+            // CNZ: la simulación CNZ corre para TODAS (las P01 también se simulan como CNZ).
+            const tipoDocto = 'CNZ';
             if (consecsExitosos.has(`${tipoDocto}:${consecutivo}`)) {
                 omitidas.push(`${tipoDocto} ${consecutivo}`);
                 return;
             }
-            const payload = generarPayloadDocumento(fac, enc, 'CNC');
+            const payload = generarPayloadDocumento(fac, enc, 'CNZ');
             tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDocto, meta });
         } else if (pasoActual === 3) {
-            // CFE: documento real
-            const tipoDoc = 'CFE';
+            // CFZ: documento real
+            const tipoDoc = 'CFZ';
             if (consecsExitosos.has(`${tipoDoc}:${consecutivo}`)) {
                 omitidas.push(`${tipoDoc} ${consecutivo}`);
                 return;
             }
-            const payload = generarPayloadDocumento(fac, enc, 'CFE');
+            const payload = generarPayloadDocumento(fac, enc, 'CFZ');
             tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDoc, meta });
         }
     });
@@ -956,7 +1016,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
     }
 
     if (tareas.length === 0) {
-        console.log(`ℹ️ Paso ${pasoActual === 3 ? 'CFE' : 'CNC'}: no hay facturas aplicables.`);
+        console.log(`ℹ️ Paso ${pasoActual === 3 ? 'CFZ' : 'CNZ'}: no hay facturas aplicables.`);
         return [];
     }
 
@@ -964,7 +1024,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null) {
 
     // Procesar con pool de concurrencia configurable.
     const CONCURRENCIA = Math.max(1, parseInt(process.env.CONCURRENCIA || '2'));
-    console.log(`\n🚀 Enviando ${tareas.length} factura(s) al paso ${pasoActual === 3 ? 'CFE' : 'CNC'} con concurrencia=${CONCURRENCIA}...`);
+    console.log(`\n🚀 Enviando ${tareas.length} factura(s) al paso ${pasoActual === 3 ? 'CFZ' : 'CNZ'} con concurrencia=${CONCURRENCIA}...`);
 
     const resultados = [];
     for (let i = 0; i < tareas.length; i += CONCURRENCIA) {
@@ -1003,6 +1063,17 @@ module.exports = { syncVentas: async (opciones = {}) => {
     // Si se pasa, ignora LIMITE_FACTURAS y CONSEC_ESPECIFICOS del .env.
     const consecsOverride = Array.isArray(opciones.consecs) ? opciones.consecs : null;
 
+    // opciones.co: string "001,003" para filtrar por CO (sobrescribe CO_FILTER del .env).
+    // opciones.caja: string "P05,P03" para filtrar por tipo de caja (sobrescribe CAJA_FILTER del .env).
+    // opciones.todas: true -> procesa TODAS las facturas filtradas (ignora LIMITE_FACTURAS).
+    //   Pensado para el job automático: la idempotencia evita reprocesar las que ya están OK.
+    // opciones.soloHoy: true -> solo facturas cuya FECHA_DOCTO sea HOY (zona America/Bogota).
+    const filtrosCOCaja = {};
+    if (opciones.co !== undefined && opciones.co !== null) filtrosCOCaja.co = opciones.co;
+    if (opciones.caja !== undefined && opciones.caja !== null) filtrosCOCaja.caja = opciones.caja;
+    if (opciones.todas === true) filtrosCOCaja.todas = true;
+    if (opciones.soloHoy === true) filtrosCOCaja.soloHoy = true;
+
     // opciones.limite: sobrescribe LIMITE_FACTURAS solo para esta corrida.
     // Útil para que el dashboard pida "procesar las próximas N facturas".
     // Se restablece al valor original al terminar (incluso si hay error).
@@ -1026,25 +1097,25 @@ module.exports = { syncVentas: async (opciones = {}) => {
     }
     try {
 
-    // Orden de ejecución: en AMBOS entornos se procesa primero la Nota Crédito (CNC,
-    // simulación / paso 1) y luego la Factura real (CFE, paso 3).
+    // Orden de ejecución: en AMBOS entornos se procesa primero la Nota Crédito (CNZ,
+    // simulación / paso 1) y luego la Factura real (CFZ, paso 3).
     const entornoSiesa = (process.env.ENTORNO_SIESA || 'QA').toUpperCase();
     
-    let resCFE = [];
-    let resCNC = [];
+    let resCFZ = [];
+    let resCNZ = [];
     
     if (entornoSiesa === 'PROD') {
-        console.log("🌍 Entorno: PROD -> Ejecutando primero Notas Crédito (CNC) y luego Facturas (CFE)");
-        resCNC = (await ejecutarPaso(1, consecsOverride)) || []; // CNC - Notas crédito
-        resCFE = (await ejecutarPaso(3, consecsOverride)) || []; // CFE - Facturas de venta
+        console.log("🌍 Entorno: PROD -> Ejecutando primero Notas Crédito (CNZ) y luego Facturas (CFZ)");
+        resCNZ = (await ejecutarPaso(1, consecsOverride, filtrosCOCaja)) || []; // CNZ - Notas crédito
+        resCFZ = (await ejecutarPaso(3, consecsOverride, filtrosCOCaja)) || []; // CFZ - Facturas de venta
     } else {
-        console.log("🌍 Entorno: QA -> Ejecutando primero Notas Crédito (CNC) y luego Facturas (CFE)");
-        resCNC = (await ejecutarPaso(1, consecsOverride)) || []; // CNC - Notas crédito
-        resCFE = (await ejecutarPaso(3, consecsOverride)) || []; // CFE - Facturas de venta
+        console.log("🌍 Entorno: QA -> Ejecutando primero Notas Crédito (CNZ) y luego Facturas (CFZ)");
+        resCNZ = (await ejecutarPaso(1, consecsOverride, filtrosCOCaja)) || []; // CNZ - Notas crédito
+        resCFZ = (await ejecutarPaso(3, consecsOverride, filtrosCOCaja)) || []; // CFZ - Facturas de venta
     }
 
-    // Orden del resumen = orden de ejecución (CNC primero, luego CFE) en ambos entornos.
-    const todos = [...resCNC, ...resCFE];
+    // Orden del resumen = orden de ejecución (CNZ primero, luego CFZ) en ambos entornos.
+    const todos = [...resCNZ, ...resCFZ];
     const okCount = todos.filter(r => r.ok).length;
     const failCount = todos.length - okCount;
 

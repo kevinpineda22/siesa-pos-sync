@@ -52,16 +52,22 @@ app.post('/api/sync-ventas', async (req, res) => {
         // Body opcional:
         //   { consecs: ["63951", "63952"] } → reprocesa esos consecs (ignora límite).
         //   { limite: 5 }                   → procesa los próximos 5 (sobrescribe LIMITE_FACTURAS solo esta vez).
+        //   { co: "001,003" }              → filtrar por centros de operación.
+        //   { caja: "P05,P03" }            → filtrar por tipo de caja/tipo de documento.
         // Si no se envía nada, corre el flujo normal con LIMITE_FACTURAS del .env.
         const consecs = Array.isArray(req.body?.consecs) ? req.body.consecs.filter(Boolean).map(String) : null;
         const limiteRaw = req.body?.limite;
         const limite = Number.isFinite(Number(limiteRaw)) && Number(limiteRaw) > 0
             ? parseInt(limiteRaw, 10)
             : null;
+        const co = req.body?.co ? String(req.body.co).trim() : null;
+        const caja = req.body?.caja ? String(req.body.caja).trim() : null;
 
         const opciones = {};
         if (consecs && consecs.length > 0) opciones.consecs = consecs;
         if (limite && !opciones.consecs) opciones.limite = limite; // consecs tiene prioridad
+        if (co) opciones.co = co;
+        if (caja) opciones.caja = caja;
 
         if (opciones.consecs) {
             console.log(`--- 🔄 Recibida petición HTTP para reprocesar consecs: ${opciones.consecs.join(', ')} ---`);
@@ -70,6 +76,10 @@ app.post('/api/sync-ventas', async (req, res) => {
         } else {
             console.log('--- 🔄 Recibida petición HTTP para sincronizar ventas (modo normal) ---');
         }
+        const partesFiltro = [];
+        if (opciones.co) partesFiltro.push(`CO=${opciones.co}`);
+        if (opciones.caja) partesFiltro.push(`Caja=${opciones.caja}`);
+        if (partesFiltro.length > 0) console.log(`   🎯 Filtros: ${partesFiltro.join(', ')}`);
 
         const result = await syncVentas(opciones);
         res.status(200).json({ success: true, data: result });
@@ -84,7 +94,7 @@ app.post('/api/sync-ventas', async (req, res) => {
  *
  * Query params opcionales:
  *   - estado=OK|FALLO       → filtra por estado
- *   - tipo=CFE|CNC|CPE      → filtra por tipo de documento
+ *   - tipo=CFZ|CNZ|CPE      → filtra por tipo de documento
  *   - categoria=...         → filtra por categoría de error (CLIENTE_FALTANTE, etc.)
  *   - consec=63951          → trae el detalle de un consec puntual
  *   - limit=50              → máximo de registros a devolver (default 200, sin tope=todos)

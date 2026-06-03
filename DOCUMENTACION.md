@@ -33,10 +33,10 @@ Por cada venta del POS se generan **2 documentos en Siesa**:
 
 | Documento | Naturaleza | Concepto | Clase | Motivo | Descripción |
 |-----------|------------|----------|-------|--------|-------------|
-| **CFE** (Factura de Venta) | 2 (Egreso de inv.) | 501 | 522 | 01 | Saca el inventario, genera el ingreso |
-| **CNC** (Nota Crédito) | 1 (Entrada de inv.) | 502 | 525 | 01 | Devuelve inventario, anula con efectivo |
+| **CFZ** (Factura de Venta) | 2 (Egreso de inv.) | 501 | 522 | 03 | Saca el inventario, genera el ingreso |
+| **CNZ** (Nota Crédito) | 1 (Entrada de inv.) | 502 | 525 | 03 | Devuelve inventario, anula con efectivo |
 
-**Importante:** la CNC se envía con método de pago **forzado a EFE** (efectivo), sin importar cómo pagó el cliente. Es así por requerimiento contable de Merkahorro.
+**Importante:** la CNZ se envía con método de pago **forzado a EFE** (efectivo), sin importar cómo pagó el cliente. Es así por requerimiento contable de Merkahorro.
 
 Adicionalmente, si Siesa rechaza una factura por **cliente inexistente** o **falta de inventario**, el script se auto-repara:
 - Lanza `syncPOS` para crear el cliente faltante.
@@ -50,7 +50,7 @@ Adicionalmente, si Siesa rechaza una factura por **cliente inexistente** o **fal
 ```
 siesa-pos-sync/
 ├── server.js              # Servidor Express con endpoints HTTP
-├── syncVentas.js          # Motor principal: lee POS, arma CFE/CNC/CPE, envía a Siesa
+├── syncVentas.js          # Motor principal: lee POS, arma CFZ/CNZ/CPE, envía a Siesa
 ├── syncPOS.js             # Sub-módulo: sincroniza maestra de clientes desde POS a Siesa
 ├── logger.js              # Sistema de trazabilidad (logs JSON atómicos)
 ├── verLog.js              # CLI para consultar logs (--pendientes, --consec, --maestras)
@@ -76,7 +76,7 @@ siesa-pos-sync/
 | Archivo | Responsabilidad |
 |---------|-----------------|
 | `server.js` | Expone los endpoints `POST /api/sync-clientes` y `POST /api/sync-ventas`. Llama a `syncVentas()` o `syncPOS()`. |
-| `syncVentas.js` | Orquesta toda la lógica: lee facturas de Connekta, arma los planos para Siesa, calcula cuadre de caja, recalcula impuestos, ejecuta CNC → CFE, dispara auto-correcciones. |
+| `syncVentas.js` | Orquesta toda la lógica: lee facturas de Connekta, arma los planos para Siesa, calcula cuadre de caja, recalcula impuestos, ejecuta CNZ → CFZ, dispara auto-correcciones. |
 | `syncPOS.js` | Lee los clientes del POS, los trunca a los límites varchar de Siesa, y los envía como `GenericTransfer` al ERP. Acepta una lista de NITs específicos para reducir el payload. |
 | `logger.js` | Lee/escribe los archivos en `logs/` de forma **atómica** (`.tmp` + rename). Categoriza errores. Mantiene contadores de intentos y automatizaciones aplicadas. |
 | `verLog.js` | CLI para consultar logs. |
@@ -94,7 +94,7 @@ CONNI_TOKEN=...
 CIA=7375
 
 # Cantidad de facturas a procesar por corrida en modo normal.
-# Toma las más recientes del rango de Connekta (últimos 30 días).
+# Toma las más recientes del rango de Connekta (últimos 180 días).
 LIMITE_FACTURAS=5
 
 # Cuántas facturas se envían a Siesa en paralelo (Promise.allSettled).
@@ -118,6 +118,13 @@ PAGINACION_CONCURRENCIA=4
 # antes de marcarla en FALLO. Cada ronda inyecta lo NUEVO que reporte Siesa. Default 3.
 MAX_RONDAS_AJUSTE=3
 
+# Filtros dinámicos de qué facturas sincronizar (se aplican en Node, no en el SQL).
+# El query trae 180 días de TODOS los COs/cajas; estos filtros acotan en memoria.
+# Prioridad: parámetro del body { co, caja } > variable de entorno > vacío (sin filtro = todo).
+# Defaults seguros que replican el WHERE que antes estaba en el SQL:
+CO_FILTER=001            # Centro(s) de operación. Ej. "001,003". Vacío = todos los COs.
+CAJA_FILTER=P01,P03,P05  # Tipo(s) de caja (ID_TIPO_DOCTO). Ej. "P05". Vacío = todas las cajas.
+
 # Puerto del servidor Express
 PORT=4000
 ```
@@ -129,7 +136,7 @@ PORT=4000
 | Método | Ruta | Descripción | Body |
 |--------|------|-------------|------|
 | `POST` | `/api/sync-clientes` | Ejecuta `syncPOS()` para sincronizar todos los clientes del POS hacia Siesa. | — |
-| `POST` | `/api/sync-ventas` | Ejecuta `syncVentas()`: lee facturas POS, arma documentos, los envía a Siesa con auto-corrección. | — |
+| `POST` | `/api/sync-ventas` | Ejecuta `syncVentas()`: lee facturas POS, arma documentos, los envía a Siesa con auto-corrección. | Opcional: `{ co: "001,003", caja: "P03,P05", consecs: "123,456", limite: 10 }` |
 | `GET` | `/api/logs` | Devuelve facturas procesadas con filtros opcionales (ver query params abajo). | — |
 | `GET` | `/api/logs/corridas` | Lista los snapshots `corrida_*.json` (más reciente primero). | — |
 
@@ -138,7 +145,7 @@ PORT=4000
 | Param | Ejemplo | Efecto |
 |-------|---------|--------|
 | `estado` | `OK` o `FALLO` | Filtra por estado |
-| `tipo` | `CFE`, `CNC`, `CPE` | Filtra por tipo de documento |
+| `tipo` | `CFZ`, `CNZ`, `CPE` | Filtra por tipo de documento |
 | `categoria` | `CLIENTE_FALTANTE`, `INVENTARIO_INSUFICIENTE`, etc. | Filtra por categoría de error |
 | `consec` | `63951` | Devuelve solo ese consec |
 | `limit` | `50` | Máximo de registros (default 200) |
@@ -186,7 +193,7 @@ Esta sección describe **qué hace cada archivo** del repo, para que cualquier d
 | Archivo | Tipo | ¿Qué hace? |
 |---------|------|------------|
 | **`server.js`** | Entry point HTTP | Servidor Express. Levanta los endpoints `POST /api/sync-clientes`, `POST /api/sync-ventas`, `GET /api/logs`, `GET /api/logs/corridas`. Importa `syncPOS`, `syncVentas` y `logger`. Es el archivo que se arranca en producción con `node server.js`. |
-| **`syncVentas.js`** | Motor principal | El cerebro del sistema. Lee las 5 queries de Connekta (ventas, pagos, imptos, cajas, inventario), agrupa por consec, recalcula impuestos, aplica cuadre de caja direccional, arma los planos para CFE/CNC/CPE, envía a Siesa con concurrencia paralela (`Promise.allSettled`), y dispara auto-correcciones cuando hay errores recuperables. Exporta `syncVentas()` (función principal) y helpers internos. |
+| **`syncVentas.js`** | Motor principal | El cerebro del sistema. Lee las 5 queries de Connekta (ventas, pagos, imptos, cajas, inventario), agrupa por consec, recalcula impuestos, aplica cuadre de caja direccional, arma los planos para CFZ/CNZ/CPE, envía a Siesa con concurrencia paralela (`Promise.allSettled`), y dispara auto-correcciones cuando hay errores recuperables. Exporta `syncVentas()` (función principal) y helpers internos. |
 | **`syncPOS.js`** | Sub-módulo clientes | Sincroniza la maestra de clientes del POS hacia Siesa. Trunca cada campo al largo varchar que Siesa exige (RAZON_SOCIAL=40, NOMBRES=30, etc.) y filtra el cliente genérico `222222222222`. Acepta opcionalmente una lista de NITs específicos (`probarSincronizacion(['42683051'])`) para reducir el payload cuando solo falta UN cliente. Es llamado por `server.js` y también por `syncVentas.js` (auto-corrección `CLIENTE_FALTANTE`). |
 | **`logger.js`** | Trazabilidad | Lee/escribe todos los archivos en `logs/` de forma **atómica** (`.tmp` + rename). Funciones públicas: `obtenerConsecsExitosos()`, `registrarResultado(resultado, meta)`, `guardarCorrida(resumen)`, `generarReporteMaestras()`, `categorizarError(detalle)`, `parsearError(mensaje)`. Define las 9 categorías de error y sus regex de detección. |
 | **`verLog.js`** | CLI de consulta | Herramienta de línea de comandos para inspeccionar los logs sin abrir los JSONs manualmente. Soporta flags `--pendientes`, `--consec N`, `--categoria X`, `--maestras`. Útil para diagnóstico rápido y para entregar reportes al equipo contable. |
@@ -206,8 +213,8 @@ Estos archivos se sobrescriben en cada corrida con el último payload enviado a 
 
 | Archivo | Contenido |
 |---------|-----------|
-| **`factura_generada.json`** | Último plano CFE enviado a Siesa (formato `conectoresimportar`). |
-| **`nota_credito_generada.json`** | Último plano CNC enviado. |
+| **`factura_generada.json`** | Último plano CFZ enviado a Siesa (formato `conectoresimportar`). |
+| **`nota_credito_generada.json`** | Último plano CNZ enviado. |
 | **`clientes_enviados_100.json`** | Último lote de clientes que `syncPOS` envió a Siesa. |
 | **`ajuste_inventario_generado.json`** (si existe) | Último CPE generado por auto-corrección de inventario. |
 
@@ -297,7 +304,7 @@ Retorna los medios de pago usados por el cliente para cada venta (puede haber va
 - `MEDIO_PAGO` (códigos: `EFE`, `DOM`, `TR2`, etc.)
 - `VALOR` (monto pagado por ese medio)
 
-**Cómo se usa:** se mapea cada `CONSEC_DOCTO` a un array de pagos. Esto alimenta las líneas tipo `220` del plano CFE.
+**Cómo se usa:** se mapea cada `CONSEC_DOCTO` a un array de pagos. Esto alimenta las líneas tipo `220` del plano CFZ.
 
 ### 5.3 `merkahorro_imptos_pos_dev` — Impuestos por línea
 
@@ -395,7 +402,7 @@ Connekta tiene comportamientos no documentados que afectan el diseño:
 ┌──────────────────────────────────────────────────────────────┐
 │ syncVentas()                                                 │
 │                                                              │
-│  PASO 1: ejecutarPaso(1)  →  Procesa CNC (Notas Crédito)     │
+│  PASO 1: ejecutarPaso(1)  →  Procesa CNZ (Notas Crédito)     │
 │    │                                                         │
 │    ├─ Lee Connekta (4 queries: ventas, pagos, imptos, cajas) │
 │    ├─ Agrupa por CONSEC_DOCTO                                │
@@ -408,7 +415,7 @@ Connekta tiene comportamientos no documentados que afectan el diseño:
 │         ├─ Si falla por INVENT.  → CPE (241913) → reintenta  │
 │         └─ Si pasa → guarda OK en logger                     │
 │                                                              │
-│  PASO 2: ejecutarPaso(3)  →  Procesa CFE (Facturas)          │
+│  PASO 2: ejecutarPaso(3)  →  Procesa CFZ (Facturas)          │
 │    │                                                         │
 │    └─ Mismo flujo, pero con ind_naturaleza 2 (salida) y los  │
 │       medios de pago reales de la caja                       │
@@ -417,24 +424,24 @@ Connekta tiene comportamientos no documentados que afectan el diseño:
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### ¿Por qué CNC primero y CFE después?
+### ¿Por qué CNZ primero y CFZ después?
 
-La CNC (simulación, `ind_naturaleza` 1 = **ENTRADA**) ingresa/asegura el stock primero. Así, cuando el CFE (factura real, `ind_naturaleza` 2 = **SALIDA**) consume el inventario, las unidades ya existen y la factura no rebota por *"Item sin cantidad disponible"*. Si aun así faltara stock en cualquiera de los dos pasos, la auto-corrección (CPE) lo inyecta y reintenta. El flujo es: **CNC asegura stock → CFE lo consume**.
+La CNZ (simulación, `ind_naturaleza` 1 = **ENTRADA**) ingresa/asegura el stock primero. Así, cuando el CFZ (factura real, `ind_naturaleza` 2 = **SALIDA**) consume el inventario, las unidades ya existen y la factura no rebota por *"Item sin cantidad disponible"*. Si aun así faltara stock en cualquiera de los dos pasos, la auto-corrección (CPE) lo inyecta y reintenta. El flujo es: **CNZ asegura stock → CFZ lo consume**.
 
-> Nota histórica: una versión previa procesaba CFE → CNC con el argumento de evitar descuadre. Se cambió a CNC → CFE (junio 2026) porque al asegurar el stock primero se reducen los rebotes por inventario en la factura real.
+> Nota histórica: una versión previa procesaba CFZ → CNZ con el argumento de evitar descuadre. Se cambió a CNZ → CFZ (junio 2026) porque al asegurar el stock primero se reducen los rebotes por inventario en la factura real.
 
 ---
 
 ## 8. Documentos enviados a Siesa
 
-### 8.1 CFE - Factura de Venta (Documento 242756 - FACTURA_DEV)
+### 8.1 CFZ - Factura de Venta (Documento 242756 - FACTURA_DEV)
 
 | Campo Siesa | Valor |
 |-------------|-------|
 | `id_concepto` | `501` |
 | `ind_naturaleza` | `2` (Egreso de inventario) |
 | `ID_CLASE_DOCTO` | `522` |
-| `id_motivo` | `"01"` |
+| `id_motivo` | `"03"` |
 | `F_CONSEC_AUTO_REG` | `"1"` |
 | `f9820_id_fecha_docto` | Entero `YYYYMMDD` (ej. 20260521) |
 
@@ -446,14 +453,14 @@ La CNC (simulación, `ind_naturaleza` 1 = **ENTRADA**) ingresa/asegura el stock 
 - **Tipo 235**: ?
 - **Tipo 250**: ?
 
-### 8.2 CNC - Nota Crédito (Documento 242756 - FACTURA_DEV)
+### 8.2 CNZ - Nota Crédito (Documento 242756 - FACTURA_DEV)
 
 | Campo Siesa | Valor |
 |-------------|-------|
 | `id_concepto` | `502` |
 | `ind_naturaleza` | `1` (Entrada de inventario) |
 | `ID_CLASE_DOCTO` | `525` |
-| `id_motivo` | `"01"` |
+| `id_motivo` | `"03"` |
 | `F_CONSEC_AUTO_REG` | `"1"` |
 
 **Diferencia clave:** los pagos se fuerzan a `MEDIO_PAGO = "EFE"` sin importar lo que vino del POS.
@@ -465,7 +472,7 @@ Se envía automáticamente cuando Siesa rechaza una factura por `"Item sin canti
 | Campo Siesa | Valor |
 |-------------|-------|
 | `f470_id_concepto` | `601` (entero) |
-| `f470_id_motivo` | `"03"` |
+| `f470_id_motivo` | `"17"` |
 | `f350_consec_docto` | `"0"` |
 | Items | Rellenados a **7 caracteres** con padding de ceros |
 
@@ -498,7 +505,7 @@ Se envía automáticamente cuando Siesa rechaza una factura por `"Item sin canti
 
 **Regla:** Siesa rechaza el **lote completo** si UN campo excede su largo. Por eso se trunca preventivamente.
 
-### Detalle factura (POS → CFE)
+### Detalle factura (POS → CFZ)
 
 | Campo POS | Campo Siesa |
 |-----------|-------------|
@@ -545,7 +552,7 @@ El NIT `222222222222` está **excluido en TODOS los queries** (clientes y ventas
 
 ### 10.5 Orden de pasos
 
-**Siempre CNC → CFE** (Nota Crédito / simulación primero, luego Factura real), en QA y en PROD.
+**Siempre CNZ → CFZ** (Nota Crédito / simulación primero, luego Factura real), en QA y en PROD.
 
 ### 10.6 Concurrencia
 Las facturas se procesan en paralelo con `Promise.allSettled` (no `Promise.all`, para que un fallo no aborte el lote). La concurrencia se controla con `CONCURRENCIA` en `.env`.
@@ -598,7 +605,7 @@ El error de Siesa viene como `Item:00050065006Bodega:PV001`. Siesa rellena el ID
 ```json
 {
   "consec": "63951",
-  "tipo": "CFE",
+  "tipo": "CFZ",
   "fecha_factura": "2026-05-21",
   "cliente_nit": "1011511961",
   "items": 8,
@@ -634,7 +641,7 @@ Todos los archivos JSON se escriben con el patrón `escribir a .tmp + rename`. E
 
 ## 13. Idempotencia
 
-El script **NO reenvía** facturas que ya están en estado `OK` en el log. La clave es `${tipo}:${consec}` (ej. `CFE:63951`).
+El script **NO reenvía** facturas que ya están en estado `OK` en el log. La clave es `${tipo}:${consec}` (ej. `CFZ:63951`).
 
 Comportamiento:
 - Factura en `OK` → se omite (se reporta como "omitida por idempotencia").
@@ -656,7 +663,7 @@ node -e "const fs=require('fs'); ['logs/facturas_procesadas.json','logs/facturas
 | `Item sin cantidad disponible` | `INVENTARIO_INSUFICIENTE` | ✅ CPE automático | Ninguna |
 | `El item - extension no existe` | `ITEM_INEXISTENTE` | ❌ Manual | Crear el ítem en Siesa |
 | `unidad de medida... no existe` | `UM_INEXISTENTE` | ❌ Manual | Crear la UM en Siesa |
-| `No existe equivalencia 0-501-01` | `EQUIVALENCIA_FALTA` | ❌ Manual | Configurar equivalencia |
+| `No existe equivalencia 0-501-03` | `EQUIVALENCIA_FALTA` | ❌ Manual | Configurar equivalencia |
 | `500 Internal Server Error` IIS | `OTRO` | 🔄 Reintenta solo | Ninguna |
 
 ---
@@ -718,7 +725,7 @@ curl -X POST http://localhost:4000/api/sync-ventas
 ### Para el equipo de Siesa/Contabilidad
 - [ ] Crear el ítem `0188638` en la maestra de Siesa.
 - [ ] Crear la UM `UND` (Unidad) en la maestra de Siesa.
-- [ ] Configurar equivalencias `0-501-01` y `0-502-01` para movimientos de inventario.
+- [ ] Configurar equivalencias `0-501-03`, `0-502-03`, `INEXCAB01-502-03`, `INEXCCA01-502-03` e `ING05AB03-502-03` para movimientos de inventario.
 
 ### Mejoras futuras del backend
 - [ ] Implementar un job programado (cron) para sincronización automática cada N minutos.
@@ -777,8 +784,10 @@ El proyecto frontend vive en: \C:\Users\PC\Desktop\merkaPage\Pagina-web_React\
 
 - Pagina: src/pages/SiesaPosSync/SiesaPosSync.jsx
 - Servicio: src/services/siesaPosSyncService.js
+- Componentes: ActionsPanel (filtros CO/Caja en `<details>` plegable), ReportesPanel (configuración, generación, historial)
 - La URL del backend se configura via variable de entorno VITE: VITE_SIESA_POS_SYNC_URL
 - En local usa http://localhost:4000, en produccion la URL de Vercel.
+- **Filtros dinámicos:** Desde `ActionsPanel` se envía `{ co, caja }` al backend para filtrar qué COs y tipos de caja sincronizar. Los inputs aparecen dentro de un acordeón plegable con estilos en `SiesaPosSync.css`.
 
 ### 17.4 Costo promedio en ajustes de inventario
 
@@ -787,8 +796,8 @@ En `ajustarInventario()` (CPE, dentro de syncVentas.js):
 
 1. Llama a `fetchCostoPromedioCompleto()` (vía caché `getCostoCached`) que usa la query merkahorro_costo_promedio_dev.
 2. Esa query lee `t132_mc_items_instalacion.f132_costo_prom_uni` → una fila por item+instalacion.
-3. Construye `costoMap = { idItem -> { instalacion -> costo } }` y elige el costo de la instalacion de la bodega del error (`PV001` -> `001`), con prioridad `001/003/002/007`.
-4. Si el item no tiene costo > 0, lo OMITE del ajuste (NO hay fallback de estimacion).
+3. Construye `costoMap = { idItem -> { instalacion -> costo } }` y elige el costo por instalacion en este orden de prioridad: **(1) el CO de la factura** que se esta procesando (`itemsFactura[0].CoDoc`, ej. CO `001` → instalacion `001`) — se busca PRIMERO ahi; **(2)** la instalacion de la bodega del error; **(3)** prioridad fija `001/003/002/007`; **(4)** cualquier otra instalacion con costo. Solo se cae a las siguientes si el CO de la factura no tiene costo para el item.
+4. Si el item no tiene costo > 0 en ninguna instalacion, lo OMITE del ajuste (NO hay fallback de estimacion).
 
 #### DECISION RESUELTA: fuente de costo = merkahorro_costo_promedio_dev (exclusiva)
 El antiguo dilema "Opcion A vs B" **ya esta resuelto**. El DBA corrigio la query (antes venia todo en `0.0`) y ahora trae costos reales; ej. el item 773 devuelve `CostoPromInst = 5975.0` en todas las instalaciones (001, 002, 003, 004, 007, 008). Se usa **exclusivamente** `merkahorro_costo_promedio_dev` para valorizar (regla de "costo estricto"); `merkahorro_consulta_inventario` solo se usa para disponibilidad por bodega (y como cross-check de divergencia, no como fuente).
@@ -798,11 +807,50 @@ Se observo un CPE del item 773 con costo unitario **5894** cuando la query devue
 - El `5894` **no lo produce el codigo actual** con estos datos. Solo puede venir de (A) un movimiento de una corrida vieja (el promedio cambia con cada movimiento), o (B) un **recalculo de Siesa**: el motivo `03 ENTRADA INCONSISTENCIA` sobre stock residual negativo promedia ponderadamente y estampa otro valor en la linea.
 - Para cerrar el punto ciego, `ajustarInventario` ahora **loguea el `COSTO_PROMEDIO` exacto que envia** (`🧾 [CPE movimiento]`, `📤 [CPE payload]`) y un `⚠️ [DIVERGENCIA COSTO]` si `t132` (por instalacion) difiere de `t400` (por bodega, de `consulta_inventario`).
 
-### 17.5 Pendientes
+### 17.5 Cambios recientes (Junio 2026)
+- **Renombrado CNC→CNZ, CFE→CFZ**: Todos los tipos de documento fueron renombrados en backend, frontend y documentación. La idempotencia en Supabase ahora usa `CFZ:consec` / `CNZ:consec`.
+- **Motivos actualizados**: CNZ y CFZ se envian con `f470_id_motivo = "03"` (antes `"01"`). CPE se envia con `f470_id_motivo = "17"` (antes `"03"`).
+- **Prueba de regresión exitosa**: Los logs confirman CNZ/CFZ con motivo 03 y CPE con motivo 17. Siesa reporta `Motivo : 502 -03` y `501 -03` correctamente.
+- **Filtros CO/Caja en frontend**: ActionsPanel ahora tiene inputs para filtrar por CO y tipo de caja, enviados via body del POST.
+
+### 17.6 Sincronización automática (GitHub Actions, cada 2h)
+
+Job que procesa sin intervención las facturas **del día** (CO/Caja indicados) cada 2 horas,
+omitiendo las ya procesadas (idempotencia).
+
+- **Dónde corre:** dentro del runner de GitHub Actions (`node scripts/runSyncCron.js`), **no** vía
+  el endpoint de Vercel. Así se evita el límite de ejecución serverless (10–300s); el runner de
+  Actions tiene hasta 6h. Vercel queda para el frontend y el disparo manual del API.
+- **Archivos:** `.github/workflows/sync-pos.yml` (trigger `schedule: '0 */2 * * *'` UTC +
+  `workflow_dispatch` con inputs `co`/`caja`) y `scripts/runSyncCron.js`.
+- **Opciones nuevas en `syncVentas`:**
+  - `todas: true` → procesa TODAS las facturas filtradas (ignora `LIMITE_FACTURAS`); la idempotencia
+    evita reprocesar las `OK`.
+  - `soloHoy: true` → filtra a las facturas cuya `FECHA_DOCTO` sea **hoy** en `America/Bogota`
+    (se calcula con `toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })`).
+- **Filtro de fecha — diseño:** el control fino del día está en **código** (`soloHoy`), porque
+  Connekta no acepta parámetros. El SQL conserva una **ventana corta** como cota de volumen
+  (recomendado **2 días**: `DATEADD(day, -2, GETDATE())`), porque las queries de
+  ventas/pagos/impuestos usan `fetchFromConnekta` (un solo GET **sin paginar**) y una ventana de
+  180 días podría **truncar** la respuesta. **Ya aplicado en Connekta: ventana = 2 días**
+  (`DATEADD(day, -2, GETDATE())`). Consecuencia: "Consec específico" solo reprocesa consecs de
+  los últimos 2 días.
+- **Secrets en GitHub:** `CONNI_KEY`, `CONNI_TOKEN`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `CIA`,
+  `ENTORNO_SIESA`, `CONCURRENCIA`, `PAGINACION_CONCURRENCIA`, `MAX_RONDAS_AJUSTE`.
+  `CO_FILTER`/`CAJA_FILTER` se pasan por input del dispatch o usan el default (`001` / `P01,P03,P05`).
+- **Caveats:** el cron de GitHub puede retrasarse minutos y se deshabilita tras ~60 días sin
+  actividad del repo. Con `soloHoy`, los FALLOS de días anteriores no se reintentan en el cron de
+  2h (dejar una corrida diaria sin `soloHoy` para catch-up si se necesita).
+
+### 17.7 Pendientes
+- [ ] Solicitar al equipo contable creacion de equivalencias faltantes (`0-501-03`, `0-502-03`, `INEXCAB01-502-03`, `INEXCCA01-502-03`, `ING05AB03-502-03`), items (`0188892`, `0188638`) y UM (`UND`) en Siesa QA.
 - [ ] Confirmar en vivo si el CPE envia 5975 (leer log `🧾 [CPE movimiento]`); actuar solo si Siesa lo recalcula (cambiar `id_motivo`/`id_concepto` o sanear stock negativo, validar con el funcional de Siesa).
 - [ ] Tunear `PAGINACION_CONCURRENCIA` en produccion segun lo que tolere Connekta (empezar en 4).
 - [ ] Hacer deploy del frontend React a Vercel con la variable VITE_SIESA_POS_SYNC_URL.
-- [ ] Implementar job programado (cron) si se requiere sincronizacion automatica.
+- [x] ~~Reducir en Connekta la ventana de fecha de los queries de venta/pagos/impuestos de 180 a 2 días~~ (hecho: `DATEADD(day, -2, GETDATE())`; el "hoy" lo controla el código con `soloHoy`).
+- [ ] Al pasar a PROD: cambiar `URL_CONSULTA_INVENTARIO_BASE` y los POST de Siesa de `serviciosqa.siesacloud.com` a `servicios.siesacloud.com`. (El costo `URL_COSTO_PROMEDIO_BASE` **ya** apunta a `servicios`/PROD: solo se consulta, no escribe.)
+- [ ] Cargar los GitHub Secrets del repo y probar el workflow con `workflow_dispatch`.
+- [x] ~~Implementar job programado (cron) para sincronización automática~~ (hecho: GitHub Actions cada 2h, ver 17.6).
 
 ---
 
@@ -815,7 +863,7 @@ A partir de junio 2026 el sistema incluye un módulo de **reportes profesionales
 El módulo `reportes.js` genera un documento PDF profesional con:
 - **Header corporativo** de Merkahorro
 - **4 tarjetas KPI**: Procesadas, Exitosas, Fallidas, Efectividad
-- **Resumen detallado** del período (desglose CFE/CNC/CPE, total neto)
+- **Resumen detallado** del período (desglose CFZ/CNZ/CPE, total neto)
 - **Tabla de facturas** con estado, cliente, neto, intentos
 - **Sección de automatizaciones** aplicadas (clientes creados, inventario inyectado)
 - **Errores de maestras** que requieren acción manual del equipo Siesa

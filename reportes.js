@@ -186,8 +186,8 @@ async function generarPDF(datos) {
 
     const resItems = [
         { label: 'Total de documentos procesados', value: String(datos.total || 0) },
-        { label: 'Facturas exitosas (CFE)',        value: String(contarPorTipoYEstado(datos.facturas, 'CFE', 'OK')) },
-        { label: 'Notas crédito exitosas (CNC)',   value: String(contarPorTipoYEstado(datos.facturas, 'CNC', 'OK')) },
+        { label: 'Facturas exitosas (CFZ)',        value: String(contarPorTipoYEstado(datos.facturas, 'CFZ', 'OK')) },
+        { label: 'Notas crédito exitosas (CNZ)',   value: String(contarPorTipoYEstado(datos.facturas, 'CNZ', 'OK')) },
         { label: 'Ajustes de inventario (CPE)',    value: String(contarPorTipo(datos.facturas, 'CPE')) },
         { label: 'Documentos fallidos',            value: String(datos.fail || 0) },
         { label: 'Automatizaciones aplicadas',     value: String(datos.automatizaciones || 0) },

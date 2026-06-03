@@ -1,0 +1,61 @@
+name: Sync POS -> Siesa (cada 2h)
+
+# Ejecuta el flujo CNZ->CFZ de las facturas de HOY (zona America/Bogota) para el CO/Caja
+# configurados. Corre DENTRO del runner de GitHub Actions (node directo), no vía Vercel,
+# para no chocar con el límite de ejecución serverless.
+
+on:
+  schedule:
+    # Cada 2 horas. OJO: el cron de GitHub es en UTC y puede retrasarse minutos bajo carga.
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      co:
+        description: 'CO(s) a sincronizar (ej. 001 o 001,003). Vacío = usa el default.'
+        required: false
+        default: ''
+      caja:
+        description: 'Caja(s)/tipo docto (ej. P05 o P01,P03,P05). Vacío = usa el default.'
+        required: false
+        default: ''
+
+# Evita que dos corridas se solapen (no cancela la que está en curso).
+concurrency:
+  group: sync-pos
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Ejecutar sincronización
+        run: node scripts/runSyncCron.js
+        env:
+          # --- Credenciales / conexión (GitHub Secrets) ---
+          CONNI_KEY: ${{ secrets.CONNI_KEY }}
+          CONNI_TOKEN: ${{ secrets.CONNI_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # --- Configuración del flujo ---
+          CIA: ${{ secrets.CIA }}
+          ENTORNO_SIESA: ${{ secrets.ENTORNO_SIESA }}
+          CONCURRENCIA: ${{ secrets.CONCURRENCIA }}
+          PAGINACION_CONCURRENCIA: ${{ secrets.PAGINACION_CONCURRENCIA }}
+          MAX_RONDAS_AJUSTE: ${{ secrets.MAX_RONDAS_AJUSTE }}
+          # --- Filtros CO/Caja: input manual del dispatch tiene prioridad; si no, default ---
+          CO_FILTER: ${{ github.event.inputs.co || '001' }}
+          CAJA_FILTER: ${{ github.event.inputs.caja || 'P01,P03,P05' }}
+          # NOTA: el cron NO envía reporte por correo. Si se quisiera, agregar aquí las SMTP_*.

@@ -101,6 +101,8 @@ async function registrarResultado(resultado, meta = {}) {
     if (meta.cliente_nit) payload.cliente_nit = meta.cliente_nit;
     if (meta.items) payload.items = meta.items;
     if (meta.neto !== undefined) payload.neto = meta.neto;
+    if (meta.co) payload.co = meta.co;
+    if (meta.caja) payload.caja = meta.caja;
     
     if (meta.automatizaciones && meta.automatizaciones.length > 0) {
         const prevAuto = existente ? (existente.automatizaciones_aplicadas || []) : [];
