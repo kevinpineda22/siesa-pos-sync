@@ -39,6 +39,21 @@ const MARGEN = 50;
 const ANCHO_PAGINA = 595.28;  // A4
 const ANCHO_UTIL = ANCHO_PAGINA - MARGEN * 2;
 
+// Traducción de las categorías técnicas de error a lenguaje de negocio (para contabilidad).
+const MOTIVO_PENDIENTE = {
+    EQUIVALENCIA_FALTA:       'Falta crear la equivalencia de inventario/ventas en Siesa',
+    ITEM_INEXISTENTE:         'Falta crear el artículo en la maestra de Siesa',
+    UM_INEXISTENTE:           'Falta registrar la unidad de medida en Siesa',
+    CLIENTE_FALTANTE:         'Cliente incompleto en el POS (sin nombre/apellido)',
+    PUNTO_ENVIO_FALTA:        'Falta configurar el punto de envío en Siesa',
+    DATO_INVALIDO:            'Dato inválido en la factura (ej. valor unitario en $0)',
+    CAMPO_LARGO:              'Un dato excede el tamaño permitido por Siesa',
+    INVENTARIO_INSUFICIENTE:  'Inventario insuficiente (el sistema lo reintenta automáticamente)',
+    PERIODO_CERRADO:          'El período contable está cerrado en Siesa',
+    ERROR_CONEXION_SIESA:     'Problema de conexión con Siesa al momento de registrar',
+    OTRO:                     'Otro motivo (requiere revisión del área técnica)',
+};
+
 // =============================================================================
 // HELPER: Configuración SMTP desde .env
 // =============================================================================
@@ -83,8 +98,8 @@ async function generarPDF(datos) {
         size: 'A4',
         margins: { top: MARGEN, bottom: MARGEN, left: MARGEN, right: MARGEN },
         info: {
-            Title: `Reporte Sincronización POS → Siesa`,
-            Author: 'Siesa POS Sync',
+            Title: `Reporte de Facturación — Merkahorro`,
+            Author: 'Merkahorro',
             Subject: `Período: ${formatearFecha(datos.fechaInicio)} - ${formatearFecha(datos.fechaFin)}`,
         },
     });
@@ -108,7 +123,7 @@ async function generarPDF(datos) {
     doc.fontSize(14)
         .font('Helvetica')
         .fillColor(COLORS.texto)
-        .text('Reporte de Sincronización POS → Siesa QA', MARGEN, 58);
+        .text('Reporte de Facturación', MARGEN, 58);
 
     // Período
     doc.fontSize(10)
@@ -140,10 +155,10 @@ async function generarPDF(datos) {
     const kpiH = 62;
 
     const kpis = [
-        { label: 'PROCESADAS', value: String(datos.total || 0), sub: 'Total facturas', color: COLORS.azul, bg: COLORS.azulSoft },
-        { label: 'EXITOSAS',   value: String(datos.ok || 0),    sub: 'En Siesa OK',     color: COLORS.verde, bg: COLORS.verdeSoft },
-        { label: 'FALLIDAS',   value: String(datos.fail || 0),  sub: 'Requieren revisión', color: COLORS.rojo, bg: COLORS.rojoSoft },
-        { label: 'EFECTIVIDAD', value: calcularPct(datos.ok, datos.total) + '%', sub: `Neto: $${formatearCOP(datos.totalNeto)}`, color: COLORS.gris, bg: COLORS.grisSoft },
+        { label: 'PROCESADOS', value: String(datos.total || 0), sub: 'Documentos del período', color: COLORS.azul, bg: COLORS.azulSoft },
+        { label: 'REGISTRADOS', value: String(datos.ok || 0),   sub: 'Correctos en Siesa', color: COLORS.verde, bg: COLORS.verdeSoft },
+        { label: 'PENDIENTES', value: String(datos.fail || 0),  sub: 'Requieren acción', color: COLORS.rojo, bg: COLORS.rojoSoft },
+        { label: '% REGISTRADO', value: calcularPct(datos.ok, datos.total) + '%', sub: `$${formatearCOP(datos.totalNeto)} neto`, color: COLORS.gris, bg: COLORS.grisSoft },
     ];
 
     kpis.forEach((k, i) => {
@@ -184,15 +199,19 @@ async function generarPDF(datos) {
         .strokeColor(COLORS.borde)
         .stroke();
 
+    const facturasArr = datos.facturas || [];
+    const valorRegistrado = facturasArr.filter(f => f.estado === 'OK').reduce((s, f) => s + (parseFloat(f.neto) || 0), 0);
+    const valorPendiente = facturasArr.filter(f => f.estado !== 'OK').reduce((s, f) => s + (parseFloat(f.neto) || 0), 0);
+
     const resItems = [
-        { label: 'Total de documentos procesados', value: String(datos.total || 0) },
-        { label: 'Facturas exitosas (CFZ)',        value: String(contarPorTipoYEstado(datos.facturas, 'CFZ', 'OK')) },
-        { label: 'Notas crédito exitosas (CNZ)',   value: String(contarPorTipoYEstado(datos.facturas, 'CNZ', 'OK')) },
-        { label: 'Ajustes de inventario (CPE)',    value: String(contarPorTipo(datos.facturas, 'CPE')) },
-        { label: 'Documentos fallidos',            value: String(datos.fail || 0) },
-        { label: 'Automatizaciones aplicadas',     value: String(datos.automatizaciones || 0) },
-        { label: 'Valor total neto procesado',     value: `$${formatearCOP(datos.totalNeto)}` },
-        { label: 'Tasa de éxito',                  value: calcularPct(datos.ok, datos.total) + '%' },
+        { label: 'Facturas de venta registradas (CFZ)', value: String(contarPorTipoYEstado(facturasArr, 'CFZ', 'OK')) },
+        { label: 'Notas crédito registradas (CNZ)',     value: String(contarPorTipoYEstado(facturasArr, 'CNZ', 'OK')) },
+        { label: 'Documentos pendientes',               value: String(datos.fail || 0) },
+        { label: '% registrado en Siesa',               value: calcularPct(datos.ok, datos.total) + '%' },
+        { label: 'Valor registrado en Siesa',           value: `$${formatearCOP(valorRegistrado)}` },
+        { label: 'Valor pendiente por registrar',       value: `$${formatearCOP(valorPendiente)}` },
+        { label: 'Valor neto total del período',        value: `$${formatearCOP(datos.totalNeto)}` },
+        { label: 'Total de documentos',                 value: String(datos.total || 0) },
     ];
 
     let itemY = resY + 26;
@@ -223,77 +242,59 @@ async function generarPDF(datos) {
         doc.fontSize(12)
             .font('Helvetica-Bold')
             .fillColor(COLORS.azul)
-            .text('Detalle de Facturas Procesadas', MARGEN, tablaY);
+            .text('Detalle de Documentos', MARGEN, tablaY);
 
         doc.moveTo(MARGEN, tablaY + 18)
             .lineTo(ANCHO_PAGINA - MARGEN, tablaY + 18)
             .strokeColor(COLORS.borde)
             .stroke();
 
-        // Determinar cuántas facturas mostrar (top 50 para no saturar el PDF)
-        const maxFilas = 50;
+        // Determinar cuántas filas mostrar (top 60 para no saturar el PDF)
+        const maxFilas = 60;
         const facturasMostrar = datos.facturas.slice(0, maxFilas);
-        const encabezados = ['Consec', 'Tipo', 'Fecha', 'Cliente', 'Items', 'Neto', 'Estado'];
-        const colWidths = [50, 36, 56, 72, 32, 64, 48];
+        const encabezados = ['Consec', 'Tipo', 'Fecha', 'Cliente NIT', 'CO·Caja', 'Valor', 'Estado'];
+        const colWidths = [48, 34, 52, 66, 56, 66, 56];
+        const aligns = ['left', 'center', 'left', 'left', 'center', 'right', 'center'];
         const totalW = colWidths.reduce((a, b) => a + b, 0);
         const startX = MARGEN + (ANCHO_UTIL - totalW) / 2;
 
         let rowY = tablaY + 26;
 
-        // Header de la tabla
-        doc.roundedRect(startX - 4, rowY - 4, totalW + 8, 22, 4).fill(COLORS.azul);
-        let hX = startX;
-        encabezados.forEach((h, i) => {
-            doc.fontSize(7)
-                .font('Helvetica-Bold')
-                .fillColor(COLORS.blanco)
-                .text(h, hX + 4, rowY, { width: colWidths[i] - 4, align: i >= 4 ? 'right' : 'left' });
-            hX += colWidths[i];
-        });
-        rowY += 22;
+        const dibujarHeaderTabla = () => {
+            doc.roundedRect(startX - 4, rowY - 4, totalW + 8, 22, 4).fill(COLORS.azul);
+            let hX = startX;
+            encabezados.forEach((h, i) => {
+                doc.fontSize(7).font('Helvetica-Bold').fillColor(COLORS.blanco)
+                    .text(h, hX + 4, rowY, { width: colWidths[i] - 4, align: aligns[i] });
+                hX += colWidths[i];
+            });
+            rowY += 22;
+        };
+        dibujarHeaderTabla();
 
-        // Filas
         facturasMostrar.forEach((f, idx) => {
-            // Salto de página si es necesario
-            if (rowY > 720) {
-                doc.addPage();
-                rowY = MARGEN + 20;
-                // Re-dibujar header en nueva página
-                doc.roundedRect(startX - 4, rowY - 4, totalW + 8, 22, 4).fill(COLORS.azul);
-                hX = startX;
-                encabezados.forEach((h, i) => {
-                    doc.fontSize(7)
-                        .font('Helvetica-Bold')
-                        .fillColor(COLORS.blanco)
-                        .text(h, hX + 4, rowY, { width: colWidths[i] - 4, align: i >= 4 ? 'right' : 'left' });
-                    hX += colWidths[i];
-                });
-                rowY += 22;
-            }
+            if (rowY > 720) { doc.addPage(); rowY = MARGEN + 20; dibujarHeaderTabla(); }
 
             const bg = idx % 2 === 0 ? COLORS.blanco : COLORS.grisSoft;
             doc.rect(startX - 4, rowY - 2, totalW + 8, 18).fill(bg);
 
             const isFallo = f.estado === 'FALLO';
-            hX = startX;
+            let hX = startX;
             const valores = [
                 String(f.consec || ''),
                 f.tipo || '',
                 f.fecha_factura ? f.fecha_factura.slice(0, 10) : '',
                 String(f.cliente_nit || '').slice(0, 12),
-                String(f.items ?? ''),
+                `${f.co || '—'}·${f.caja || '—'}`,
                 f.neto ? `$${Math.round(f.neto).toLocaleString('es-CO')}` : '',
-                f.estado || '',
+                isFallo ? 'Pendiente' : 'Registrada',
             ];
 
             valores.forEach((v, i) => {
                 doc.fontSize(7)
                     .font(i === 6 && isFallo ? 'Helvetica-Bold' : 'Helvetica')
-                    .fillColor(i === 6 && isFallo ? COLORS.rojo : i === 6 ? COLORS.verde : COLORS.texto)
-                    .text(v, hX + 4, rowY, {
-                        width: colWidths[i] - 4,
-                        align: i >= 4 ? 'right' : 'left',
-                    });
+                    .fillColor(i === 6 ? (isFallo ? COLORS.rojo : COLORS.verde) : COLORS.texto)
+                    .text(v, hX + 4, rowY, { width: colWidths[i] - 4, align: aligns[i] });
                 hX += colWidths[i];
             });
             rowY += 18;
@@ -303,70 +304,52 @@ async function generarPDF(datos) {
             doc.fontSize(8)
                 .font('Helvetica')
                 .fillColor(COLORS.gris)
-                .text(`... y ${datos.facturas.length - maxFilas} facturas más`, MARGEN, rowY + 4);
+                .text(`... y ${datos.facturas.length - maxFilas} documentos más`, MARGEN, rowY + 4);
             rowY += 16;
         }
 
         // =====================================================================
-        // AUTOMATIZACIONES
+        // PENDIENTES — ACCIÓN REQUERIDA (en lenguaje de negocio)
         // =====================================================================
-        let autoY = rowY + 20;
-        const facturasConAuto = datos.facturas.filter(f => f.automatizaciones_aplicadas && f.automatizaciones_aplicadas.length > 0);
-        if (facturasConAuto.length > 0) {
-            // Salto de página si es necesario
-            if (autoY > 700) {
-                doc.addPage();
-                autoY = MARGEN + 20;
-            }
+        const pendientes = facturasArr.filter(f => f.estado === 'FALLO');
+        if (pendientes.length > 0) {
+            let secY = rowY + 24;
+            if (secY > 680) { doc.addPage(); secY = MARGEN + 20; }
 
-            doc.fontSize(12)
-                .font('Helvetica-Bold')
-                .fillColor(COLORS.azul)
-                .text('Automatizaciones Aplicadas', MARGEN, autoY);
+            doc.fontSize(12).font('Helvetica-Bold').fillColor(COLORS.rojo)
+                .text('Pendientes — Acción requerida', MARGEN, secY);
+            doc.moveTo(MARGEN, secY + 18).lineTo(ANCHO_PAGINA - MARGEN, secY + 18)
+                .strokeColor(COLORS.borde).stroke();
+            doc.fontSize(8).font('Helvetica').fillColor(COLORS.textoSec)
+                .text('Documentos que aún no se registran en Siesa, agrupados por motivo:', MARGEN, secY + 24);
 
-            // Contar tipos de automatizaciones
-            const conteoAuto = {};
-            facturasConAuto.forEach(f => {
-                f.automatizaciones_aplicadas.forEach(a => {
-                    const tipo = a.startsWith('sync_cliente') ? 'Clientes creados' : 'Ajustes de inventario';
-                    conteoAuto[tipo] = (conteoAuto[tipo] || 0) + 1;
+            // Agrupar los pendientes por motivo (traducido a lenguaje de negocio)
+            const grupos = {};
+            pendientes.forEach(f => {
+                const motivo = MOTIVO_PENDIENTE[f.categoria_error] || MOTIVO_PENDIENTE.OTRO;
+                (grupos[motivo] = grupos[motivo] || []).push(f);
+            });
+
+            let pY = secY + 42;
+            Object.entries(grupos).forEach(([motivo, fs]) => {
+                if (pY > 750) { doc.addPage(); pY = MARGEN + 20; }
+                doc.circle(MARGEN + 7, pY + 5, 3).fill(COLORS.rojo);
+                doc.fontSize(9.5).font('Helvetica-Bold').fillColor(COLORS.texto)
+                    .text(`${motivo}  (${fs.length})`, MARGEN + 18, pY, { width: ANCHO_UTIL - 24 });
+                pY += 16;
+                fs.slice(0, 10).forEach(f => {
+                    if (pY > 770) { doc.addPage(); pY = MARGEN + 20; }
+                    const linea = `Consec ${f.consec}   ·   NIT ${f.cliente_nit || '—'}   ·   ${f.co || '—'}/${f.caja || '—'}   ·   $${formatearCOP(f.neto)}`;
+                    doc.fontSize(8).font('Helvetica').fillColor(COLORS.textoSec)
+                        .text(linea, MARGEN + 22, pY, { width: ANCHO_UTIL - 30 });
+                    pY += 12;
                 });
-            });
-
-            let aY = autoY + 20;
-            Object.entries(conteoAuto).forEach(([tipo, count]) => {
-                doc.fontSize(9)
-                    .font('Helvetica')
-                    .fillColor(COLORS.texto)
-                    .text(`• ${tipo}: ${count} vez/veces`, MARGEN + 10, aY);
-                aY += 16;
-            });
-        }
-
-        // =====================================================================
-        // ERRORES DE MAESTRAS (si hay)
-        // =====================================================================
-        if (datos.erroresMaestras && datos.erroresMaestras.length > 0) {
-            let errY = Math.max(autoY + 60, autoY + 40);
-
-            // Salto de página
-            if (errY > 700) {
-                doc.addPage();
-                errY = MARGEN + 20;
-            }
-
-            doc.fontSize(12)
-                .font('Helvetica-Bold')
-                .fillColor(COLORS.rojo)
-                .text('Errores de Maestras — Requieren Acción Manual', MARGEN, errY);
-
-            let eY = errY + 20;
-            datos.erroresMaestras.forEach((err) => {
-                doc.fontSize(8)
-                    .font('Helvetica')
-                    .fillColor(COLORS.texto)
-                    .text(`• ${err}`, MARGEN + 10, eY, { width: ANCHO_UTIL - 20 });
-                eY += 14;
+                if (fs.length > 10) {
+                    doc.fontSize(8).font('Helvetica-Oblique').fillColor(COLORS.gris)
+                        .text(`… y ${fs.length - 10} documento(s) más con este motivo`, MARGEN + 22, pY);
+                    pY += 12;
+                }
+                pY += 10;
             });
         }
     }
@@ -389,7 +372,7 @@ async function generarPDF(datos) {
             .font('Helvetica')
             .fillColor(COLORS.gris)
             .text(
-                'Merkahorro — Siesa POS Sync • Reporte generado automáticamente',
+                'Merkahorro — Reporte de Facturación • Generado automáticamente',
                 MARGEN,
                 fy + 6,
                 { align: 'center', width: ANCHO_UTIL }
@@ -424,13 +407,13 @@ async function enviarCorreo({ pdfBuffer, destinatarios, periodo, resumen }) {
     const transporter = getTransporter();
 
     const info = await transporter.sendMail({
-        from: `"Merkahorro — Siesa POS Sync" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
+        from: `"Merkahorro — Reportes" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
         to: destinatarios.join(', '),
-        subject: `📊 Reporte Sincronización POS → Siesa — ${periodo}`,
+        subject: `📊 Reporte de Facturación — Merkahorro — ${periodo}`,
         html: cuerpoHTML(periodo, resumen),
         attachments: [
             {
-                filename: `reporte-siesa-${periodo.replace(/[\/—]/g, '-').replace(/\s+/g, '_')}.pdf`,
+                filename: `reporte-facturacion-${periodo.replace(/[\/—]/g, '-').replace(/\s+/g, '_')}.pdf`,
                 content: pdfBuffer,
                 contentType: 'application/pdf',
             },
@@ -452,7 +435,7 @@ function cuerpoHTML(periodo, resumen) {
     <tr>
       <td style="background: #210d65; padding: 24px 30px; text-align: center;">
         <h1 style="color: #ffffff; margin: 0; font-size: 22px;">MERKAHORRO</h1>
-        <p style="color: #c2c6e0; margin: 6px 0 0; font-size: 14px;">Reporte de Sincronización POS → Siesa QA</p>
+        <p style="color: #c2c6e0; margin: 6px 0 0; font-size: 14px;">Reporte de Facturación</p>
       </td>
     </tr>
     <tr>
@@ -462,19 +445,19 @@ function cuerpoHTML(periodo, resumen) {
         <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
           <tr>
             <td style="background: #e8e4f3; padding: 14px; text-align: center; border-radius: 8px 0 0 8px;">
-              <div style="color: #210d65; font-size: 11px; font-weight: 600;">PROCESADAS</div>
+              <div style="color: #210d65; font-size: 11px; font-weight: 600;">PROCESADOS</div>
               <div style="color: #2c3e50; font-size: 24px; font-weight: 700;">${resumen.total || 0}</div>
             </td>
             <td style="background: #d5f5e3; padding: 14px; text-align: center;">
-              <div style="color: #2ecc71; font-size: 11px; font-weight: 600;">EXITOSAS</div>
+              <div style="color: #2ecc71; font-size: 11px; font-weight: 600;">REGISTRADOS</div>
               <div style="color: #2c3e50; font-size: 24px; font-weight: 700;">${resumen.ok || 0}</div>
             </td>
             <td style="background: #fde8e8; padding: 14px; text-align: center;">
-              <div style="color: #e74c3c; font-size: 11px; font-weight: 600;">FALLIDAS</div>
+              <div style="color: #e74c3c; font-size: 11px; font-weight: 600;">PENDIENTES</div>
               <div style="color: #2c3e50; font-size: 24px; font-weight: 700;">${resumen.fail || 0}</div>
             </td>
             <td style="background: #f0f0f0; padding: 14px; text-align: center; border-radius: 0 8px 8px 0;">
-              <div style="color: #7f8c8d; font-size: 11px; font-weight: 600;">EFECTIVIDAD</div>
+              <div style="color: #7f8c8d; font-size: 11px; font-weight: 600;">% REGISTRADO</div>
               <div style="color: ${barColor}; font-size: 24px; font-weight: 700;">${pct}%</div>
             </td>
           </tr>
@@ -482,14 +465,14 @@ function cuerpoHTML(periodo, resumen) {
 
         <div style="background: #f8f9fa; border-radius: 8px; padding: 16px; margin: 16px 0;">
           <p style="margin: 0; color: #2c3e50; font-size: 13px;">
-            El reporte PDF adjunto contiene el detalle completo de las <strong>${resumen.total || 0}</strong> 
-            facturas procesadas en el período, incluyendo KPIs, tabla de facturas, 
-            automatizaciones aplicadas y errores de maestras.
+            El PDF adjunto contiene el detalle de los <strong>${resumen.total || 0}</strong> documentos
+            del período: resumen financiero, detalle de cada factura y nota crédito, y la lista de
+            <strong>pendientes con la acción requerida</strong> para registrarlos en Siesa.
           </p>
         </div>
 
         <p style="color: #7f8c8d; font-size: 11px; text-align: center; margin-top: 20px;">
-          Este correo fue generado automáticamente por el sistema Siesa POS Sync.<br>
+          Este correo fue generado automáticamente por el sistema de facturación de Merkahorro.<br>
           ${new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' })}
         </p>
       </td>

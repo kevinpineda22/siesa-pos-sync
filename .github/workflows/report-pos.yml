@@ -1,0 +1,55 @@
+name: Reporte diario de facturación (6:00 a.m.)
+
+# Genera y envía por correo el reporte del DÍA ANTERIOR, todos los días a las 6:00 a.m. (Bogotá).
+# Corre en el runner de GitHub Actions (Node directo): lee Supabase y envía vía SMTP.
+
+on:
+  schedule:
+    # 11:00 UTC = 6:00 a.m. en Bogotá (UTC-5). El cron de GitHub puede retrasarse algunos minutos.
+    - cron: '0 11 * * *'
+  workflow_dispatch:
+    inputs:
+      fecha:
+        description: 'PRUEBA: fecha YYYY-MM-DD a reportar (vacío = ayer).'
+        required: false
+        default: ''
+
+concurrency:
+  group: report-pos
+  cancel-in-progress: false
+
+jobs:
+  reporte:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Node >= 22 (requisito de @supabase/supabase-js).
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Generar y enviar reporte
+        run: node scripts/runReporte.js
+        env:
+          # --- Datos (Supabase) ---
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # --- Envío de correo (SMTP) ---
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_SECURE: ${{ secrets.SMTP_SECURE }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          # --- Destinatarios: por secret (coma) o, si está vacío, los de la config en Supabase ---
+          REPORTE_DESTINATARIOS: ${{ secrets.REPORTE_DESTINATARIOS }}
+          # --- Fecha a reportar (solo para 'Run workflow' de prueba; vacío = ayer) ---
+          REPORTE_FECHA: ${{ github.event.inputs.fecha }}
