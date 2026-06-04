@@ -19,6 +19,16 @@
  */
 require('dotenv').config();
 const { syncVentas } = require('../syncVentas');
+const { parsearError } = require('../logger');
+
+// Categorías de FALLO que son por DATOS/MAESTRAS o reglas de negocio (esperadas): NO ponen
+// el job en rojo, pero quedan visibles en el dashboard. Cualquier otra categoría
+// (ERROR_CONEXION_SIESA, OTRO/desconocido) se considera ERROR REAL y sí pone el job en rojo.
+const CAT_NO_CRITICAS = new Set([
+    'CLIENTE_FALTANTE', 'INVENTARIO_INSUFICIENTE', 'ITEM_INEXISTENTE',
+    'UM_INEXISTENTE', 'EQUIVALENCIA_FALTA', 'PUNTO_ENVIO_FALTA',
+    'DATO_INVALIDO', 'CAMPO_LARGO', 'PERIODO_CERRADO'
+]);
 
 (async () => {
     const co = process.env.CO_FILTER;     // puede venir vacío -> syncVentas cae al fallback de .env
@@ -50,8 +60,21 @@ const { syncVentas } = require('../syncVentas');
         const ok = res && typeof res.ok === 'number' ? res.ok : 0;
         const total = res && typeof res.total === 'number' ? res.total : 0;
         console.log(`\n🏁 Job finalizado. Total=${total} | OK=${ok} | FALLO=${fail}`);
-        // Exit 1 si hubo fallos, para que el run de Actions quede en rojo y se revise.
-        process.exit(fail > 0 ? 1 : 0);
+
+        // El job se marca en ROJO solo ante ERRORES REALES (conexión/desconocido), no por
+        // FALLOS de maestras/datos (esos son esperados y se ven en el dashboard).
+        const fallidas = (res && Array.isArray(res.detalle) ? res.detalle : []).filter(r => !r.ok);
+        const erroresReales = fallidas.filter(r => !CAT_NO_CRITICAS.has(parsearError(r.mensaje).categoria));
+
+        if (erroresReales.length > 0) {
+            console.error(`❌ ${erroresReales.length} factura(s) con ERROR REAL (conexión/desconocido) -> el job queda en ROJO:`);
+            erroresReales.forEach(r => console.error(`   [${r.tipo} ${r.consecutivo}] categoría=${parsearError(r.mensaje).categoria}`));
+            process.exit(1);
+        }
+        if (fail > 0) {
+            console.log(`ℹ️ ${fail} factura(s) en FALLO por maestras/datos (esperado, visibles en el dashboard). El job NO se marca en rojo.`);
+        }
+        process.exit(0);
     } catch (e) {
         console.error('❌ Error fatal en el job:', e.message);
         console.error(e.stack);
