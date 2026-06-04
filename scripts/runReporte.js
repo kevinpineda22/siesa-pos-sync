@@ -34,6 +34,13 @@ const reportes = require('../reportes');
     console.log('==================================================');
 
     try {
+        // Respetar el switch "Activado/Desactivado" del dashboard (Reportes → Configuración).
+        const config = await reportes.getConfig();
+        if (config && config.activo === false) {
+            console.log('⏸️ Envío automático DESACTIVADO en el dashboard (Reportes → Configuración → Estado). No se envía.');
+            process.exit(0);
+        }
+
         const opts = { fechaInicio: fecha, fechaFin: fecha };
         if (destEnv.length > 0) opts.destinatarios = destEnv;
 
