@@ -414,8 +414,11 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
     while (intentosAjuste < MAX_INTENTOS_AJUSTE && !ajusteExitoso) {
         intentosAjuste++;
         console.log(`📦 Inyectando inventario automáticamente (Intento ${intentosAjuste}/${MAX_INTENTOS_AJUSTE})...`);
-        // Trazabilidad: resumen de lo que ENVIAMOS en este intento (item -> costo/cantidad).
-        console.log(`📤 [CPE payload] Movimientos a enviar: ${payload.Movimientos.map(m => `${m.ITEM}:cost=${m.COSTO_PROMEDIO}:cant=${m.CANTIDAD}`).join(' | ')}`);
+        // Trazabilidad: qué ENVIAMOS exactamente (motivo/concepto/clase + items).
+        const _doc = payload.Documentos[0] || {};
+        const _mov0 = payload.Movimientos[0] || {};
+        console.log(`📤 [CPE payload] Documento: clase=${_doc.f350_id_clase_docto} concepto_doc=${_doc.f450_id_concepto} | Movimiento: motivo=${_mov0.f470_id_motivo} concepto=${_mov0.f470_id_concepto} naturaleza=${_mov0.ind_naturaleza}`);
+        console.log(`📤 [CPE items] ${payload.Movimientos.map(m => `${m.ITEM}:cost=${m.COSTO_PROMEDIO}:cant=${m.CANTIDAD}:mot=${m.f470_id_motivo}`).join(' | ')}`);
         try {
             const response = await axios.post(URL_AJUSTE_INVENTARIO, payload, {
                 headers: {
