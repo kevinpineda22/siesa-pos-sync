@@ -18,6 +18,16 @@ on:
         description: 'Caja(s)/tipo docto (ej. P05 o P01,P03,P05). Vacío = usa el default.'
         required: false
         default: ''
+      limite:
+        description: 'PRUEBA: procesar solo N facturas (vacío = todas las del día).'
+        required: false
+        default: ''
+      solo_hoy:
+        description: 'Filtrar solo facturas de HOY (en pruebas pon false si hoy no hay).'
+        required: false
+        type: choice
+        options: ['true', 'false']
+        default: 'true'
 
 # Evita que dos corridas se solapen (no cancela la que está en curso).
 concurrency:
@@ -58,4 +68,7 @@ jobs:
           # --- Filtros CO/Caja: input manual del dispatch tiene prioridad; si no, default ---
           CO_FILTER: ${{ github.event.inputs.co || '001' }}
           CAJA_FILTER: ${{ github.event.inputs.caja || 'P01,P03,P05' }}
+          # --- Modo prueba (solo aplica en "Run workflow"; el cron los deja vacíos = producción) ---
+          CRON_LIMITE: ${{ github.event.inputs.limite || '' }}
+          CRON_SOLO_HOY: ${{ github.event.inputs.solo_hoy || 'true' }}
           # NOTA: el cron NO envía reporte por correo. Si se quisiera, agregar aquí las SMTP_*.

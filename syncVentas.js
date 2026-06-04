@@ -870,7 +870,9 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         const automatizaciones = [];
         const registrar = async (resultado) => {
             await logger.registrarResultado(resultado, { ...meta, automatizaciones });
-            return resultado;
+            // Incluir co/caja en el resultado para que el snapshot de corrida (sps_corridas)
+            // y el Historial del frontend puedan mostrar de qué CO/Caja es cada CNZ/CFZ.
+            return { ...resultado, co: meta.co, caja: meta.caja };
         };
         // Bucle acotado de automatización: reintenta el envío mientras el error siga siendo
         // "automatizable" (cliente faltante o inventario insuficiente), inyectando en CADA
@@ -878,6 +880,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         // que un reintento revele una falta adicional). Tope de rondas para evitar bucles infinitos.
         const MAX_RONDAS = Math.max(1, parseInt(process.env.MAX_RONDAS_AJUSTE || '3'));
         let clientesSincronizados = false;
+        let fallosInyeccion = 0; // fallos CONSECUTIVOS del ajuste de inventario
         for (let ronda = 0; ronda <= MAX_RONDAS; ronda++) {
             try {
                 const responseSiesa = await axios.post(URL_SIESA_POST, payload, {
@@ -952,8 +955,18 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                         const consecAjuste = parseInt(Date.now().toString().slice(-7));
                         await ajustarInventario(errores, detallesFactura, consecAjuste);
                         accionTomada = true;
+                        fallosInyeccion = 0;
                     } catch (ajusteError) {
                         console.error(`❌ [${tipoDoctoSiesa} ${consecutivo}] Error en ajuste de inventario:`, ajusteError.message);
+                        // El ajuste LANZÓ, pero el stock pudo haberse inyectado parcialmente, o por
+                        // otra factura concurrente del mismo lote. Damos un reintento del documento
+                        // (puede que el stock ya esté), salvo que la inyección haya fallado 2 veces
+                        // seguidas -> ahí sí lo tratamos como irrecuperable en esta corrida.
+                        fallosInyeccion++;
+                        if (fallosInyeccion < 2) {
+                            accionTomada = true;
+                            console.log(`↻ [${tipoDoctoSiesa} ${consecutivo}] Reintento de cortesía: el stock pudo haberse inyectado de todos modos.`);
+                        }
                     }
                 }
 
@@ -1040,7 +1053,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 console.log(`${icon} [${r.value.tipo} ${r.value.consecutivo}] ${r.value.mensaje}`);
             } else {
                 const t = lote[idx];
-                const fallo = { consecutivo: t.consecutivo, tipo: t.tipo, ok: false, mensaje: r.reason?.message || 'Error desconocido' };
+                const fallo = { consecutivo: t.consecutivo, tipo: t.tipo, ok: false, mensaje: r.reason?.message || 'Error desconocido', co: t.meta.co, caja: t.meta.caja };
                 await logger.registrarResultado(fallo, t.meta);
                 resultados.push(fallo);
                 console.log(`❌ [${t.tipo} ${t.consecutivo}] ${r.reason?.message || 'Error desconocido'}`);

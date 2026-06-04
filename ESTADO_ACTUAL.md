@@ -45,6 +45,7 @@ El flujo cuenta con auto-corrección para inyectar inventario faltante (CPE) y s
    - `enviarFacturaASiesa` reintenta el envío en un **bucle de hasta `MAX_RONDAS_AJUSTE` rondas** (default `3`), inyectando en cada ronda lo NUEVO que pida Siesa.
    - Cubre el caso de que un reintento revele una falta **adicional** (ítem distinto o más cantidad). Funciona igual para CNZ y CFZ (la función es compartida).
    - Si el error no es automatizable (maestras, valor inválido) o una ronda no puede hacer nada nuevo → FALLO inmediato (no gasta rondas).
+   - **Reintento de cortesía ante fallo de inyección (junio 2026):** si `ajustarInventario` lanza error, el stock pudo haberse inyectado parcialmente o por otra factura concurrente del mismo lote. Por eso se reintenta el documento UNA vez más; solo si la inyección falla **2 veces seguidas** (`fallosInyeccion >= 2`) se marca FALLO. Esto reduce los FALLO **transitorios** por orden/concurrencia (ej. la CNZ falla porque el stock aún no estaba, pero la CFZ —que corre después— ya lo encuentra). Lo que aun así quede en FALLO se auto-cura en la siguiente corrida del cron.
 9. **Filtrado Dinámico por CO y Tipo de Caja (backend + frontend):**
    - **Motivación:** El dashboard (frontend) necesita poder elegir qué Centro de Operación (`CO`) y qué tipo de caja (`P03`, `P05`, etc.) sincronizar en cada corrida, sin tener que editar queries SQL ni reiniciar el servidor.
    - **Cómo estaba antes:** Los 3 queries de Connekta (`merkahorro_venta_pos_dev`, `merkahorro_pagos_pos_dev`, `merkahorro_imptos_pos_dev`) tenían filtros fijos `f9820_id_co = '001' AND f9820_id_tipo_docto IN ('P01','P03','P05')` en el WHERE. Para cambiar de CO o caja había que modificar las queries manualmente en la base de datos de Supabase (Connekta). El frontend no tenía control alguno sobre qué datos traer.
@@ -80,6 +81,25 @@ El flujo cuenta con auto-corrección para inyectar inventario faltante (CPE) y s
     - Siesa reporta `Motivo : 502 -03` y `501 -03` correctamente en los documentos.
     - El payload CPE muestra `"f470_id_motivo": "17"`.
     - Las únicas fallas observadas son por maestras faltantes en Siesa QA (equivalencias, ítems, UMs), no por errores de código.
+13. **Modo PRUEBA del job (`runSyncCron.js` + workflow):**
+    - Nuevas variables que lee el runner: `CRON_LIMITE` (>0 → procesa solo N facturas en vez de todas) y `CRON_SOLO_HOY` (`"false"` → no filtra por hoy, útil cuando hoy aún no hay facturas).
+    - El `workflow_dispatch` ganó inputs `limite` y `solo_hoy` (se mapean a esas variables). El cron automático los deja vacíos → comportamiento de producción (todas las del día).
+    - Ejemplo local: `CRON_LIMITE=5 CRON_SOLO_HOY=false node scripts/runSyncCron.js`.
+14. **Captura de CO/Caja en histórico + Frontend:**
+    - El `meta` de cada factura ya incluye `co` (`CoDoc`) y `caja` (`ID_TIPO_DOCTO`); `logger.js` los persiste en las columnas `co`/`caja` de `sps_facturas`.
+    - Los resultados también llevan `co`/`caja` (en `registrar` y en el objeto `fallo`), así que los snapshots de corrida (`sps_corridas`) los incluyen → el **Historial de corridas** del frontend los muestra.
+    - **Frontend (`SiesaPosSync.jsx`):** columna **"CO · Caja"** con chips en la tabla, tarjeta CO·Caja en el modal de detalle, chip en el Historial, y nuevo **filtro por CO y por Caja** en la barra de filtros de la tabla (selects poblados con los valores existentes).
+    - ⚠️ Las facturas/corridas **viejas** tienen `co`/`caja` en `null` (se muestran como "—"); solo las nuevas o reprocesadas los traen.
+15. **Frontend: rediseño visual + Reportes en modal + se quitó "Sincronizar Clientes":**
+    - Mejoras visuales en `SiesaPosSync.css` (fondo con profundidad, header con acento, KPIs con glass + barra de acento, botones con gradiente, animaciones, respeta `prefers-reduced-motion`).
+    - **Reportes** ahora abre en un **modal** (botón en el header), ya no ocupa espacio fijo. Cierra con clic afuera, botón ✕ o `Escape`.
+    - Se **eliminó el botón "Sincronizar Clientes"** del panel: ese proceso ocurre **automático** dentro del flujo cuando Siesa rechaza por cliente faltante (`syncPOS`).
+16. **Fix de parseo de errores (Detalle vacío en frontend):**
+    - `logger.parsearError` ahora extrae el JSON de Siesa **desde el primer `{`**, sin importar el prefijo del mensaje (`"Reintento falló: "`, `"Sin más automatización posible: "`, `"Agotadas N ronda(s)...: "`). Antes esos mensajes no se parseaban y el frontend mostraba `Detalle: []`.
+17. **Prueba en vivo del job validada (junio 2026):**
+    - Corrida real contra Siesa QA (`CRON_LIMITE=5`): `Total=10 (5 CNZ + 5 CFZ) | OK=5 | FALLO=5`.
+    - Confirmado funcionando: filtro CO/Caja, límite, orden CNZ→CFZ, auto-sync de clientes, auto-inyección de inventario (CPE) con costo por CO de la factura, instrumentación del costo, retry acotado, idempotencia y logging en Supabase.
+    - Los 5 FALLO fueron por **maestras faltantes** (no código). Un FALLO transitorio de inventario (CNZ 142194) se **auto-curó al reprocesar** (la CFZ ya lo había dejado con stock) — caso que motivó el "reintento de cortesía" del punto 8.
 
 ## 4. Tareas Pendientes / Bloqueos Actuales
 El código fuente ya opera correctamente, pero existen bloqueos a nivel de datos y reglas de negocio:

@@ -49,7 +49,12 @@ function categorizarError(detalleSiesa) {
 function parsearError(mensajeRaw) {
     if (!mensajeRaw) return { detalle: [], categoria: 'OTRO', resumen: 'Sin mensaje' };
     try {
-        const limpio = mensajeRaw.replace(/^Reintento falló: /, '').replace(/^Reintento fall: /, '');
+        // El mensaje puede venir con prefijos antes del JSON de Siesa, como
+        // "Reintento falló: {...}", "Sin más automatización posible: {...}" o
+        // "Agotadas N ronda(s) de automatización: {...}". Tomamos desde el primer '{'
+        // para extraer el JSON real (si no hay '{', se intenta parsear tal cual y cae al catch).
+        const idx = mensajeRaw.indexOf('{');
+        const limpio = idx >= 0 ? mensajeRaw.slice(idx) : mensajeRaw;
         const obj = JSON.parse(limpio);
         const detalle = obj.detalle || [];
         const cat = categorizarError(detalle);

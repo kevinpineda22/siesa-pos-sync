@@ -24,13 +24,23 @@ const { syncVentas } = require('../syncVentas');
     const co = process.env.CO_FILTER;     // puede venir vacío -> syncVentas cae al fallback de .env
     const caja = process.env.CAJA_FILTER;
 
-    const opciones = { todas: true, soloHoy: true };
+    // --- Modo PRUEBA (opcional) ---
+    // CRON_LIMITE > 0  -> procesa solo N facturas (las más recientes), en vez de TODAS.
+    // CRON_SOLO_HOY="false" -> NO filtra por "hoy" (útil para probar si hoy aún no hay facturas).
+    const limiteRaw = parseInt(process.env.CRON_LIMITE || '0', 10);
+    const limite = Number.isFinite(limiteRaw) && limiteRaw > 0 ? limiteRaw : null;
+    const soloHoy = (process.env.CRON_SOLO_HOY || 'true').toLowerCase() !== 'false';
+
+    const opciones = {};
     if (co) opciones.co = co;
     if (caja) opciones.caja = caja;
+    if (soloHoy) opciones.soloHoy = true;
+    if (limite) opciones.limite = limite;   // modo prueba: tope de N
+    else opciones.todas = true;             // producción: todas las nuevas del día
 
     console.log('==================================================');
-    console.log('🤖 JOB AUTOMÁTICO POS → Siesa (cada 2h)');
-    console.log(`   CO=${co || '(default .env)'} | Caja=${caja || '(default .env)'} | todas=true | soloHoy=true`);
+    console.log(limite ? '🧪 JOB DE PRUEBA POS → Siesa' : '🤖 JOB AUTOMÁTICO POS → Siesa (cada 2h)');
+    console.log(`   CO=${co || '(default .env)'} | Caja=${caja || '(default .env)'} | soloHoy=${soloHoy} | ${limite ? `limite=${limite}` : 'todas=true'}`);
     console.log(`   Entorno=${process.env.ENTORNO_SIESA || 'QA'}`);
     console.log('==================================================');
 
