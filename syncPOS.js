@@ -15,6 +15,43 @@ function truncar(valor, maxLen) {
     return s.length > maxLen ? s.slice(0, maxLen) : s;
 }
 
+// Consulta la maestra de clientes del POS PAGINANDO. Connekta no acepta parámetros y trunca
+// en una sola página (tamPag), así que paginamos. Si se pasan nitsRequeridos, corta apenas
+// los encuentra a todos (eficiente: no recorre toda la maestra si no hace falta).
+async function fetchClientesPOS(nitsRequeridos = null) {
+    const BASE = 'https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=7375&descripcion=merkahorro_Cliente_pos_dev';
+    const TAM = 1000;       // máximo que acepta Connekta
+    const MAX_PAGINAS = 50; // tope de seguridad (~50k clientes)
+    const pendientes = (nitsRequeridos && nitsRequeridos.length > 0)
+        ? new Set(nitsRequeridos.map(n => String(n).trim()))
+        : null;
+    const todos = [];
+    for (let pagina = 1; pagina <= MAX_PAGINAS; pagina++) {
+        let registros = [];
+        try {
+            const r = await axios.get(`${BASE}&paginacion=numPag=${pagina}|tamPag=${TAM}`, {
+                headers: { 'ConniKey': process.env.CONNI_KEY, 'ConniToken': process.env.CONNI_TOKEN },
+                timeout: 60000,
+            });
+            const d = r.data;
+            registros = (d && d.detalle && d.detalle.Datos) ? d.detalle.Datos : (Array.isArray(d) ? d : []);
+        } catch (e) {
+            console.warn(`⚠️ Error consultando clientes POS pág ${pagina}: ${e.message}`);
+            break;
+        }
+        if (!registros.length) break;
+        todos.push(...registros);
+        // Corte temprano: si ya aparecieron todos los NITs requeridos, no seguimos paginando.
+        if (pendientes) {
+            registros.forEach(c => pendientes.delete(String(c.NIT).trim()));
+            if (pendientes.size === 0) { console.log(`   📥 NIT(s) requerido(s) encontrado(s) en la página ${pagina}.`); break; }
+        }
+        if (registros.length < TAM) break; // última página
+    }
+    console.log(`   📥 Clientes POS descargados (paginado): ${todos.length}`);
+    return todos;
+}
+
 async function probarSincronizacion(nitsRequeridos = null) {
     try {
         console.log('----------------------------------------------------');
@@ -25,26 +62,9 @@ async function probarSincronizacion(nitsRequeridos = null) {
         }
         console.log('----------------------------------------------------');
         
-        // Connekta no acepta parámetros: el query trae todo el pool relevante y filtramos en Node.
-        const responseGet = await axios.get(
-            'https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=7375&descripcion=merkahorro_Cliente_pos_dev&paginacion=numPag=1|tamPag=500',
-            {
-                headers: {
-                    'ConniKey': process.env.CONNI_KEY,
-                    'ConniToken': process.env.CONNI_TOKEN
-                }
-            }
-        );
-
-        // Extraer los datos del response de Connekta (usualmente en data.detalle.Datos o data directamente)
-        const dataSiesa = responseGet.data;
-        let clientesDatos = [];
-        
-        if (dataSiesa && dataSiesa.detalle && dataSiesa.detalle.Datos) {
-            clientesDatos = dataSiesa.detalle.Datos;
-        } else if (Array.isArray(dataSiesa)) {
-            clientesDatos = dataSiesa;
-        }
+        // Connekta no acepta parámetros y trunca en una sola página: paginamos la maestra de
+        // clientes (con corte temprano si ya encontramos los NITs requeridos).
+        let clientesDatos = await fetchClientesPOS(nitsRequeridos);
 
         // Si Siesa nos dijo qué NITs faltan, filtramos solo esos. Si no, mandamos todo el pool.
         if (nitsRequeridos && nitsRequeridos.length > 0) {
