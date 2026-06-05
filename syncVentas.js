@@ -211,6 +211,16 @@ async function getCostoCached() {
     return _costoPromise;
 }
 
+function unidadNegocio(tipoInvServ) {
+    const mapa = {
+        'INCERAB04': '001', 'INEXCAB01': '001', 'INEXCCA01': '003',
+        'INEXCFR01': '002', 'INEXEAB02': '001', 'ING05AB03': '001',
+        'ING19AB04': '001', 'ING19CA04': '003', 'ING19FR04': '002',
+        'INGASAB04': '001'
+    };
+    return mapa[tipoInvServ] || null;
+}
+
 async function ajustarInventario(errores, itemsFactura, consecDocto) {
     const fecha = new Date().toISOString().split('T')[0].replace(/-/g, '');
     const baseConsec = parseInt(consecDocto) || 99999;
@@ -371,7 +381,23 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
         const inyectar = faltanteMatch ? Math.abs(parseFloat(faltanteMatch[1])) : 10;
         const inyectarFinal = unidad === 'UND' ? Math.ceil(inyectar) : inyectar;
         const costoFinal = Math.round(Math.max(costo, 1));
-        console.log(`🧾 [CPE movimiento] ITEM ${idItemStr.padStart(7, '0')} | BODEGA ${bodega} | inst ${instElegida} | costo crudo ${costo} | COSTO_PROMEDIO enviado ${formatDecimal(costoFinal)} (${costoFinal}) | CANTIDAD ${inyectarFinal}`);
+
+        // UNIDAD_NEGOCIO debe ser la que pertenece al ítem (según su tipo_inv_serv). Si no está
+        // mapeada (o el campo llega vacío), NO inyectamos con una UN incorrecta ni null:
+        // se omite el ítem y se avisa para completar el mapa unidadNegocio().
+        const tipoInvServ = (det?.tipo_inv_serv ?? '').trim();
+        // Los SERVICIOS (tipo_inv_serv que empieza por "S-") no manejan stock → no aplica ajuste
+        // de inventario. Se omiten del CPE de forma silenciosa (no es un error, no llevan UN).
+        if (tipoInvServ.toUpperCase().startsWith('S-')) {
+            console.log(`ℹ️ Item ${idItemStr}: tipo_inv_serv "${tipoInvServ}" es un SERVICIO → no aplica ajuste de inventario, se omite del CPE.`);
+            return;
+        }
+        const un = unidadNegocio(tipoInvServ);
+        if (!un) {
+            console.warn(`⚠️ Item ${idItemStr}: tipo_inv_serv "${tipoInvServ || '—'}" SIN unidad de negocio mapeada → se OMITE del CPE (no se envía UN incorrecta). Agregar al mapa unidadNegocio().`);
+            return;
+        }
+        console.log(`🧾 [CPE movimiento] ITEM ${idItemStr.padStart(7, '0')} | BODEGA ${bodega} | inst ${instElegida} | costo crudo ${costo} | COSTO_PROMEDIO enviado ${formatDecimal(costoFinal)} (${costoFinal}) | CANTIDAD ${inyectarFinal} | UN ${un}`);
 
         movimientos.push({
             "C.O.": "001",
@@ -382,11 +408,11 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
             "f470_id_concepto": 601,
             "f470_id_motivo": "17",
             "ind_naturaleza": 2,
-            "C.O MOVIMIENTO": "001",
+            "C.O MOVIMIENTO": coFactura || "001",
             "UNIDAD_MEDIDA": unidad,
             "CANTIDAD": formatDecimal(inyectarFinal, true),
             "ITEM": idItemStr.padStart(7, '0'),
-            "UNIDAD_NEGOCIO": "001",
+            "UNIDAD_NEGOCIO": un,
             "COSTO_PROMEDIO": formatDecimal(costoFinal)
         });
     });

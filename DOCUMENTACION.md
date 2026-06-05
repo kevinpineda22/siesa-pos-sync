@@ -94,7 +94,7 @@ CONNI_TOKEN=...
 CIA=7375
 
 # Cantidad de facturas a procesar por corrida en modo normal.
-# Toma las más recientes del rango de Connekta (últimos 180 días).
+# Toma las más recientes del rango de Connekta (ventana actual del SQL: últimos 2 días).
 LIMITE_FACTURAS=5
 
 # Cuántas facturas se envían a Siesa en paralelo (Promise.allSettled).
@@ -119,7 +119,7 @@ PAGINACION_CONCURRENCIA=4
 MAX_RONDAS_AJUSTE=3
 
 # Filtros dinámicos de qué facturas sincronizar (se aplican en Node, no en el SQL).
-# El query trae 180 días de TODOS los COs/cajas; estos filtros acotan en memoria.
+# El query trae la ventana del SQL (hoy 2 días) de TODOS los COs/cajas; estos filtros acotan en memoria.
 # Prioridad: parámetro del body { co, caja } > variable de entorno > vacío (sin filtro = todo).
 # Defaults seguros que replican el WHERE que antes estaba en el SQL:
 CO_FILTER=001            # Centro(s) de operación. Ej. "001,003". Vacío = todos los COs.
@@ -474,14 +474,22 @@ Se envía automáticamente cuando Siesa rechaza una factura por `"Item sin canti
 | `f470_id_concepto` | `601` (entero) |
 | `f470_id_motivo` | `"17"` |
 | `f350_consec_docto` | `"0"` |
+| `C.O.` (f470_id_co) / `f350_id_co` | `"001"` (el ajuste se contabiliza en el CO 001) |
+| `C.O MOVIMIENTO` | CO de la factura original (`coFactura`), fallback `"001"` |
+| `UNIDAD_NEGOCIO` | **Dinámica por ítem** según su `tipo_inv_serv` (ver nota abajo) |
 | Items | Rellenados a **7 caracteres** con padding de ceros |
 
-**Lógica de costo promedio (cascada de fallbacks):**
-1. Buscar el ítem en la bodega del error (ej. PV001).
-2. Si no tiene costo > 0, buscar en bodegas prioritarias: `['PV001', '00301', '00201', '00701']`.
-3. Si no, buscar en **cualquier otra bodega** del mapa de inventario.
-4. Si en ninguna parte hay costo, calcular **75% del precio de venta** de la factura original (asume 25% de margen comercial).
-5. Como último recurso, `costo = 1` (solo si tampoco hay precio de venta).
+**Unidad de negocio por ítem (regla dura):** el `UNIDAD_NEGOCIO` se resuelve con `unidadNegocio(tipo_inv_serv)` (abarrotes→`001`, fruver→`002`, carnes→`003`). **Nunca** se envía `null` ni una UN ajena al ítem:
+- **Servicio** (`tipo_inv_serv` empieza por `S-`, ej. `S-OTRIPV`) → no maneja stock, el ítem se **omite del CPE** (log `ℹ️`).
+- **Ítem de inventario sin UN mapeada** → se **omite del CPE** con `⚠️` (no se inyecta con UN incorrecta); el warning indica qué código agregar al mapa.
+
+**Lógica de costo promedio (cascada por INSTALACIÓN, no por bodega):** el costo real se lee de `merkahorro_costo_promedio_dev` (PRODUCCIÓN), que devuelve el costo por **instalación** (t132). Se prueban en este orden, tomando el primero con costo > 0:
+1. **CO de la factura** (`coFactura`, normalizado a 3 dígitos) → PRIMERO, para valorizar con el costo del centro real de la venta.
+2. **Instalación de la bodega** del error de Siesa (`mapBodegaAInstalacion`).
+3. **Prioridad fija:** `['001', '003', '002', '007']`.
+4. **Cualquier otra** instalación disponible para el ítem.
+
+Si en **ninguna** instalación hay costo > 0, el ítem se **omite del ajuste** con `⚠️` (ya **no** existe el fallback de "75% del precio de venta" ni `costo = 1`: no se inyecta stock sin un costo real). El `COSTO_PROMEDIO` enviado se redondea con `Math.round(Math.max(costo, 1))`.
 
 ---
 
@@ -728,9 +736,9 @@ curl -X POST http://localhost:4000/api/sync-ventas
 - [ ] Configurar equivalencias `0-501-03`, `0-502-03`, `INEXCAB01-502-03`, `INEXCCA01-502-03` e `ING05AB03-502-03` para movimientos de inventario.
 
 ### Mejoras futuras del backend
-- [ ] Implementar un job programado (cron) para sincronización automática cada N minutos.
+- [x] ~~Implementar un job programado (cron) para sincronización automática~~ (hecho: GitHub Actions cada 2h, `.github/workflows/sync-pos.yml` + `scripts/runSyncCron.js`).
 - [ ] Agregar tests unitarios para las funciones críticas (cuadre, recalculo impuestos, paginación).
-- [x] ~~Ampliar el rango de Connekta de 30 días a 180 días en los 4 queries~~ (hecho en Connekta).
+- [x] ~~Ajustar la ventana de Connekta de los 4 queries~~ (hecho en Connekta: ventana actual = **2 días**, para evitar truncamiento en el GET sin paginar de ventas/pagos/impuestos).
 - [x] ~~Crear endpoint `GET /api/logs`~~ (hecho).
 
 ### Frontend (React, fuera de este repo)

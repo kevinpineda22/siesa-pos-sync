@@ -1,5 +1,5 @@
 # Estado Actual del Proyecto: Sincronizador POS → Siesa QA
-**Última actualización:** 03 de Junio de 2026
+**Última actualización:** 05 de Junio de 2026 — Sesión completada: CPE dinámico (CO mov, UN), filtro EFE en query pagos, plan de producción
 
 Este documento resume el estado actual del proyecto, las lógicas implementadas recientemente, las correcciones aplicadas y las tareas pendientes, sirviendo como contexto para desarrolladores o IAs futuras.
 
@@ -100,6 +100,43 @@ El flujo cuenta con auto-corrección para inyectar inventario faltante (CPE) y s
     - Corrida real contra Siesa QA (`CRON_LIMITE=5`): `Total=10 (5 CNZ + 5 CFZ) | OK=5 | FALLO=5`.
     - Confirmado funcionando: filtro CO/Caja, límite, orden CNZ→CFZ, auto-sync de clientes, auto-inyección de inventario (CPE) con costo por CO de la factura, instrumentación del costo, retry acotado, idempotencia y logging en Supabase.
     - Los 5 FALLO fueron por **maestras faltantes** (no código). Un FALLO transitorio de inventario (CNZ 142194) se **auto-curó al reprocesar** (la CFZ ya lo había dejado con stock) — caso que motivó el "reintento de cortesía" del punto 8.
+18. **UNIDAD_NEGOCIO dinámica por ítem en el CPE (05-Jun-2026):**
+    - El campo `"UNIDAD_NEGOCIO"` del ajuste de inventario (CPE) ya **no es fijo `"001"`**: se resuelve por ítem con la función `unidadNegocio(tipo_inv_serv)`, que mapea el `v121_id_tipo_inv_serv` (incluido ahora en el SELECT de `merkahorro_venta_pos_dev`) a su unidad de negocio: abarrotes→`001`, fruver→`002`, carnes→`003`.
+    - **Regla dura:** un ítem **nunca** se inyecta con una UN que no le pertenece. El manejo en `ajustarInventario` es:
+      1. **Servicio** (`tipo_inv_serv` empieza por `S-`, ej. `S-OTRIPV`) → no maneja stock, se **omite del CPE** con log informativo `ℹ️` (no es error, no lleva UN).
+      2. **Ítem de inventario con UN mapeada** → se inyecta con su UN correcta (se loguea `... | UN xxx`).
+      3. **Ítem de inventario SIN UN mapeada** → se **omite del CPE** con `⚠️` fuerte (jamás se envía `null` ni una UN inventada). El warning indica qué `tipo_inv_serv` agregar al mapa.
+    - **Verificación contra datos reales (1.447 filas):** los 9 códigos de inventario presentes están todos mapeados; el único código no mapeado era `S-OTRIPV`, que es un **servicio** (correctamente sin ajuste de inventario). El mapa queda completo para el inventario existente.
+
+## 3b. Últimos Cambios (Sesión 05-Jun-2026)
+
+### 19. CPE: `C.O MOVIMIENTO` dinámico (usa el CO de la factura)
+   - El campo `"C.O MOVIMIENTO"` del CPE estaba hardcodeado a `"001"` → ahora usa `coFactura || "001"`.
+   - Si la factura es CO=003, el ajuste de inventario también se mueve contra CO=003.
+   - `"C.O."` (f470_id_co) y `"f350_id_co"` del documento cabecera se mantienen en `"001"` (el asiento contable cierra en CO 001 por requerimiento de Siesa).
+
+### 20. CPE: `UNIDAD_NEGOCIO` dinámica por ítem (completado y verificado en vivo)
+   - **Contexto:** el campo estaba hardcodeado a `"001"`. Se descubrió que cada tipo de inventario tiene su propia unidad de negocio (abarrotes→001, fruver→002, carnes→003, etc.).
+   - **Solución:**
+     1. Se agregó `dbo.v121.v121_id_tipo_inv_serv AS tipo_inv_serv` al SELECT de la query Connekta `merkahorro_venta_pos_dev` (con `LTRIM/RTRIM` para evitar trailing spaces).
+     2. Se creó la función `unidadNegocio(tipoInvServ)` en `syncVentas.js` con el mapeo proporcionado por el equipo de Siesa.
+     3. El CPE ahora resuelve la UN por ítem antes de pushear el movimiento.
+   - **Regla dura (3 casos):**
+     1. **Servicios** (`tipo_inv_serv` empieza por `S-`, ej. `S-OTRIPV`) → se omiten con `ℹ️` (no manejan stock, no llevan UN).
+     2. **Ítem de inventario con UN mapeada** → se inyecta con su UN correcta (log: `... | UN xxx`).
+     3. **Ítem de inventario SIN UN mapeada** → se **omite del CPE** con `⚠️` fuerte indicando exactamente qué `tipo_inv_serv` falta en el mapa. **Nunca se envía `null` ni una UN inventada.**
+   - **Verificado en vivo:** corrida con 16 facturas, 2 CPE disparados y ejecutados exitosamente.
+
+### 21. Filtro de medio de pago EFE en query `merkahorro_pagos_pos_dev`
+   - **Problema:** facturas que usan medio de pago "AJP" (Aval Jefe de Piso) fallan en CFZ porque ese medio no existe en Siesa QA. El CNZ pasa porque fuerza EFE.
+   - **Solución:** se agregó `AND MedioPago.f9821_id_medio_pago = 'EFE'` al WHERE de `merkahorro_pagos_pos_dev`.
+   - **Motivación:** en producción las cajas Z01/Z02 solo reciben efectivo. Este filtro es una **válvula de seguridad en el origen** para garantizar que nunca llegue un medio de pago diferente a EFE al flujo de Node.js, incluso si el POS emitiera otro medio por error.
+   - **Impacto:** el flujo solo procesa pagos en efectivo. Facturas con otros medios no tendrán registro de pago → el código que mapea pagos las ignorará.
+
+### 22. Mapa `unidadNegocio()` ampliado (cubiertos todos los casos reales)
+   - Se verificó contra 1.447 registros reales de Connekta que todos los `tipo_inv_serv` de inventario están mapeados.
+   - Se agregó el servicio `S-OTRIPV` como caso explícito de servicio (se omite con `ℹ️`).
+   - El mapa queda completo y verificado contra datos reales.
 
 ## 4. Tareas Pendientes / Bloqueos Actuales
 El código fuente ya opera correctamente, pero existen bloqueos a nivel de datos y reglas de negocio:
@@ -111,13 +148,52 @@ Las siguientes facturas fallan por falta de configuración en el ERP, lo cual no
 - **Unidad de Medida (UM):** La unidad `UND` no está asociada o registrada correctamente para ciertos artículos.
 - **Datos de Clientes POS:** Algunos clientes (ej. NIT `900663118`) están incompletos en el POS (no tienen nombre o apellido). Siesa exige nombre/apellido obligatoriamente, por lo que `syncPOS` rebota.
 
-### B. Regla de Negocio Pendiente (Ítems en $0)
+### C. Medio de pago AJP no existe en Siesa QA
+- **Problema:** Varias facturas (CFZ) fallan con *"Movimiento de recaudos: El medio de pago no existe."* porque el POS usa `AJP` (Aval Jefe de Piso) como medio de pago.
+- **Causa:** `AJP` no está creado en la maestra de medios de pago de Siesa QA.
+- **Solución temporal:** se agregó filtro `AND MedioPago.f9821_id_medio_pago = 'EFE'` en `merkahorro_pagos_pos_dev` para que solo ingresen pagos en efectivo (ver punto 21).
+- **Solución definitiva (QA):** el equipo de Siesa debe crear el medio de pago `AJP` en QA si se requiere procesar esos pagos. En producción no aplica porque las cajas Z01/Z02 solo usan EFE.
+
+### D. Regla de Negocio Pendiente (Ítems en $0)
 - **Problema:** Siesa rechaza facturas que contengan productos gratuitos o con descuento del 100% arrojando el error: *"Documento venta comercial: el valor unitario deben ser mayor a 0."*
 - **Estado:** En pausa. A la espera de que el usuario decida la regla de negocio (Opción A: eliminarlos del plano; Opción B: enviarlos con valor $1; Opción C: mapearlos a un concepto diferente de Siesa).
 
 ## 5. Notas para IAs Futuras
 - **Regla de Oro (`P03`/`P05` ≠ tipo de documento):** **NO** reintroduzcas reglas que mapeen un código de caja a `CNZ`/`CFZ`. El tipo de documento se decide SOLO por el paso: paso 1 = `CNZ`, paso 3 = `CFZ`. El código de caja (`ID_TIPO_DOCTO`: `P01`/`P03`/`P05`) se usa **únicamente para FILTRAR** qué facturas se sincronizan (vía `CAJA_FILTER` o `{ caja }`), nunca para decidir si una factura es nota crédito o factura. Filtrar ≠ mapear.
 - **Motivos actuales:** `CNZ` y `CFZ` se envían con `f470_id_motivo = "03"` (no `"01"`). `CPE` se envía con `f470_id_motivo = "17"` (no `"03"`). NO revertir estos valores a los anteriores.
+- **UNIDAD_NEGOCIO del CPE (regla dura):** se resuelve por ítem con `unidadNegocio(tipo_inv_serv)`. **NUNCA** enviar `null` ni un default (`"001"`) cuando el ítem no mapea: un ajuste con UN ajena al ítem es un error contable. Si no mapea → se OMITE el ítem con `⚠️`. Los servicios (`tipo_inv_serv` que empieza por `S-`) se omiten en silencio (no llevan inventario). Para agregar productos nuevos, ampliar el mapa `unidadNegocio()` (abarrotes→`001`, fruver→`002`, carnes→`003`), NO poner fallbacks.
 - **Paginación:** el paginado vive en `fetchPaginadoCompleto`. Connekta **sí colapsa con paralelismo pesado** (todas las páginas a la vez), pero tolera un **pool acotado**. La concurrencia es configurable con `PAGINACION_CONCURRENCIA`; ante `ECONNRESET` repetido, bajarla. NO subir `tamPag` por encima de `1000` (Connekta devuelve 400) ni meter `TOP/ORDER BY` en el query.
-- **Variables de entorno nuevas:** `PAGINACION_CONCURRENCIA` (default 4), `MAX_RONDAS_AJUSTE` (default 3), `CO_FILTER` (default `001`) y `CAJA_FILTER` (default `P01,P03,P05`). Estos dos últimos tienen **default seguro** que replica el filtro que antes vivía en el SQL; dejarlos **vacíos** = traer TODOS los COs/cajas (180 días). El frontend los sobrescribe con `{ co, caja }`.
+- **Variables de entorno nuevas:** `PAGINACION_CONCURRENCIA` (default 4), `MAX_RONDAS_AJUSTE` (default 3), `CO_FILTER` (default `001`) y `CAJA_FILTER` (default `P01,P03,P05`). Estos dos últimos tienen **default seguro** que replica el filtro que antes vivía en el SQL; dejarlos **vacíos** = traer TODOS los COs/cajas (dentro de la ventana del SQL, hoy **2 días** — ver punto 12). El frontend los sobrescribe con `{ co, caja }`.
 - El sistema de base de datos actual es **Supabase (PostgreSQL)**, ya no se usan los archivos locales `logs/` para la persistencia.
+
+## 6. Plan de Configuración para Producción
+
+### Cambios necesarios vs QA
+
+| Aspecto | QA (actual) | Producción | Dónde se configura |
+|---------|-------------|------------|-------------------|
+| **CO_FILTER** | `001` | `001` | `.env` / GitHub Secrets |
+| **CAJA_FILTER** | `P01,P03,P05` | `Z01,Z02` | `.env` / GitHub Secrets |
+| **Medio de pago** | Todos (filtrado a EFE en query) | Solo EFE (las cajas Z01/Z02 solo reciben efectivo) | Query `merkahorro_pagos_pos_dev` ya filtrada |
+| **Query pagos** | `MedioPago.f9821_id_medio_pago = 'EFE'` | Misma query (el filtro EFE ya está aplicado) | Sin cambios |
+| **Query ventas** | Con `tipo_inv_serv` agregado | Misma query | Sin cambios |
+| **Entorno Siesa** | QA (`serviciosqa.siesacloud.com`) | PROD (`servicios.siesacloud.com`) | `ENTORNO_SIESA=PROD` en `.env` |
+
+### Queries de Connekta para Producción
+
+**`merkahorro_venta_pos_dev`** — incluye `tipo_inv_serv` al final del SELECT:
+```sql
+LTRIM(RTRIM(dbo.v121.v121_id_tipo_inv_serv)) AS tipo_inv_serv
+```
+
+**`merkahorro_pagos_pos_dev`** — filtro EFE al final del WHERE:
+```sql
+AND MedioPago.f9821_id_medio_pago = 'EFE'
+```
+
+### Medio de pago AJP
+- En **QA** falla porque `AJP` no existe. Se solucionó con el filtro EFE en la query de pagos.
+- En **PROD** no aplica: las cajas Z01/Z02 solo emiten pagos en efectivo (EFE). No se requiere crear AJP en producción.
+
+### Resumen de cambios de código (ninguno para producción)
+Todo el código está listo para producción. Los cambios son solo de configuración (`.env`, queries Connekta). No requiere nuevo deploy de código.
