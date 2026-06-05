@@ -1,5 +1,5 @@
 # Estado Actual del Proyecto: Sincronizador POS → Siesa QA
-**Última actualización:** 05 de Junio de 2026 — Sesión completada: CPE dinámico (CO mov, UN), filtro EFE en query pagos, plan de producción
+**Última actualización:** 05 de Junio de 2026 — Sesión completada: UNIDAD_NEGOCIO movida a query Connekta, prueba CPE exitosa en vivo
 
 Este documento resume el estado actual del proyecto, las lógicas implementadas recientemente, las correcciones aplicadas y las tareas pendientes, sirviendo como contexto para desarrolladores o IAs futuras.
 
@@ -101,12 +101,12 @@ El flujo cuenta con auto-corrección para inyectar inventario faltante (CPE) y s
     - Confirmado funcionando: filtro CO/Caja, límite, orden CNZ→CFZ, auto-sync de clientes, auto-inyección de inventario (CPE) con costo por CO de la factura, instrumentación del costo, retry acotado, idempotencia y logging en Supabase.
     - Los 5 FALLO fueron por **maestras faltantes** (no código). Un FALLO transitorio de inventario (CNZ 142194) se **auto-curó al reprocesar** (la CFZ ya lo había dejado con stock) — caso que motivó el "reintento de cortesía" del punto 8.
 18. **UNIDAD_NEGOCIO dinámica por ítem en el CPE (05-Jun-2026):**
-    - El campo `"UNIDAD_NEGOCIO"` del ajuste de inventario (CPE) ya **no es fijo `"001"`**: se resuelve por ítem con la función `unidadNegocio(tipo_inv_serv)`, que mapea el `v121_id_tipo_inv_serv` (incluido ahora en el SELECT de `merkahorro_venta_pos_dev`) a su unidad de negocio: abarrotes→`001`, fruver→`002`, carnes→`003`.
+    - El campo `"UNIDAD_NEGOCIO"` del ajuste de inventario (CPE) ya **no es fijo `"001"`**: se resuelve por ítem mediante un `CASE` en la query de Connekta `merkahorro_venta_pos_dev` (abarrotes→`001`, fruver→`002`, carnes→`003`).
     - **Regla dura:** un ítem **nunca** se inyecta con una UN que no le pertenece. El manejo en `ajustarInventario` es:
       1. **Servicio** (`tipo_inv_serv` empieza por `S-`, ej. `S-OTRIPV`) → no maneja stock, se **omite del CPE** con log informativo `ℹ️` (no es error, no lleva UN).
       2. **Ítem de inventario con UN mapeada** → se inyecta con su UN correcta (se loguea `... | UN xxx`).
-      3. **Ítem de inventario SIN UN mapeada** → se **omite del CPE** con `⚠️` fuerte (jamás se envía `null` ni una UN inventada). El warning indica qué `tipo_inv_serv` agregar al mapa.
-    - **Verificación contra datos reales (1.447 filas):** los 9 códigos de inventario presentes están todos mapeados; el único código no mapeado era `S-OTRIPV`, que es un **servicio** (correctamente sin ajuste de inventario). El mapa queda completo para el inventario existente.
+      3. **Ítem de inventario SIN UN mapeada** → se **omite del CPE** con `⚠️` fuerte (jamás se envía `null` ni una UN inventada). El warning indica qué `tipo_inv_serv` agregar al `CASE` en la query.
+    - **Verificación contra datos reales (1.447 filas):** los 9 códigos de inventario presentes están todos mapeados; el único código no mapeado era `S-OTRIPV`, que es un **servicio** (correctamente sin ajuste de inventario).
 
 ## 3b. Últimos Cambios (Sesión 05-Jun-2026)
 
@@ -115,17 +115,17 @@ El flujo cuenta con auto-corrección para inyectar inventario faltante (CPE) y s
    - Si la factura es CO=003, el ajuste de inventario también se mueve contra CO=003.
    - `"C.O."` (f470_id_co) y `"f350_id_co"` del documento cabecera se mantienen en `"001"` (el asiento contable cierra en CO 001 por requerimiento de Siesa).
 
-### 20. CPE: `UNIDAD_NEGOCIO` dinámica por ítem (completado y verificado en vivo)
-   - **Contexto:** el campo estaba hardcodeado a `"001"`. Se descubrió que cada tipo de inventario tiene su propia unidad de negocio (abarrotes→001, fruver→002, carnes→003, etc.).
-   - **Solución:**
-     1. Se agregó `dbo.v121.v121_id_tipo_inv_serv AS tipo_inv_serv` al SELECT de la query Connekta `merkahorro_venta_pos_dev` (con `LTRIM/RTRIM` para evitar trailing spaces).
-     2. Se creó la función `unidadNegocio(tipoInvServ)` en `syncVentas.js` con el mapeo proporcionado por el equipo de Siesa.
-     3. El CPE ahora resuelve la UN por ítem antes de pushear el movimiento.
-   - **Regla dura (3 casos):**
-     1. **Servicios** (`tipo_inv_serv` empieza por `S-`, ej. `S-OTRIPV`) → se omiten con `ℹ️` (no manejan stock, no llevan UN).
-     2. **Ítem de inventario con UN mapeada** → se inyecta con su UN correcta (log: `... | UN xxx`).
-     3. **Ítem de inventario SIN UN mapeada** → se **omite del CPE** con `⚠️` fuerte indicando exactamente qué `tipo_inv_serv` falta en el mapa. **Nunca se envía `null` ni una UN inventada.**
-   - **Verificado en vivo:** corrida con 16 facturas, 2 CPE disparados y ejecutados exitosamente.
+### 20. CPE: `UNIDAD_NEGOCIO` dinámica por ítem — movida a query Connekta (refactor 05-Jun-2026)
+    - **Contexto:** el campo estaba hardcodeado a `"001"`. Se descubrió que cada tipo de inventario tiene su propia unidad de negocio (abarrotes→001, fruver→002, carnes→003, etc.).
+    - **Solución inicial (iteración 1):**
+      1. Se agregó `dbo.v121.v121_id_tipo_inv_serv AS tipo_inv_serv` al SELECT de la query Connekta `merkahorro_venta_pos_dev`.
+      2. Se creó la función `unidadNegocio(tipoInvServ)` en `syncVentas.js` con el mapeo hardcodeado.
+    - **Refactor (iteración 2, misma sesión):** por solicitud del equipo, el mapeo se movió del JS a la query de Connekta usando `CASE ... END AS unidad_de_negocio`. Se eliminó la función `unidadNegocio()` del código y ahora `syncVentas.js` lee `det.unidad_de_negocio` directo del JSON. La columna `tipo_inv_serv` se conserva para detectar servicios (`S-*`).
+    - **Regla dura (3 casos, sin cambios):**
+      1. **Servicios** → se omiten con `ℹ️`.
+      2. **Ítem con UN mapeada** → se inyecta con su UN correcta.
+      3. **Ítem SIN UN mapeada** → se omite con `⚠️`. **Nunca se envía `null` ni una UN inventada.**
+    - **Verificado en vivo:** corrida con 14 facturas (7 CNZ + 7 CFZ), 8 OK, 0 errores de código. Fallos solo por maestras (equivalentes, ítems, UMs).
 
 ### 21. Filtro de medio de pago EFE en query `merkahorro_pagos_pos_dev`
    - **Problema:** facturas que usan medio de pago "AJP" (Aval Jefe de Piso) fallan en CFZ porque ese medio no existe en Siesa QA. El CNZ pasa porque fuerza EFE.
@@ -133,10 +133,10 @@ El flujo cuenta con auto-corrección para inyectar inventario faltante (CPE) y s
    - **Motivación:** en producción las cajas Z01/Z02 solo reciben efectivo. Este filtro es una **válvula de seguridad en el origen** para garantizar que nunca llegue un medio de pago diferente a EFE al flujo de Node.js, incluso si el POS emitiera otro medio por error.
    - **Impacto:** el flujo solo procesa pagos en efectivo. Facturas con otros medios no tendrán registro de pago → el código que mapea pagos las ignorará.
 
-### 22. Mapa `unidadNegocio()` ampliado (cubiertos todos los casos reales)
-   - Se verificó contra 1.447 registros reales de Connekta que todos los `tipo_inv_serv` de inventario están mapeados.
-   - Se agregó el servicio `S-OTRIPV` como caso explícito de servicio (se omite con `ℹ️`).
-   - El mapa queda completo y verificado contra datos reales.
+### 22. Mapa `unidad_de_negocio` verificado contra datos reales
+    - Se verificó contra 1.447 registros reales de Connekta que todos los `tipo_inv_serv` de inventario están mapeados en el `CASE` de la query.
+    - El servicio `S-OTRIPV` se omite con `ℹ️` (no lleva UN, no maneja stock).
+    - Los 10 códigos del `CASE` cubren todo el inventario existente en QA.
 
 ## 4. Tareas Pendientes / Bloqueos Actuales
 El código fuente ya opera correctamente, pero existen bloqueos a nivel de datos y reglas de negocio:
@@ -161,7 +161,7 @@ Las siguientes facturas fallan por falta de configuración en el ERP, lo cual no
 ## 5. Notas para IAs Futuras
 - **Regla de Oro (`P03`/`P05` ≠ tipo de documento):** **NO** reintroduzcas reglas que mapeen un código de caja a `CNZ`/`CFZ`. El tipo de documento se decide SOLO por el paso: paso 1 = `CNZ`, paso 3 = `CFZ`. El código de caja (`ID_TIPO_DOCTO`: `P01`/`P03`/`P05`) se usa **únicamente para FILTRAR** qué facturas se sincronizan (vía `CAJA_FILTER` o `{ caja }`), nunca para decidir si una factura es nota crédito o factura. Filtrar ≠ mapear.
 - **Motivos actuales:** `CNZ` y `CFZ` se envían con `f470_id_motivo = "03"` (no `"01"`). `CPE` se envía con `f470_id_motivo = "17"` (no `"03"`). NO revertir estos valores a los anteriores.
-- **UNIDAD_NEGOCIO del CPE (regla dura):** se resuelve por ítem con `unidadNegocio(tipo_inv_serv)`. **NUNCA** enviar `null` ni un default (`"001"`) cuando el ítem no mapea: un ajuste con UN ajena al ítem es un error contable. Si no mapea → se OMITE el ítem con `⚠️`. Los servicios (`tipo_inv_serv` que empieza por `S-`) se omiten en silencio (no llevan inventario). Para agregar productos nuevos, ampliar el mapa `unidadNegocio()` (abarrotes→`001`, fruver→`002`, carnes→`003`), NO poner fallbacks.
+- **UNIDAD_NEGOCIO del CPE (regla dura):** se resuelve por ítem desde el campo `unidad_de_negocio` que llega en la query de Connekta (abarrotes→`001`, fruver→`002`, carnes→`003`). **NUNCA** enviar `null` ni un default (`"001"`) cuando el ítem no mapea: un ajuste con UN ajena al ítem es un error contable. Si no mapea → se OMITE el ítem con `⚠️`. Los servicios (`tipo_inv_serv` que empieza por `S-`) se omiten en silencio (no llevan inventario). Para agregar productos nuevos, ampliar el `CASE` en la query `merkahorro_venta_pos_dev` (abarrotes→`001`, fruver→`002`, carnes→`003`), NO poner fallbacks.
 - **Paginación:** el paginado vive en `fetchPaginadoCompleto`. Connekta **sí colapsa con paralelismo pesado** (todas las páginas a la vez), pero tolera un **pool acotado**. La concurrencia es configurable con `PAGINACION_CONCURRENCIA`; ante `ECONNRESET` repetido, bajarla. NO subir `tamPag` por encima de `1000` (Connekta devuelve 400) ni meter `TOP/ORDER BY` en el query.
 - **Variables de entorno nuevas:** `PAGINACION_CONCURRENCIA` (default 4), `MAX_RONDAS_AJUSTE` (default 3), `CO_FILTER` (default `001`) y `CAJA_FILTER` (default `P01,P03,P05`). Estos dos últimos tienen **default seguro** que replica el filtro que antes vivía en el SQL; dejarlos **vacíos** = traer TODOS los COs/cajas (dentro de la ventana del SQL, hoy **2 días** — ver punto 12). El frontend los sobrescribe con `{ co, caja }`.
 - El sistema de base de datos actual es **Supabase (PostgreSQL)**, ya no se usan los archivos locales `logs/` para la persistencia.
@@ -181,9 +181,23 @@ Las siguientes facturas fallan por falta de configuración en el ERP, lo cual no
 
 ### Queries de Connekta para Producción
 
-**`merkahorro_venta_pos_dev`** — incluye `tipo_inv_serv` al final del SELECT:
+**`merkahorro_venta_pos_dev`** — incluye `tipo_inv_serv` y `unidad_de_negocio` al final del SELECT:
 ```sql
-LTRIM(RTRIM(dbo.v121.v121_id_tipo_inv_serv)) AS tipo_inv_serv
+LTRIM(RTRIM(dbo.v121.v121_id_tipo_inv_serv))                AS tipo_inv_serv,
+
+CASE LTRIM(RTRIM(dbo.v121.v121_id_tipo_inv_serv))
+    WHEN 'INCERAB04' THEN '001'
+    WHEN 'INEXCAB01' THEN '001'
+    WHEN 'INEXCCA01' THEN '003'
+    WHEN 'INEXCFR01' THEN '002'
+    WHEN 'INEXEAB02' THEN '001'
+    WHEN 'ING05AB03' THEN '001'
+    WHEN 'ING19AB04' THEN '001'
+    WHEN 'ING19CA04' THEN '003'
+    WHEN 'ING19FR04' THEN '002'
+    WHEN 'INGASAB04' THEN '001'
+    ELSE NULL
+END AS unidad_de_negocio
 ```
 
 **`merkahorro_pagos_pos_dev`** — filtro EFE al final del WHERE:

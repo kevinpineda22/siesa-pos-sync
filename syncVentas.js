@@ -211,16 +211,6 @@ async function getCostoCached() {
     return _costoPromise;
 }
 
-function unidadNegocio(tipoInvServ) {
-    const mapa = {
-        'INCERAB04': '001', 'INEXCAB01': '001', 'INEXCCA01': '003',
-        'INEXCFR01': '002', 'INEXEAB02': '001', 'ING05AB03': '001',
-        'ING19AB04': '001', 'ING19CA04': '003', 'ING19FR04': '002',
-        'INGASAB04': '001'
-    };
-    return mapa[tipoInvServ] || null;
-}
-
 async function ajustarInventario(errores, itemsFactura, consecDocto) {
     const fecha = new Date().toISOString().split('T')[0].replace(/-/g, '');
     const baseConsec = parseInt(consecDocto) || 99999;
@@ -384,7 +374,7 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
 
         // UNIDAD_NEGOCIO debe ser la que pertenece al ítem (según su tipo_inv_serv). Si no está
         // mapeada (o el campo llega vacío), NO inyectamos con una UN incorrecta ni null:
-        // se omite el ítem y se avisa para completar el mapa unidadNegocio().
+        // se omite el ítem y se avisa para agregarlo al CASE en la query de Connekta.
         const tipoInvServ = (det?.tipo_inv_serv ?? '').trim();
         // Los SERVICIOS (tipo_inv_serv que empieza por "S-") no manejan stock → no aplica ajuste
         // de inventario. Se omiten del CPE de forma silenciosa (no es un error, no llevan UN).
@@ -392,9 +382,9 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
             console.log(`ℹ️ Item ${idItemStr}: tipo_inv_serv "${tipoInvServ}" es un SERVICIO → no aplica ajuste de inventario, se omite del CPE.`);
             return;
         }
-        const un = unidadNegocio(tipoInvServ);
+        const un = (det?.unidad_de_negocio ?? '').trim();
         if (!un) {
-            console.warn(`⚠️ Item ${idItemStr}: tipo_inv_serv "${tipoInvServ || '—'}" SIN unidad de negocio mapeada → se OMITE del CPE (no se envía UN incorrecta). Agregar al mapa unidadNegocio().`);
+            console.warn(`⚠️ Item ${idItemStr}: tipo_inv_serv "${tipoInvServ || '—'}" SIN unidad de negocio mapeada → se OMITE del CPE (no se envía UN incorrecta). Agregar al CASE en la query merkahorro_venta_pos_dev.`);
             return;
         }
         console.log(`🧾 [CPE movimiento] ITEM ${idItemStr.padStart(7, '0')} | BODEGA ${bodega} | inst ${instElegida} | costo crudo ${costo} | COSTO_PROMEDIO enviado ${formatDecimal(costoFinal)} (${costoFinal}) | CANTIDAD ${inyectarFinal} | UN ${un}`);
@@ -417,7 +407,7 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
         });
     });
 
-    if (movimientos.length === 0) return;
+    if (movimientos.length === 0) return [];
 
     const payload = {
         "Documentos": [{
@@ -507,6 +497,14 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
             throw error; // Propaga el error para que la factura principal sepa que la inyección falló
         }
     }
+    // Retornar los items inyectados para trazabilidad en frontend
+    return payload.Movimientos.map(m => ({
+        item: m.ITEM.replace(/^0+/, ''),
+        bodega: m.BODEGA,
+        cantidad: parseFloat(m.CANTIDAD),
+        un: m.UNIDAD_NEGOCIO,
+        costo: parseFloat(m.COSTO_PROMEDIO)
+    }));
 }
 
 function formatDate(isoString) {
@@ -725,7 +723,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 "CANTIDAD": formatDecimal(absIfCNZ(det.CANTIDAD || det.cant_1), true),
                 "VALOR_BRUTO": formatDecimal(absIfCNZ(det.VALOR_BRUTO)),
                 "id_item": det.id_item,
-                "id_un_movto": "001"
+                "id_un_movto": (det?.unidad_de_negocio ?? '').trim() || "001"
             });
 
             // CRUCE DE IMPUESTOS POR ROWIDMVTO
@@ -982,7 +980,10 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     automatizaciones.push(`ajuste_inventario:${consecutivo}`);
                     try {
                         const consecAjuste = parseInt(Date.now().toString().slice(-7));
-                        await ajustarInventario(errores, detallesFactura, consecAjuste);
+                        const itemsInyectados = await ajustarInventario(errores, detallesFactura, consecAjuste) || [];
+                        if (itemsInyectados.length > 0) {
+                            meta.cpeItems = [...(meta.cpeItems || []), ...itemsInyectados];
+                        }
                         accionTomada = true;
                         fallosInyeccion = 0;
                     } catch (ajusteError) {
