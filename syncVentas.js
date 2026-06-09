@@ -788,13 +788,15 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             if (i.CONSEC_DOCTO === consecDoc && i.TIPO_DOCTO === tipoDoctoSiesa) {
                 const m = Movimientos.find(x => x.nro_registro === i.NRO_REGISTRO && x.consec_docto === consecDoc && x.id_tipo_docto === tipoDoctoSiesa);
                 if (m && i.TASA !== null && i.TASA !== undefined && parseFloat(i.TASA) > 0) {
-                    const dscLinea = Descuentos.find(d => d.consec_docto === consecDoc && d.id_tipo_docto === tipoDoctoSiesa && d.nro_registro === i.NRO_REGISTRO);
-                    const dsctoVal = dscLinea ? parseFloat(dscLinea.vlr_tot || 0) : 0;
-                    const baseNeta = parseFloat(m.VALOR_BRUTO) - dsctoVal;
-                    const tasa = parseFloat(i.TASA);
-                    // Calcular con todos los decimales; formatDecimal recortará a 4 al serializar.
-                    const valorImpuesto = baseNeta * tasa / 100;
-                    i.VALOR_TOTAL = formatDecimal(valorImpuesto);
+                    // Solo recalcular si Connekta no trajo el VALOR_TOTAL
+                    if (!i.VALOR_TOTAL || parseFloat(i.VALOR_TOTAL) === 0) {
+                        const dscLinea = Descuentos.find(d => d.consec_docto === consecDoc && d.id_tipo_docto === tipoDoctoSiesa && d.nro_registro === i.NRO_REGISTRO);
+                        const dsctoVal = dscLinea ? parseFloat(dscLinea.vlr_tot || 0) : 0;
+                        const baseNeta = parseFloat(m.VALOR_BRUTO) - dsctoVal;
+                        const tasa = parseFloat(i.TASA);
+                        const valorImpuesto = baseNeta * tasa / 100;
+                        i.VALOR_TOTAL = formatDecimal(valorImpuesto);
+                    }
                 }
             }
         });
