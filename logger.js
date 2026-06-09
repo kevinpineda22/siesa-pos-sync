@@ -41,7 +41,7 @@ function categorizarError(detalleSiesa) {
         return { categoria: 'PERIODO_CERRADO', resumen: 'La fecha del documento corresponde a un periodo cerrado en Siesa' };
     }
     if (txt.includes('la base de datos no existe')) {
-        return { categoria: 'ERROR_CONEXION_SIESA', resumen: 'Siesa QA caido o DB no existe' };
+        return { categoria: 'ERROR_CONEXION_SIESA', resumen: 'Siesa PROD caido o DB no existe' };
     }
     return { categoria: 'OTRO', resumen: detalleSiesa[0]?.f_detalle?.slice(0, 120) || 'Error desconocido' };
 }

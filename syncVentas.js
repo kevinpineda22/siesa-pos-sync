@@ -10,18 +10,21 @@ const URL_VENTAS_DETALLE = `https://servicios.siesacloud.com/api/connekta/v3/eje
 const URL_VENTAS_PAGOS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_pagos_pos_dev`;
 const URL_VENTAS_IMPUESTOS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_imptos_pos_dev`;
 const URL_CAJAS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_cajas_pos_dev`;
-const URL_CONSULTA_INVENTARIO_BASE = `https://serviciosqa.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_consulta_inventario`;
+const URL_CONSULTA_INVENTARIO_BASE = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_consulta_inventario`;
+// QA: serviciosqa.siesacloud.com
 // OJO: el costo promedio se lee de PRODUCCIÓN (servicios, no serviciosqa) a propósito: solo se
-// CONSULTA (GET, no escribe nada) para tener el costo real. Inventario y los POST siguen en QA.
+// CONSULTA (GET, no escribe nada) para tener el costo real.
 const URL_COSTO_PROMEDIO_BASE = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_costo_promedio_dev`;
 const INVENTARIO_TAM_PAGINA = parseInt(process.env.INVENTARIO_TAM_PAGINA || '1000');
 const INVENTARIO_MAX_PAGINAS = parseInt(process.env.INVENTARIO_MAX_PAGINAS || '100');
 
-// URL de Siesa QA (POST) - Documento 242756 (FACTURA_DEV)
-const URL_SIESA_POST = `https://serviciosqa.siesacloud.com/api/siesa/v3.1/conectoresimportar?idCompania=${CIA}&idSistema=1&idDocumento=242756&nombreDocumento=FACTURA_DEV`;
+// URL de Siesa PROD (POST) - Documento 242756 (FACTURA_DEV)
+const URL_SIESA_POST = `https://servicios.siesacloud.com/api/siesa/v3.1/conectoresimportar?idCompania=${CIA}&idSistema=1&idDocumento=242756&nombreDocumento=FACTURA_DEV`;
+// QA: serviciosqa.siesacloud.com
 
-// URL de Siesa QA (POST) - Documento 241913 (AJUSTE_INVENTARIO_DEV)
-const URL_AJUSTE_INVENTARIO = `https://serviciosqa.siesacloud.com/api/siesa/v3.1/conectoresimportar?idCompania=${CIA}&idSistema=1&idDocumento=241913&nombreDocumento=AJUSTE_INVENTARIO_DEV`;
+// URL de Siesa PROD (POST) - Documento 241913 (AJUSTE_INVENTARIO_DEV)
+const URL_AJUSTE_INVENTARIO = `https://servicios.siesacloud.com/api/siesa/v3.1/conectoresimportar?idCompania=${CIA}&idSistema=1&idDocumento=241913&nombreDocumento=AJUSTE_INVENTARIO_DEV`;
+// QA: serviciosqa.siesacloud.com
 
 async function fetchFromConnekta(url) {
     try {
@@ -525,8 +528,9 @@ function formatNegCantidad(valor) {
 }
 
 function formatTasa(number) {
-    if (number === null || number === undefined) return "000.0000";
-    return parseFloat(number).toFixed(4).padStart(8, '0');
+    const num = parseFloat(number);
+    if (isNaN(num)) return "000.0000";
+    return num.toFixed(4).padStart(8, '0');
 }
 
 // Convierte un string "001,002" en array ["001","002"].
@@ -723,7 +727,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 "CANTIDAD": formatDecimal(absIfCNZ(det.CANTIDAD || det.cant_1), true),
                 "VALOR_BRUTO": formatDecimal(absIfCNZ(det.VALOR_BRUTO)),
                 "id_item": det.id_item,
-                "id_un_movto": (det?.unidad_de_negocio ?? '').trim() || "001"
+                "id_un_movto": (det?.unidad_de_negocio ?? '').trim() || "001",
+                "VR_UNIT": formatDecimal(det.PrecioUnitDet || 0)
             });
 
             // CRUCE DE IMPUESTOS POR ROWIDMVTO

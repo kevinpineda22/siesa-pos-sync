@@ -1,4 +1,4 @@
-name: Sync POS -> Siesa (cada 2h)
+name: Sync POS -> Siesa (cada 1h)
 
 # Ejecuta el flujo CNZ->CFZ de las facturas de HOY (zona America/Bogota) para el CO/Caja
 # configurados. Corre DENTRO del runner de GitHub Actions (node directo), no vía Vercel,
@@ -6,8 +6,8 @@ name: Sync POS -> Siesa (cada 2h)
 
 on:
   schedule:
-    # Cada 2 horas. OJO: el cron de GitHub es en UTC y puede retrasarse minutos bajo carga.
-    - cron: '0 */2 * * *'
+    # Cada 1 hora. OJO: el cron de GitHub es en UTC y puede retrasarse minutos bajo carga.
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       co:
@@ -69,7 +69,7 @@ jobs:
           MAX_RONDAS_AJUSTE: ${{ secrets.MAX_RONDAS_AJUSTE }}
           # --- Filtros CO/Caja: input manual del dispatch tiene prioridad; si no, default ---
           CO_FILTER: ${{ github.event.inputs.co || '001' }}
-          CAJA_FILTER: ${{ github.event.inputs.caja || 'P01,P03,P05' }}
+          CAJA_FILTER: ${{ github.event.inputs.caja || 'Z01,Z02' }}
           # --- Modo prueba (solo aplica en "Run workflow"; el cron los deja vacíos = producción) ---
           CRON_LIMITE: ${{ github.event.inputs.limite || '' }}
           CRON_SOLO_HOY: ${{ github.event.inputs.solo_hoy || 'true' }}

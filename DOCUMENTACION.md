@@ -1,6 +1,6 @@
-# Sincronizador POS → Siesa QA
+# Sincronizador POS → Siesa PROD
 
-Backend Node.js que sincroniza ventas de un POS (Punto de Venta) hacia el ERP Siesa QA, automatizando la creación de facturas, notas crédito, clientes y ajustes de inventario, con trazabilidad completa e idempotencia.
+Backend Node.js que sincroniza ventas de un POS (Punto de Venta) hacia el ERP Siesa PROD, automatizando la creación de facturas, notas crédito, clientes y ajustes de inventario, con trazabilidad completa e idempotencia.
 
 ---
 
@@ -27,7 +27,9 @@ Backend Node.js que sincroniza ventas de un POS (Punto de Venta) hacia el ERP Si
 
 ## 1. Visión general
 
-El sistema toma las ventas registradas en el POS (consultadas vía Connekta - un middleware de Siesa que ejecuta SQL contra la base de datos del ERP) y las **replica como documentos contables en Siesa QA** mediante su API de importación de planos (`conectoresimportar`).
+El sistema toma las ventas registradas en el POS (consultadas vía Connekta - un middleware de Siesa que ejecuta SQL contra la base de datos del ERP) y las **replica como documentos contables en Siesa PROD** mediante su API de importación de planos (`conectoresimportar`).
+
+> **⚠️ IMPORTANTE:** En PRODUCCIÓN la sincronización **solo** se ejecuta desde el workflow de GitHub Actions (`.github/workflows/sync-pos.yml`). No realizar ejecuciones manuales locales (`node -e`) ya que las URLs apuntan a Siesa PROD y cualquier prueba local inyectaría datos reales.
 
 Por cada venta del POS se generan **2 documentos en Siesa**:
 
@@ -122,8 +124,10 @@ MAX_RONDAS_AJUSTE=3
 # El query trae la ventana del SQL (hoy 2 días) de TODOS los COs/cajas; estos filtros acotan en memoria.
 # Prioridad: parámetro del body { co, caja } > variable de entorno > vacío (sin filtro = todo).
 # Defaults seguros que replican el WHERE que antes estaba en el SQL:
+ENTORNO_SIESA=PROD       # Entorno (PROD/QA). Controla las URLs de Siesa.
 CO_FILTER=001            # Centro(s) de operación. Ej. "001,003". Vacío = todos los COs.
-CAJA_FILTER=P01,P03,P05  # Tipo(s) de caja (ID_TIPO_DOCTO). Ej. "P05". Vacío = todas las cajas.
+CAJA_FILTER=Z01,Z02      # Tipo(s) de caja (ID_TIPO_DOCTO). Ej. "Z01,Z02". Vacío = todas las cajas.
+# NOTA: En PRODUCCIÓN las URLs apuntan a servicios.siesacloud.com. No ejecutar manualmente.
 
 # Puerto del servidor Express
 PORT=4000
@@ -678,7 +682,9 @@ node -e "const fs=require('fs'); ['logs/facturas_procesadas.json','logs/facturas
 
 ## 15. Comandos útiles
 
-### Ejecución
+> **⚠️ IMPORTANTE:** En PRODUCCIÓN todas las URLs apuntan a `servicios.siesacloud.com`. No ejecutar ningún comando local ni en Vercel que dispare `syncVentas()` o `syncPOS()`, ya que inyectaría datos reales en Siesa PROD. Solo el workflow de GitHub Actions debe ejecutar la sincronización.
+
+### Ejecución (solo QA / entorno local)
 ```bash
 # Modo normal (procesa las últimas LIMITE_FACTURAS)
 node -e "require('./syncVentas').syncVentas()"
@@ -820,16 +826,17 @@ Se observo un CPE del item 773 con costo unitario **5894** cuando la query devue
 - **Motivos actualizados**: CNZ y CFZ se envian con `f470_id_motivo = "03"` (antes `"01"`). CPE se envia con `f470_id_motivo = "17"` (antes `"03"`).
 - **Prueba de regresión exitosa**: Los logs confirman CNZ/CFZ con motivo 03 y CPE con motivo 17. Siesa reporta `Motivo : 502 -03` y `501 -03` correctamente.
 - **Filtros CO/Caja en frontend**: ActionsPanel ahora tiene inputs para filtrar por CO y tipo de caja, enviados via body del POST.
+- **Migración a PROD (Junio 2026)**: Todas las URLs cambiaron de `serviciosqa.siesacloud.com` a `servicios.siesacloud.com` (PROD). Quedaron comentadas las URLs de QA en cada archivo. Se actualizó el `.env` con `ENTORNO_SIESA=PROD` y `CAJA_FILTER=Z01,Z02`. El workflow se cambió a cada 1h con CO=001 y Cajas=Z01,Z02.
 
-### 17.6 Sincronización automática (GitHub Actions, cada 2h)
+### 17.6 Sincronización automática (GitHub Actions, cada 1h)
 
-Job que procesa sin intervención las facturas **del día** (CO/Caja indicados) cada 2 horas,
+Job que procesa sin intervención las facturas **del día** (CO=001, Cajas=Z01,Z02) cada 1 hora,
 omitiendo las ya procesadas (idempotencia).
 
 - **Dónde corre:** dentro del runner de GitHub Actions (`node scripts/runSyncCron.js`), **no** vía
   el endpoint de Vercel. Así se evita el límite de ejecución serverless (10–300s); el runner de
   Actions tiene hasta 6h. Vercel queda para el frontend y el disparo manual del API.
-- **Archivos:** `.github/workflows/sync-pos.yml` (trigger `schedule: '0 */2 * * *'` UTC +
+- **Archivos:** `.github/workflows/sync-pos.yml` (trigger `schedule: '0 * * * *'` UTC +
   `workflow_dispatch` con inputs `co`/`caja`) y `scripts/runSyncCron.js`.
 - **Opciones nuevas en `syncVentas`:**
   - `todas: true` → procesa TODAS las facturas filtradas (ignora `LIMITE_FACTURAS`); la idempotencia
@@ -845,20 +852,22 @@ omitiendo las ya procesadas (idempotencia).
   los últimos 2 días.
 - **Secrets en GitHub:** `CONNI_KEY`, `CONNI_TOKEN`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `CIA`,
   `ENTORNO_SIESA`, `CONCURRENCIA`, `PAGINACION_CONCURRENCIA`, `MAX_RONDAS_AJUSTE`.
-  `CO_FILTER`/`CAJA_FILTER` se pasan por input del dispatch o usan el default (`001` / `P01,P03,P05`).
+  `CO_FILTER`/`CAJA_FILTER` se pasan por input del dispatch o usan el default (`001` / `Z01,Z02`).
+- **Filtros de producción:** CO=001 fijo, Cajas=Z01,Z02 fijo.
+- **No ejecutar manualmente:** una vez en PROD, no se deben hacer pruebas locales. Solo el workflow ejecuta la sincronización.
 - **Caveats:** el cron de GitHub puede retrasarse minutos y se deshabilita tras ~60 días sin
   actividad del repo. Con `soloHoy`, los FALLOS de días anteriores no se reintentan en el cron de
-  2h (dejar una corrida diaria sin `soloHoy` para catch-up si se necesita).
+  1h (dejar una corrida diaria sin `soloHoy` para catch-up si se necesita).
 
 ### 17.7 Pendientes
-- [ ] Solicitar al equipo contable creacion de equivalencias faltantes (`0-501-03`, `0-502-03`, `INEXCAB01-502-03`, `INEXCCA01-502-03`, `ING05AB03-502-03`), items (`0188892`, `0188638`) y UM (`UND`) en Siesa QA.
+- [ ] Solicitar al equipo contable creacion de equivalencias faltantes (`0-501-03`, `0-502-03`, `INEXCAB01-502-03`, `INEXCCA01-502-03`, `ING05AB03-502-03`), items (`0188892`, `0188638`) y UM (`UND`) en Siesa PROD.
 - [ ] Confirmar en vivo si el CPE envia 5975 (leer log `🧾 [CPE movimiento]`); actuar solo si Siesa lo recalcula (cambiar `id_motivo`/`id_concepto` o sanear stock negativo, validar con el funcional de Siesa).
 - [ ] Tunear `PAGINACION_CONCURRENCIA` en produccion segun lo que tolere Connekta (empezar en 4).
 - [ ] Hacer deploy del frontend React a Vercel con la variable VITE_SIESA_POS_SYNC_URL.
 - [x] ~~Reducir en Connekta la ventana de fecha de los queries de venta/pagos/impuestos de 180 a 2 días~~ (hecho: `DATEADD(day, -2, GETDATE())`; el "hoy" lo controla el código con `soloHoy`).
-- [ ] Al pasar a PROD: cambiar `URL_CONSULTA_INVENTARIO_BASE` y los POST de Siesa de `serviciosqa.siesacloud.com` a `servicios.siesacloud.com`. (El costo `URL_COSTO_PROMEDIO_BASE` **ya** apunta a `servicios`/PROD: solo se consulta, no escribe.)
-- [ ] Cargar los GitHub Secrets del repo y probar el workflow con `workflow_dispatch`.
-- [x] ~~Implementar job programado (cron) para sincronización automática~~ (hecho: GitHub Actions cada 2h, ver 17.6).
+- [x] ~~Migrar a PROD: cambiar URLs de `serviciosqa.siesacloud.com` a `servicios.siesacloud.com`~~ (hecho: syncVentas.js, syncPOS.js, .env y workflow actualizados).
+- [x] ~~Cargar los GitHub Secrets del repo~~ (hecho).
+- [x] ~~Implementar job programado (cron) para sincronización automática~~ (hecho: GitHub Actions cada 1h, ver 17.6).
 
 ---
 

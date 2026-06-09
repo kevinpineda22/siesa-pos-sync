@@ -88,7 +88,7 @@ async function probarSincronizacion(nitsRequeridos = null) {
         console.log(`\n✅ Se extrajeron ${clientesDatos.length} clientes. Procesando...`);
 
         console.log('\n----------------------------------------------------');
-        console.log('2. Armando el Payload MASIVO para QA (GenericTransfer)...');
+        console.log('2. Armando el Payload MASIVO para PROD (GenericTransfer)...');
         console.log('----------------------------------------------------');
         
         const payloadSiesa = {
@@ -170,12 +170,13 @@ async function probarSincronizacion(nitsRequeridos = null) {
         // Se omite respaldo local (ahora todo se persiste en Supabase via logger.js)
 
         console.log('\n----------------------------------------------------');
-        console.log('3. Haciendo el POST MASIVO a Siesa QA...');
+        console.log('3. Haciendo el POST MASIVO a Siesa PROD...');
         console.log('----------------------------------------------------');
 
-        const urlQA = 'https://serviciosqa.siesacloud.com/api/siesa/v3.1/conectoresimportar?idCompania=7375&idSistema=1&idDocumento=242590&nombreDocumento=TERCEROS_DEV_POS';
+        const urlSiesa = 'https://servicios.siesacloud.com/api/siesa/v3.1/conectoresimportar?idCompania=7375&idSistema=1&idDocumento=242590&nombreDocumento=TERCEROS_DEV_POS';
+        // QA: serviciosqa.siesacloud.com
         
-        const responsePost = await axios.post(urlQA, payloadSiesa, {
+        const responsePost = await axios.post(urlSiesa, payloadSiesa, {
             headers: {
                 'Content-Type': 'application/json',
                 'ConniKey': process.env.CONNI_KEY,
@@ -183,7 +184,7 @@ async function probarSincronizacion(nitsRequeridos = null) {
             }
         });
 
-        console.log('\n✅ ¡Respuesta exitosa masiva de Siesa QA!');
+        console.log('\n✅ ¡Respuesta exitosa masiva de Siesa PROD!');
         console.log(responsePost.data);
         return responsePost.data;
 
