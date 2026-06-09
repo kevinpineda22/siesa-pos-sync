@@ -713,6 +713,12 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
 
         fac.items.forEach((det, index) => {
             const lineaItem = index + 1;
+            const cant = absIfCNZ(det.CANTIDAD || det.cant_1);
+            const vrBruto = absIfCNZ(det.VALOR_BRUTO);
+            const isPrecioValido = det.PrecioUnitDet != null && Number(det.PrecioUnitDet) > 0;
+            const precioUnit = isPrecioValido
+                ? det.PrecioUnitDet
+                : (Number(cant) > 0 ? vrBruto / cant : 0);
 
             Movimientos.push({
                 "id_co": enc.CoDoc,
@@ -725,11 +731,11 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 "ind_naturaleza": esSimulacionCNZ ? 1 : 2,
                 "id_co_movto": enc.CoDoc,
                 "UNIDAD_MEDIDA": det.UNIDAD_MEDIDA ? det.UNIDAD_MEDIDA.trim() : "UND",
-                "CANTIDAD": formatDecimal(absIfCNZ(det.CANTIDAD || det.cant_1), true),
-                "VALOR_BRUTO": formatDecimal(absIfCNZ(det.VALOR_BRUTO)),
+                "CANTIDAD": formatDecimal(cant, true),
+                "VALOR_BRUTO": formatDecimal(vrBruto),
                 "id_item": det.id_item,
                 "id_un_movto": (det?.unidad_de_negocio ?? '').trim() || "001",
-                "VR_UNIT": formatDecimal(det.PrecioUnitDet || 0)
+                "VR_UNIT": formatDecimal(precioUnit)
             });
 
             // CRUCE DE IMPUESTOS POR ROWIDMVTO
