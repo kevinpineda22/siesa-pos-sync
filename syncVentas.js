@@ -750,7 +750,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     "PORCENTAJE_BASE": formatTasa(imp.PORCENTAJE_BASE), 
                     "TASA": formatTasa(imp.TASA),
                     "VLR_UNI": formatDecimal(imp.VLR_UNI != null ? imp.VLR_UNI : 0),
-                    "VALOR_TOTAL": formatDecimal(absIfCNZ(imp.VALOR_TOTAL)) 
+                    "VALOR_TOTAL": formatDecimal(absIfCNZ(imp.VALOR_TOTAL) || (Number(imp.VLR_UNI || 0) * Number(cant || 0))) 
                 });
             });
 
@@ -920,15 +920,6 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         const MAX_RONDAS = Math.max(1, parseInt(process.env.MAX_RONDAS_AJUSTE || '3'));
         let clientesSincronizados = false;
         let fallosInyeccion = 0; // fallos CONSECUTIVOS del ajuste de inventario
-        // DEBUG: imprimir payload completo de la primera factura para inspeccionar ICO
-        const debuggedKey = `${tipoDoctoSiesa}|${consecutivo}`;
-        if (!global._payloadDebugged) global._payloadDebugged = new Set();
-        if (!global._payloadDebugged.has(debuggedKey)) {
-            global._payloadDebugged.add(debuggedKey);
-            console.log(`\n📦 PAYLOAD COMPLETO [${tipoDoctoSiesa} ${consecutivo}]:`);
-            console.log(JSON.stringify(payload, null, 2));
-        }
-
         for (let ronda = 0; ronda <= MAX_RONDAS; ronda++) {
             try {
                 const responseSiesa = await axios.post(URL_SIESA_POST, payload, {
