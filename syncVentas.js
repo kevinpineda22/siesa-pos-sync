@@ -616,7 +616,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     // Mapear impuestos por RowidMvto para búsqueda rápida
     const impuestosPorRowid = {};
     impuestosRawFiltrados.forEach(imp => {
-        if (imp.ID_LLAVE_IMPUESTO && imp.ID_LLAVE_IMPUESTO !== 'null' && imp.VALOR_TOTAL > 0 && parseFloat(imp.TASA || 0) > 0) {
+        if (imp.ID_LLAVE_IMPUESTO && imp.ID_LLAVE_IMPUESTO !== 'null' && imp.VALOR_TOTAL > 0) {
             if (!impuestosPorRowid[imp.RowidMvto]) impuestosPorRowid[imp.RowidMvto] = [];
             impuestosPorRowid[imp.RowidMvto].push(imp);
         }
@@ -749,7 +749,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     "ID_LLAVE_IMPUESTO": imp.ID_LLAVE_IMPUESTO,
                     "PORCENTAJE_BASE": formatTasa(imp.PORCENTAJE_BASE), 
                     "TASA": formatTasa(imp.TASA),
-                    "VLR_UNI": formatDecimal(0),
+                    "VLR_UNI": formatDecimal(imp.VLR_UNI != null ? imp.VLR_UNI : 0),
                     "VALOR_TOTAL": formatDecimal(absIfCNZ(imp.VALOR_TOTAL)) 
                 });
             });
