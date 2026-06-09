@@ -746,7 +746,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     "TIPO_DOCTO": tipoDoctoSiesa,
                     "CONSEC_DOCTO": consecDoc,
                     "NRO_REGISTRO": lineaItem,
-                    "ID_LLAVE_IMPUESTO": imp.ID_LLAVE_IMPUESTO,
+                    "ID_LLAVE_IMPUESTO": (imp.ID_LLAVE_IMPUESTO || '').trim(),
                     "PORCENTAJE_BASE": formatTasa(imp.PORCENTAJE_BASE), 
                     "TASA": formatTasa(imp.TASA),
                     "VLR_UNI": formatDecimal(imp.VLR_UNI != null ? imp.VLR_UNI : 0),
