@@ -120,6 +120,10 @@ async function registrarResultado(resultado, meta = {}) {
         payload.cpe_items = meta.cpeItems;
     }
 
+    if (resultado.ok) {
+        payload.cxc_valor = null;
+    }
+
     if (!existente) {
         payload.primera_corrida = payload.ultima_corrida;
         if (!payload.automatizaciones_aplicadas) payload.automatizaciones_aplicadas = [];
@@ -207,6 +211,29 @@ async function generarReporteMaestras() {
     }
 }
 
+async function guardarCorreccionCxC(co, caja, consec, valor) {
+    const idCNZ = `CNZ:${(co || '').trim()}:${(caja || '').trim()}:${consec}`;
+    const idCFZ = `CFZ:${(co || '').trim()}:${(caja || '').trim()}:${consec}`;
+    const { error } = await supabase
+        .from('sps_facturas')
+        .update({ cxc_valor: valor })
+        .in('id', [idCNZ, idCFZ]);
+    if (error) console.error('⚠️ Error guardando cxc_valor:', error.message);
+}
+
+async function obtenerCorreccionesCxC() {
+    const { data, error } = await supabase
+        .from('sps_facturas')
+        .select('id, cxc_valor')
+        .not('cxc_valor', 'is', null)
+        .neq('estado', 'OK');
+    if (error) {
+        console.error('⚠️ Error leyendo cxc_valor:', error.message);
+        return new Map();
+    }
+    return new Map((data || []).map(r => [r.id, r.cxc_valor]));
+}
+
 module.exports = {
     supabase,
     obtenerConsecsExitosos,
@@ -214,5 +241,7 @@ module.exports = {
     guardarCorrida,
     generarReporteMaestras,
     categorizarError,
-    parsearError
+    parsearError,
+    guardarCorreccionCxC,
+    obtenerCorreccionesCxC
 };

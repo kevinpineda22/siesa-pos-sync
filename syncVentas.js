@@ -595,6 +595,9 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         });
     }
 
+    // Correcciones de CxC guardadas entre ejecuciones (cartera vs CxC)
+    let correccionesCxC = new Map();
+
     // AGRUPAR POR CO | CAJA | CONSEC (cada grupo solo tiene items y pagos de una caja)
     const buildKey = (co, caja, consec) => `${(co || '').trim() || '001'}|${(caja || '').trim() || '000'}|${consec}`;
     const facturas = {};
@@ -677,7 +680,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     }
 
     // Genera el payload completo para UNA SOLA factura (devuelve objeto listo para POST a Siesa).
-    const generarPayloadDocumento = (fac, enc, tipoDocumentoSimulado) => {
+    const generarPayloadDocumento = (fac, enc, tipoDocumentoSimulado, co = '', caja = '') => {
         // Arrays LOCALES a esta factura - cada factura genera su propio payload independiente.
         const Docto_ventas_comercial = [];
         const Movimientos = [];
@@ -895,6 +898,27 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             });
         }
 
+        // Aplicar corrección de CxC guardada de ejecución anterior (cartera vs CxC)
+        const keyCorr = `${tipoDoctoSiesa}:${(co || '').trim()}:${(caja || '').trim()}:${consecDoc}`;
+        const cxcVal = correccionesCxC.get(keyCorr);
+        if (cxcVal) {
+            console.log(`💡 [${tipoDoctoSiesa} ${consecDoc}] Aplicando cxc_valor=${cxcVal} de ejecución anterior.`);
+            Caja.length = 0;
+            Caja.push({
+                "ID_CO": enc.CoDoc,
+                "ID_TIPO_DOCTO": tipoDoctoSiesa,
+                "CONSEC_DOCTO": consecDoc,
+                "ID_MEDIOS_PAGO": "EFE",
+                "VLR_MEDIO_PAGO": formatDecimal(cxcVal),
+                "NRO_CUENTA": "1",
+                "NRO_CHEQUE": "1",
+                "REFERENCIA": "1",
+                "COD_SEGURIDAD": 1,
+                "NRO_AUTORIZACION": "1",
+                "FECHA_VCTO": formatDate(enc.FECHA_DOCTO)
+            });
+        }
+
         // Armar y devolver el payload aislado de ESTA factura.
         const payload = {
             "Docto. ventas comercial": Docto_ventas_comercial,
@@ -952,7 +976,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
 
                 // Error no automatizable (maestras, valor inválido, etc.) -> fallo definitivo.
                 if (!faltaCliente && !faltaInventario) {
-                    // Salvo que sea error de cartera vs CxC con diferencia de 1-2 pesos (reintentable)
+                    // Salvo que sea error de cartera vs CxC con diferencia de 1-2 pesos:
+                    // se guarda el valor CxC en DB para que la próxima ejecución lo use.
                     const errorCarteraCxC = Array.isArray(errores) && errores.find(e =>
                         e.f_detalle && e.f_detalle.includes('Valor cartera:')
                     );
@@ -962,16 +987,13 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                             const cartera = parseFloat(match[1]);
                             const cxc = parseFloat(match[2]);
                             const diff = Math.abs(cartera - cxc);
-                            if (diff > 0 && diff <= 2 && payload.Caja && payload.Caja.length > 0) {
-                                console.log(`🎯 [${tipoDoctoSiesa} ${consecutivo}] Ajuste cartera ${cartera} → CxC ${cxc} (dif ${diff}). Reintentando...`);
-                                payload.Caja[0].VLR_MEDIO_PAGO = formatDecimal(cxc);
-                                accionTomada = true;
+                            if (diff > 0 && diff <= 2) {
+                                console.log(`💾 [${tipoDoctoSiesa} ${consecutivo}] Guardando corrección CxC: cartera ${cartera} → CxC ${cxc} (dif ${diff}). Se aplicará en próxima ejecución.`);
+                                await logger.guardarCorreccionCxC(meta.co, meta.caja, consecutivo, cxc);
                             }
                         }
                     }
-                    if (!accionTomada) {
-                        return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: JSON.stringify(error.response.data) });
-                    }
+                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: JSON.stringify(error.response.data) });
                 }
 
                 // Sin rondas restantes y Siesa sigue pidiendo automatización -> fallo.
@@ -1052,6 +1074,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     // Aplica idempotencia: si una factura YA está como OK en Supabase
     // (para este tipo CFZ/CNZ), se omite silenciosamente. Las que están en FALLO sí se reintentan.
     const consecsExitosos = await logger.obtenerConsecsExitosos();
+    correccionesCxC = await logger.obtenerCorreccionesCxC();
     const omitidas = [];
     const tareas = [];
     facturasOrdenadas.forEach(key => {
@@ -1074,7 +1097,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 omitidas.push(`${tipoDocto} ${consecutivo}`);
                 return;
             }
-            const payload = generarPayloadDocumento(fac, enc, 'CNZ');
+            const payload = generarPayloadDocumento(fac, enc, 'CNZ', co, caja);
             tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDocto, meta });
         } else if (pasoActual === 3) {
             const tipoDoc = 'CFZ';
@@ -1083,7 +1106,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 omitidas.push(`${tipoDoc} ${consecutivo}`);
                 return;
             }
-            const payload = generarPayloadDocumento(fac, enc, 'CFZ');
+            const payload = generarPayloadDocumento(fac, enc, 'CFZ', co, caja);
             tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDoc, meta });
         }
     });
