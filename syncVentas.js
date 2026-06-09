@@ -948,17 +948,36 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 ));
                 const faltaInventario = Array.isArray(errores) && errores.some(e => e.f_detalle && e.f_detalle.includes('Item sin cantidad disponible'));
 
+                let accionTomada = false;
+
                 // Error no automatizable (maestras, valor inválido, etc.) -> fallo definitivo.
                 if (!faltaCliente && !faltaInventario) {
-                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: JSON.stringify(error.response.data) });
+                    // Salvo que sea error de cartera vs CxC con diferencia de 1-2 pesos (reintentable)
+                    const errorCarteraCxC = Array.isArray(errores) && errores.find(e =>
+                        e.f_detalle && e.f_detalle.includes('Valor cartera:')
+                    );
+                    if (errorCarteraCxC) {
+                        const match = errorCarteraCxC.f_detalle.match(/Valor cartera:\s*([\d.]+).*?Valor CxC:\s*([\d.]+)/);
+                        if (match) {
+                            const cartera = parseFloat(match[1]);
+                            const cxc = parseFloat(match[2]);
+                            const diff = Math.abs(cartera - cxc);
+                            if (diff > 0 && diff <= 2 && payload.Caja && payload.Caja.length > 0) {
+                                console.log(`🎯 [${tipoDoctoSiesa} ${consecutivo}] Ajuste cartera ${cartera} → CxC ${cxc} (dif ${diff}). Reintentando...`);
+                                payload.Caja[0].VLR_MEDIO_PAGO = formatDecimal(cxc);
+                                accionTomada = true;
+                            }
+                        }
+                    }
+                    if (!accionTomada) {
+                        return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: JSON.stringify(error.response.data) });
+                    }
                 }
 
                 // Sin rondas restantes y Siesa sigue pidiendo automatización -> fallo.
                 if (ronda >= MAX_RONDAS) {
                     return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: `Agotadas ${MAX_RONDAS} ronda(s) de automatización: ${JSON.stringify(error.response.data)}` });
                 }
-
-                let accionTomada = false;
 
                 if (faltaCliente && !clientesSincronizados) {
                     console.log(`⚠️ [${tipoDoctoSiesa} ${consecutivo}] Cliente no existe en Siesa. Ejecutando syncPOS()...`);
