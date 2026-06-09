@@ -922,6 +922,13 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         let fallosInyeccion = 0; // fallos CONSECUTIVOS del ajuste de inventario
         for (let ronda = 0; ronda <= MAX_RONDAS; ronda++) {
             try {
+                // DEBUG TEMPORAL: inspeccionar payload JSON
+                if (ronda === 0) {
+                    console.log(`\n🔍 DEBUG PAYLOAD [${tipoDoctoSiesa} ${consecutivo}] Movimientos:`);
+                    (payload.Movimientos || []).forEach(m => {
+                        console.log(`  nro_registro=${m.nro_registro} id_item=${m.id_item} CANTIDAD=${m.CANTIDAD} VALOR_BRUTO=${m.VALOR_BRUTO} VR_UNIT=${m.VR_UNIT}`);
+                    });
+                }
                 const responseSiesa = await axios.post(URL_SIESA_POST, payload, {
                     headers: {
                         'ConniKey': process.env.CONNI_KEY,
