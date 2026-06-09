@@ -585,33 +585,32 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         console.log("⚠️ No hay facturas para sincronizar. (Filtros CO/Caja sin resultados)");
         return;
     }
-    // Filtrar arrays secundarios para que solo contengan datos de las facturas filtradas
-    const consecsValidos = new Set(detalles.map(d => d.CONSEC_DOCTO));
-    const pagosRawFiltrados = pagosRaw.filter(p => consecsValidos.has(p.CONSEC_DOCTO));
-    const impuestosRawFiltrados = impuestosRaw; // se cruza por RowidMvto, datos huérfanos se ignoran
-    const cajasRawFiltradas = cajasRaw;
-
     // MAPEO DE CAJAS POR CO
     const cajaPorCo = {};
-    if (cajasRawFiltradas && cajasRawFiltradas.length > 0) {
-        cajasRawFiltradas.forEach(c => {
+    if (cajasRaw && cajasRaw.length > 0) {
+        cajasRaw.forEach(c => {
             const co = c.f291_id_co ? c.f291_id_co.toString().trim() : '001';
             const idCaja = c.f291_id ? c.f291_id.toString().trim() : '001';
             if (!cajaPorCo[co]) cajaPorCo[co] = idCaja;
         });
     }
 
-    // AGRUPAR POR FACTURA Y CRUZAR DATOS
+    // AGRUPAR POR CO | CAJA | CONSEC (cada grupo solo tiene items y pagos de una caja)
+    const buildKey = (co, caja, consec) => `${(co || '').trim() || '001'}|${(caja || '').trim() || '000'}|${consec}`;
     const facturas = {};
     detalles.forEach(det => {
-        const consec = det.CONSEC_DOCTO;
-        if (!facturas[consec]) facturas[consec] = { items: [], pagos: [] };
-        facturas[consec].items.push(det);
+        const key = buildKey(det.CoDoc, det.ID_TIPO_DOCTO, det.CONSEC_DOCTO);
+        if (!facturas[key]) facturas[key] = { items: [], pagos: [] };
+        facturas[key].items.push(det);
     });
 
+    const facturasKeysValidas = new Set(detalles.map(d => buildKey(d.CoDoc, d.ID_TIPO_DOCTO, d.CONSEC_DOCTO)));
+    const pagosRawFiltrados = pagosRaw.filter(p => facturasKeysValidas.has(buildKey(p.CoDoc, p.ID_TIPO_DOCTO, p.CONSEC_DOCTO)));
+    const impuestosRawFiltrados = impuestosRaw;
+
     pagosRawFiltrados.forEach(p => {
-        const consec = p.CONSEC_DOCTO;
-        if (facturas[consec]) facturas[consec].pagos.push(p);
+        const key = buildKey(p.CoDoc, p.ID_TIPO_DOCTO, p.CONSEC_DOCTO);
+        if (facturas[key]) facturas[key].pagos.push(p);
     });
 
     // Mapear impuestos por RowidMvto para búsqueda rápida
@@ -625,7 +624,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
 
     // ORDENAR FACTURAS: dentro de cada paso, las más recientes primero
     // (sort DESC por consec; el orden CFZ/CNZ entre pasos lo controla el caller)
-    const todasLasFacturas = Object.keys(facturas).sort((a, b) => parseInt(b) - parseInt(a));
+    const parseKey = key => { const [co, caja, consec] = key.split('|'); return { co, caja, consec }; };
+    const todasLasFacturas = Object.keys(facturas).sort((a, b) => parseInt(b.split('|')[2], 10) - parseInt(a.split('|')[2], 10));
 
     // APLICAR FILTRO POR CONSECS ESPECÍFICOS.
     // Prioridad: 1) parámetro `consecsOverride` (vía HTTP), 2) variable de entorno CONSEC_ESPECIFICOS.
@@ -639,12 +639,12 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     if (consecsActivos.length > 0) {
         const lista = consecsActivos.split(',').map(c => c.trim()).filter(Boolean);
         const setConsecs = new Set(lista);
-        facturasFiltradas = todasLasFacturas.filter(c => setConsecs.has(String(c)));
+        facturasFiltradas = todasLasFacturas.filter(key => setConsecs.has(parseKey(key).consec));
         modoEspecificos = true;
 
         // Avisar si alguno solicitado no se encontró en el pool de Connekta.
-        const encontrados = new Set(facturasFiltradas);
-        const faltantes = lista.filter(c => !encontrados.has(c));
+        const encontradosConsecs = new Set(facturasFiltradas.map(k => parseKey(k).consec));
+        const faltantes = lista.filter(c => !encontradosConsecs.has(c));
         if (pasoActual === 3 && faltantes.length > 0) {
             console.warn(`⚠️ Consecs solicitados que NO están en el rango de Connekta: ${faltantes.join(', ')}`);
         }
@@ -661,16 +661,17 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     // MOSTRAR LISTADO DE FACTURAS DETECTADAS (solo en el primer paso para no duplicar log)
     if (pasoActual === 3) {
         const modoLabel = modoEspecificos
-            ? `modo CONSEC_ESPECIFICOS: ${facturasOrdenadas.length} consec(s) puntuales`
+            ? `modo CONSEC_ESPECIFICOS: ${facturasOrdenadas.length} grupos`
             : `procesando ${facturasOrdenadas.length} de ${todasLasFacturas.length} disponibles`;
         console.log("\n==========================================");
         console.log(`📋 FACTURAS DETECTADAS (${modoLabel})`);
         console.log("==========================================");
-        facturasOrdenadas.forEach((c, i) => {
-            const f = facturas[c];
+        facturasOrdenadas.forEach((key, i) => {
+            const { co, caja, consec } = parseKey(key);
+            const f = facturas[key];
             const e = f.items[0];
             const fecha = e.FECHA_DOCTO ? e.FECHA_DOCTO.split('T')[0] : 'N/A';
-            console.log(`  ${i + 1}. Consec ${c} | Fecha ${fecha} | Tipo ${e.ID_TIPO_DOCTO} | Cliente: ${e.NitTercero} | Items: ${f.items.length} | Neto: $${e.VrNetoDocto}`);
+            console.log(`  ${i + 1}. CO ${co} | Caja ${caja} | Consec ${consec} | Fecha ${fecha} | Cliente: ${e.NitTercero} | Items: ${f.items.length} | Neto: $${e.VrNetoDocto}`);
         });
         console.log("==========================================\n");
     }
@@ -1026,22 +1027,22 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     const consecsExitosos = await logger.obtenerConsecsExitosos();
     const omitidas = [];
     const tareas = [];
-    facturasOrdenadas.forEach(consecutivo => {
-        const fac = facturas[consecutivo];
+    facturasOrdenadas.forEach(key => {
+        const { co, caja, consec: consecutivo } = parseKey(key);
+        const fac = facturas[key];
         const enc = fac.items[0];
         const meta = {
             fecha_factura: enc.FECHA_DOCTO ? enc.FECHA_DOCTO.split('T')[0] : null,
             cliente_nit: enc.NitTercero,
             items: fac.items.length,
             neto: enc.VrNetoDocto,
-            co: enc.CoDoc?.toString().trim() || null,
-            caja: enc.ID_TIPO_DOCTO?.toString().trim() || null
+            co,
+            caja
         };
 
         if (pasoActual === 1) {
-            // CNZ: la simulación CNZ corre para TODAS (las P01 también se simulan como CNZ).
             const tipoDocto = 'CNZ';
-            const keyCNZ = `${tipoDocto}:${(meta.co || '').trim()}:${(meta.caja || '').trim()}:${consecutivo}`;
+            const keyCNZ = `${tipoDocto}:${co}:${caja}:${consecutivo}`;
             if (consecsExitosos.has(keyCNZ)) {
                 omitidas.push(`${tipoDocto} ${consecutivo}`);
                 return;
@@ -1049,9 +1050,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             const payload = generarPayloadDocumento(fac, enc, 'CNZ');
             tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDocto, meta });
         } else if (pasoActual === 3) {
-            // CFZ: documento real
             const tipoDoc = 'CFZ';
-            const keyCFZ = `${tipoDoc}:${(meta.co || '').trim()}:${(meta.caja || '').trim()}:${consecutivo}`;
+            const keyCFZ = `${tipoDoc}:${co}:${caja}:${consecutivo}`;
             if (consecsExitosos.has(keyCFZ)) {
                 omitidas.push(`${tipoDoc} ${consecutivo}`);
                 return;
