@@ -735,7 +735,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 "VALOR_BRUTO": formatDecimal(vrBruto),
                 "id_item": det.id_item,
                 "id_un_movto": (det?.unidad_de_negocio ?? '').trim() || "001",
-                "VR_UNIT": formatDecimal(precioUnit)
+                "VLR_UNITARIO": formatDecimal(precioUnit)
             });
 
             // CRUCE DE IMPUESTOS POR ROWIDMVTO
@@ -922,13 +922,6 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         let fallosInyeccion = 0; // fallos CONSECUTIVOS del ajuste de inventario
         for (let ronda = 0; ronda <= MAX_RONDAS; ronda++) {
             try {
-                // DEBUG TEMPORAL: inspeccionar payload JSON
-                if (ronda === 0) {
-                    console.log(`\n🔍 DEBUG PAYLOAD [${tipoDoctoSiesa} ${consecutivo}] Movimientos:`);
-                    (payload.Movimientos || []).forEach(m => {
-                        console.log(`  nro_registro=${m.nro_registro} id_item=${m.id_item} CANTIDAD=${m.CANTIDAD} VALOR_BRUTO=${m.VALOR_BRUTO} VR_UNIT=${m.VR_UNIT}`);
-                    });
-                }
                 const responseSiesa = await axios.post(URL_SIESA_POST, payload, {
                     headers: {
                         'ConniKey': process.env.CONNI_KEY,
