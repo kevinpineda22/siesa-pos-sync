@@ -70,18 +70,20 @@ function parsearError(mensajeRaw) {
 async function obtenerConsecsExitosos() {
     const { data, error } = await supabase
         .from('sps_facturas')
-        .select('tipo, consec')
+        .select('tipo, consec, co, caja')
         .eq('estado', 'OK');
         
     if (error) {
         console.error('⚠️ Error leyendo consecs exitosos de Supabase:', error.message);
         return new Set();
     }
-    return new Set(data.map(r => `${r.tipo}:${r.consec}`));
+    return new Set(data.map(r => `${r.tipo}:${(r.co || '').trim()}:${(r.caja || '').trim()}:${r.consec}`));
 }
 
 async function registrarResultado(resultado, meta = {}) {
-    const id = `${resultado.tipo}:${resultado.consecutivo}`;
+    const co = meta?.co || '';
+    const caja = meta?.caja || '';
+    const id = `${resultado.tipo}:${co.trim()}:${caja.trim()}:${resultado.consecutivo}`;
     const errorInfo = resultado.ok ? null : parsearError(resultado.mensaje);
     
     // Primero, obtener el registro actual (para incrementar intentos)

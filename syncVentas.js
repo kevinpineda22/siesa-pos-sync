@@ -1041,7 +1041,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         if (pasoActual === 1) {
             // CNZ: la simulación CNZ corre para TODAS (las P01 también se simulan como CNZ).
             const tipoDocto = 'CNZ';
-            if (consecsExitosos.has(`${tipoDocto}:${consecutivo}`)) {
+            const keyCNZ = `${tipoDocto}:${(meta.co || '').trim()}:${(meta.caja || '').trim()}:${consecutivo}`;
+            if (consecsExitosos.has(keyCNZ)) {
                 omitidas.push(`${tipoDocto} ${consecutivo}`);
                 return;
             }
@@ -1050,7 +1051,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         } else if (pasoActual === 3) {
             // CFZ: documento real
             const tipoDoc = 'CFZ';
-            if (consecsExitosos.has(`${tipoDoc}:${consecutivo}`)) {
+            const keyCFZ = `${tipoDoc}:${(meta.co || '').trim()}:${(meta.caja || '').trim()}:${consecutivo}`;
+            if (consecsExitosos.has(keyCFZ)) {
                 omitidas.push(`${tipoDoc} ${consecutivo}`);
                 return;
             }
