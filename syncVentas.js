@@ -920,6 +920,15 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         const MAX_RONDAS = Math.max(1, parseInt(process.env.MAX_RONDAS_AJUSTE || '3'));
         let clientesSincronizados = false;
         let fallosInyeccion = 0; // fallos CONSECUTIVOS del ajuste de inventario
+        // DEBUG: imprimir payload completo de la primera factura para inspeccionar ICO
+        const debuggedKey = `${tipoDoctoSiesa}|${consecutivo}`;
+        if (!global._payloadDebugged) global._payloadDebugged = new Set();
+        if (!global._payloadDebugged.has(debuggedKey)) {
+            global._payloadDebugged.add(debuggedKey);
+            console.log(`\n📦 PAYLOAD COMPLETO [${tipoDoctoSiesa} ${consecutivo}]:`);
+            console.log(JSON.stringify(payload, null, 2));
+        }
+
         for (let ronda = 0; ronda <= MAX_RONDAS; ronda++) {
             try {
                 const responseSiesa = await axios.post(URL_SIESA_POST, payload, {
