@@ -787,7 +787,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         Impuestos.forEach(i => {
             if (i.CONSEC_DOCTO === consecDoc && i.TIPO_DOCTO === tipoDoctoSiesa) {
                 const m = Movimientos.find(x => x.nro_registro === i.NRO_REGISTRO && x.consec_docto === consecDoc && x.id_tipo_docto === tipoDoctoSiesa);
-                if (m && i.TASA !== null && i.TASA !== undefined) {
+                if (m && i.TASA !== null && i.TASA !== undefined && parseFloat(i.TASA) > 0) {
                     const dscLinea = Descuentos.find(d => d.consec_docto === consecDoc && d.id_tipo_docto === tipoDoctoSiesa && d.nro_registro === i.NRO_REGISTRO);
                     const dsctoVal = dscLinea ? parseFloat(dscLinea.vlr_tot || 0) : 0;
                     const baseNeta = parseFloat(m.VALOR_BRUTO) - dsctoVal;
