@@ -718,10 +718,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             const lineaItem = index + 1;
             const cant = absIfCNZ(det.CANTIDAD || det.cant_1);
             const vrBruto = absIfCNZ(det.VALOR_BRUTO);
-            const isPrecioValido = det.PrecioUnitDet != null && Number(det.PrecioUnitDet) > 0;
-            const precioUnit = isPrecioValido
-                ? det.PrecioUnitDet
-                : (Number(cant) > 0 ? vrBruto / cant : 0);
+            const precioUnit = Number(cant) > 0 ? vrBruto / cant : 0;
 
             Movimientos.push({
                 "id_co": enc.CoDoc,
@@ -948,10 +945,6 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         let fallosInyeccion = 0; // fallos CONSECUTIVOS del ajuste de inventario
         for (let ronda = 0; ronda <= MAX_RONDAS; ronda++) {
             try {
-                if (payload.Caja && payload.Caja.length > 0) {
-                    const totalCaja = payload.Caja.reduce((s, c) => s + parseFloat(c.VLR_MEDIO_PAGO || 0), 0);
-                    console.log(`🔍 DEBUG [${tipoDoctoSiesa} ${consecutivo}] Caja enviada (${payload.Caja.length} entries, total=${totalCaja}):`, JSON.stringify(payload.Caja));
-                }
                 const responseSiesa = await axios.post(URL_SIESA_POST, payload, {
                     headers: {
                         'ConniKey': process.env.CONNI_KEY,
