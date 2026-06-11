@@ -23,7 +23,8 @@ app.get('/', (req, res) => {
             sincronizar_ventas: { metodo: 'POST', ruta: '/api/sync-ventas' },
             sincronizar_clientes: { metodo: 'POST', ruta: '/api/sync-clientes' },
             logs_facturas: { metodo: 'GET', ruta: '/api/logs' },
-            historial_corridas: { metodo: 'GET', ruta: '/api/logs/corridas' }
+            historial_corridas: { metodo: 'GET', ruta: '/api/logs/corridas' },
+            resumen_diario: { metodo: 'GET', ruta: '/api/logs/resumen-diario' }
         },
         documentacion: 'https://github.com/kevinpineda22/siesa-pos-sync',
         timestamp: new Date().toISOString()
@@ -191,6 +192,79 @@ app.get('/api/logs/corridas', async (req, res) => {
     }
 });
 
+/**
+ * GET /api/logs/resumen-diario
+ * Resumen agregado por día: totales, desglose por caja y por tipo de NIT
+ * (genérico 2222222222 vs clientes reales).
+ *
+ * Query params:
+ *   - fecha=YYYY-MM-DD  (opcional, por defecto hoy)
+ *
+ * Respuesta:
+ * {
+ *   success: true,
+ *   fecha: "2026-06-11",
+ *   total: 45,
+ *   ok: 40,
+ *   fallo: 5,
+ *   sin_recaudo: 0,
+ *   neto_total: 15234500,
+ *   por_caja: { "Z01": { total: 22, neto: 7512300 }, ... },
+ *   por_nit:  { generico: { total: 12, neto: 4123000, etiqueta: "2222222222" },
+ *               real:     { total: 33, neto: 11111500, etiqueta: "Clientes reales" } }
+ * }
+ */
+app.get('/api/logs/resumen-diario', async (req, res) => {
+    try {
+        const fecha = req.query.fecha || new Date().toISOString().split('T')[0];
+        const { data: facturas, error } = await logger.supabase
+            .from('sps_facturas')
+            .select('estado, caja, cliente_nit, neto, fecha_factura')
+            .eq('fecha_factura', fecha);
+
+        if (error) throw error;
+
+        const total = facturas.length;
+        const ok = facturas.filter(f => f.estado === 'OK').length;
+        const fallo = facturas.filter(f => f.estado === 'FALLO').length;
+        const sinRecaudo = facturas.filter(f => f.estado === 'SIN_RECAUDO').length;
+        const netoTotal = facturas.reduce((s, f) => s + parseFloat(f.neto || 0), 0);
+
+        const porCaja = {};
+        facturas.forEach(f => {
+            const c = f.caja || 'SIN_CAJA';
+            if (!porCaja[c]) porCaja[c] = { total: 0, neto: 0 };
+            porCaja[c].total++;
+            porCaja[c].neto += parseFloat(f.neto || 0);
+        });
+
+        const porNit = {
+            generico: { total: 0, neto: 0, etiqueta: '2222222222' },
+            real: { total: 0, neto: 0, etiqueta: 'Clientes reales' }
+        };
+        facturas.forEach(f => {
+            const esGenerico = (f.cliente_nit || '').trim() === '2222222222';
+            const grupo = esGenerico ? porNit.generico : porNit.real;
+            grupo.total++;
+            grupo.neto += parseFloat(f.neto || 0);
+        });
+
+        res.status(200).json({
+            success: true,
+            fecha,
+            total,
+            ok,
+            fallo,
+            sin_recaudo: sinRecaudo,
+            neto_total: netoTotal,
+            por_caja: porCaja,
+            por_nit: porNit
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // =============================================================================
 // ENDPOINTS DE REPORTES
 // =============================================================================
@@ -282,8 +356,9 @@ if (!process.env.VERCEL) {
         console.log(`- POST http://localhost:${PORT}/api/sync-clientes`);
         console.log(`- POST http://localhost:${PORT}/api/sync-ventas`);
         console.log(`- GET  http://localhost:${PORT}/api/logs`);
-        console.log(`- GET  http://localhost:${PORT}/api/logs/corridas`);
-        console.log(`- POST http://localhost:${PORT}/api/reportes/generar`);
+            console.log(`- GET  http://localhost:${PORT}/api/logs/corridas`);
+            console.log(`- GET  http://localhost:${PORT}/api/logs/resumen-diario`);
+            console.log(`- POST http://localhost:${PORT}/api/reportes/generar`);
         console.log(`- GET  http://localhost:${PORT}/api/reportes/config`);
         console.log(`- POST http://localhost:${PORT}/api/reportes/config`);
         console.log(`- GET  http://localhost:${PORT}/api/reportes/historial`);
