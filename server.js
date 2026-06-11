@@ -116,8 +116,8 @@ app.get('/api/logs', async (req, res) => {
 
         // Filtros
         if (consec) query = query.eq('consec', consec);
-        if (solo_pendientes === '1' || estado === 'FALLO') query = query.eq('estado', 'FALLO');
-        else if (estado === 'OK') query = query.eq('estado', 'OK');
+        if (solo_pendientes === '1') query = query.in('estado', ['FALLO', 'SIN_RECAUDO']);
+        else if (estado) query = query.eq('estado', estado.toUpperCase());
         if (tipo) query = query.eq('tipo', tipo.toUpperCase());
         if (categoria) query = query.eq('categoria_error', categoria.toUpperCase());
 
@@ -132,6 +132,7 @@ app.get('/api/logs', async (req, res) => {
         const { count: total } = await logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true });
         const { count: ok } = await logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'OK');
         const { count: fallo } = await logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'FALLO');
+        const { count: sinRecaudo } = await logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'SIN_RECAUDO');
         
         const { data: ultima } = await logger.supabase.from('sps_facturas').select('ultima_corrida').order('ultima_corrida', { ascending: false }).limit(1).single();
 
@@ -139,7 +140,8 @@ app.get('/api/logs', async (req, res) => {
             total: total || 0,
             ok: ok || 0,
             fallo: fallo || 0,
-            pendientes_unicos: fallo || 0,
+            sin_recaudo: sinRecaudo || 0,
+            pendientes_unicos: (fallo || 0) + (sinRecaudo || 0),
             ultima_corrida: ultima ? ultima.ultima_corrida : ''
         };
 

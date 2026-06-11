@@ -1,12 +1,12 @@
-// Diagnóstico: ¿por qué cartera ≠ CxC en CNZ-00000011?
-// Ejecuta: node scripts/diagnosticoCarteraCxC.js
+// Diagnóstico: ¿por qué cartera ≠ CxC?
+// Ejecuta: node scripts/diagnosticoCarteraCxC.js [CONSEC]
 // READ-ONLY: solo consulta Connekta, no escribe nada.
 
 require('dotenv').config();
 const axios = require('axios');
 
 const CIA = process.env.CIA || '7375';
-const CONSEC_BUSCADO = '11';
+const CONSEC_BUSCADO = process.argv[2] || '11';
 // CO y Caja del filtro actual
 const CO_LIST = ['001'];
 const CAJA_LIST = ['Z01', 'Z02'];
@@ -199,14 +199,15 @@ console.log('══════════════════════�
     const vrNetoDocto = parseFloat(primerItem?.VrNetoDocto || 0);
     console.log(`  VrNetoDocto del encabezado:            $${vrNetoDocto.toFixed(4)}`);
 
-    // 5) Comparar con los valores reportados por Siesa
-    const carteraSiesa = 147464;
-    const cxcSiesa = 147468;
+    // 5) Comparar con los valores reportados por Siesa (args: node script.js CONSEC CARTERA CXC)
+    const carteraSiesa = parseFloat(process.argv[3]) || 0;
+    const cxcSiesa = parseFloat(process.argv[4]) || 0;
     console.log('');
     console.log('  VALORES REPORTADOS POR SIESA:');
-    console.log(`  Cartera:                              $${carteraSiesa}`);
-    console.log(`  CxC:                                  $${cxcSiesa}`);
-    console.log(`  Gap (CxC - cartera):                  $${cxcSiesa - carteraSiesa}`);
+    if (carteraSiesa) console.log(`  Cartera:                              $${carteraSiesa}`);
+    if (cxcSiesa) console.log(`  CxC:                                  $${cxcSiesa}`);
+    if (carteraSiesa && cxcSiesa) console.log(`  Gap (CxC - cartera):                  $${cxcSiesa - carteraSiesa}`);
+    if (!carteraSiesa && !cxcSiesa) console.log('  (no proporcionados, pasar como args: node script.js CONSEC CARTERA CxC)');
 
     // 6) Rutas de redondeo
     console.log('');
@@ -318,19 +319,57 @@ console.log('══════════════════════�
         console.log(`  ⚠️ ${discrepancias} item(s) con discrepancia entre PrecioUnitDet y VALOR_BRUTO/CANT`);
     }
 
-    // 12) Resumen
+    // 12) Análisis de IVA recalculado (Math.round como Siesa)
+    console.log('');
+    console.log('══════════════════════════════════════════');
+    console.log('  IVA RECALCULADO (Math.round como Siesa)');
+    console.log('══════════════════════════════════════════');
+    let ivaRecalcTotal = 0;
+    let divergenciasIVA = 0;
+    porLineaConDatos.forEach((item, idx) => {
+        const imptos = impuestosPorRowid[item.rowid] || [];
+        imptos.forEach(imp => {
+            const tasa = parseFloat(imp.TASA || 0);
+            if (tasa > 0) {
+                const baseNeta = item.vrBruto - item.dsctoItem;
+                const ivaRecalc = Math.round(baseNeta * tasa / 100);
+                const ivaPos = item.ivaItem;
+                ivaRecalcTotal += ivaRecalc;
+                if (ivaRecalc !== ivaPos) {
+                    divergenciasIVA++;
+                    console.log(`  ⚠️ Item ${idx+1}: POS envió $${ivaPos}, Siesa recalcula $${ivaRecalc} (Δ $${ivaPos - ivaRecalc}) — base_neta=$${baseNeta} tasa=${tasa}%`);
+                }
+            }
+        });
+    });
+    console.log(`  IVA enviado (POS):              $${ivaTotal}`);
+    console.log(`  IVA recalculado (Siesa):        $${ivaRecalcTotal}`);
+    console.log(`  Diferencia:                     $${ivaTotal - ivaRecalcTotal}`);
+    console.log(`  Líneas divergentes:             ${divergenciasIVA}`);
+
+    // Calcular cartera con IVA recalculado
+    const carteraConIvaRecalc = baseTotal - dsctoTotal + ivaRecalcTotal;
+    console.log(`  Cartera si enviamos IVA recalc:  $${carteraConIvaRecalc}`);
+    console.log(`  Cartera Siesa reportada:        $${carteraSiesa}`);
+    const difIvaRecalc = Math.abs(carteraSiesa - carteraConIvaRecalc);
+    console.log(`  Diferencia vs Siesa:            $${difIvaRecalc <= 2 ? '✅ ' + difIvaRecalc : '❌ ' + difIvaRecalc}`);
+
+    // 13) Resumen
     console.log('');
     console.log('══════════════════════════════════════════');
     console.log('  CONCLUSIÓN');
     console.log('══════════════════════════════════════════');
 
     // Determinar la causa más probable
-    console.log(`  Gap real: cartera=$${carteraSiesa} CxC=$${cxcSiesa} dif=$${cxcSiesa - carteraSiesa}`);
+    const gapReportado = cxcSiesa - carteraSiesa;
+    console.log(`  Gap reportado por Siesa: cartera=$${carteraSiesa} CxC=$${cxcSiesa} dif=$${gapReportado}`);
     console.log(`  Base total: $${baseTotal}`);
     console.log(`  IVA total: $${ivaTotal.toFixed(2)}`);
+    console.log(`  IVA recalculado (Math.round): $${ivaRecalcTotal}`);
     console.log(`  ICO total: $${icoTotal.toFixed(2)}`);
     console.log(`  Descuentos: $${dsctoTotal}`);
-    console.log(`  Neto calc: $${netoCalc.toFixed(4)}`);
+    console.log(`  Neto calc (base - dscto + IVA + ICO): $${netoCalc.toFixed(4)}`);
+    console.log(`  Neto calc con IVA recalc: $${(netoCalc - ivaTotal + ivaRecalcTotal).toFixed(4)}`);
     console.log(`  VrNetoDocto: $${vrNetoDocto}`);
     console.log(`  Total pagos: $${totalPagos}`);
     console.log(`  Documento round: $${documentoRound}`);
@@ -338,8 +377,7 @@ console.log('══════════════════════�
     console.log(`  Dif cartera vs base: $${(carteraSiesa - baseTotal).toFixed(4)}`);
     console.log(`  Dif CxC vs VrNetoDocto: $${(cxcSiesa - vrNetoDocto).toFixed(4)}`);
     console.log(`  Dif CxC vs netoCalc: $${(cxcSiesa - netoCalc).toFixed(4)}`);
-    console.log(`  Dif CxC vs docRound: $${(cxcSiesa - documentoRound).toFixed(4)}`);
-    console.log(`  Dif CxC vs porLinea: $${(cxcSiesa - porLineaSum).toFixed(4)}`);
+    console.log(`  Dif CxC vs netoCalc+IVA_recalc: $${(cxcSiesa - (netoCalc - ivaTotal + ivaRecalcTotal)).toFixed(4)}`);
     console.log(`  Ajuste automático que se aplicaría: $${ajuste}`);
 
     // Hipótesis final
@@ -361,6 +399,9 @@ console.log('══════════════════════�
     }
     if (Math.abs(cxcSiesa - vrNetoDocto) <= 2) {
         posibles.push('CxC = VrNetoDocto');
+    }
+    if (difIvaRecalc <= 2 && divergenciasIVA > 0) {
+        posibles.push(`Cartera coincide con IVA recalculado (${divergenciasIVA} línea(s) divergente(s))`);
     }
 
     console.log('\n  Hipótesis compatibles con los datos:');

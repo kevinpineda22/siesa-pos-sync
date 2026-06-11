@@ -595,9 +595,6 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         });
     }
 
-    // Correcciones de CxC guardadas entre ejecuciones (cartera vs CxC)
-    let correccionesCxC = new Map();
-
     // AGRUPAR POR CO | CAJA | CONSEC (cada grupo solo tiene items y pagos de una caja)
     const buildKey = (co, caja, consec) => `${(co || '').trim() || '001'}|${(caja || '').trim() || '000'}|${consec}`;
     const facturas = {};
@@ -897,27 +894,6 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             });
         }
 
-        // Aplicar corrección de CxC guardada de ejecución anterior (cartera vs CxC)
-        const keyCorr = `${tipoDoctoSiesa}:${(co || '').trim()}:${(caja || '').trim()}:${consecDoc}`;
-        const cxcVal = correccionesCxC.get(keyCorr);
-        if (cxcVal) {
-            console.log(`💡 [${tipoDoctoSiesa} ${consecDoc}] Aplicando cxc_valor=${cxcVal} de ejecución anterior.`);
-            Caja.length = 0;
-            Caja.push({
-                "ID_CO": enc.CoDoc,
-                "ID_TIPO_DOCTO": tipoDoctoSiesa,
-                "CONSEC_DOCTO": consecDoc,
-                "ID_MEDIOS_PAGO": "EFE",
-                "VLR_MEDIO_PAGO": formatDecimal(cxcVal),
-                "NRO_CUENTA": "1",
-                "NRO_CHEQUE": "1",
-                "REFERENCIA": "1",
-                "COD_SEGURIDAD": 1,
-                "NRO_AUTORIZACION": "1",
-                "FECHA_VCTO": formatDate(enc.FECHA_DOCTO)
-            });
-        }
-
         // Armar y devolver el payload aislado de ESTA factura.
         const payload = {
             "Docto. ventas comercial": Docto_ventas_comercial,
@@ -975,8 +951,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
 
                 // Error no automatizable (maestras, valor inválido, etc.) -> fallo definitivo.
                 if (!faltaCliente && !faltaInventario) {
-                    // Salvo que sea error de cartera vs CxC con diferencia de 1-2 pesos:
-                    // se guarda el valor CxC en DB para que la próxima ejecución lo use.
+                    // Error de cartera vs CxC: si la diferencia es ≤ $10, se reenvía SIN Caja
+                    // para crear el documento "en elaboración" (sin recaudo).
                     const errorCarteraCxC = Array.isArray(errores) && errores.find(e =>
                         e.f_detalle && e.f_detalle.includes('Valor cartera:')
                     );
@@ -986,9 +962,21 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                             const cartera = parseFloat(match[1]);
                             const cxc = parseFloat(match[2]);
                             const diff = Math.abs(cartera - cxc);
-                            if (diff > 0 && diff <= 2) {
-                                console.log(`💾 [${tipoDoctoSiesa} ${consecutivo}] Guardando corrección CxC: cartera ${cartera} → CxC ${cxc} (dif ${diff}). Se aplicará en próxima ejecución.`);
-                                await logger.guardarCorreccionCxC(meta.co, meta.caja, consecutivo, cxc);
+                            if (diff > 0 && diff <= 10) {
+                                console.log(`🔁 [${tipoDoctoSiesa} ${consecutivo}] Reintentando SIN CAJA por dif $${diff} (cartera=${cartera} vs CxC=${cxc})...`);
+                                delete payload.Caja;
+                                const headers = {
+                                    'ConniKey': process.env.CONNI_KEY,
+                                    'ConniToken': process.env.CONNI_TOKEN,
+                                    'Content-Type': 'application/json'
+                                };
+                                try {
+                                    await axios.post(URL_SIESA_POST, payload, { headers });
+                                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: true, mensaje: `Creado SIN RECAUDO por diferencia cartera vs CxC de $${diff}. Ajuste manual requerido.` });
+                                } catch (retryError) {
+                                    const msgRetry = retryError.response?.data ? JSON.stringify(retryError.response.data) : retryError.message;
+                                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: `Reintento sin Caja falló: ${msgRetry}` });
+                                }
                             }
                         }
                     }
@@ -1073,7 +1061,6 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     // Aplica idempotencia: si una factura YA está como OK en Supabase
     // (para este tipo CFZ/CNZ), se omite silenciosamente. Las que están en FALLO sí se reintentan.
     const consecsExitosos = await logger.obtenerConsecsExitosos();
-    correccionesCxC = await logger.obtenerCorreccionesCxC();
     const omitidas = [];
     const tareas = [];
     facturasOrdenadas.forEach(key => {
