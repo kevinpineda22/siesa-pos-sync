@@ -921,6 +921,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         const MAX_RONDAS = Math.max(1, parseInt(process.env.MAX_RONDAS_AJUSTE || '3'));
         let clientesSincronizados = false;
         let fallosInyeccion = 0; // fallos CONSECUTIVOS del ajuste de inventario
+        let cxcConvergido = false; // ya se aplicó UNA vez el ajuste de redondeo cartera↔CxC
         for (let ronda = 0; ronda <= MAX_RONDAS; ronda++) {
             try {
                 const responseSiesa = await axios.post(URL_SIESA_POST, payload, {
@@ -949,50 +950,52 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
 
                 let accionTomada = false;
 
-                // Error no automatizable (maestras, valor inválido, etc.) -> fallo definitivo.
+                // Error no automatizable (maestras, valor inválido, etc.) -> fallo definitivo,
+                // SALVO el descuadre de redondeo "cartera vs CxC", que sí convergemos abajo.
                 if (!faltaCliente && !faltaInventario) {
-                    // Error de cartera vs CxC: si la diferencia es ≤ $10, se reenvía ajustando
-                    // VLR_MEDIO_PAGO al valor CxC que Siesa espera para que coincida.
+                    // CONVERGENCIA cartera = CxC (data-driven, sin adivinar redondeo).
+                    // Siesa reporta en el error sus DOS valores ya calculados:
+                    //   - cartera = su recálculo del IVA por línea (FIJO; no depende de lo que enviemos).
+                    //   - CxC     = nuestro total declarado (sale del IVA que mandamos).
+                    // Lo único que calculamos es una RESTA de esos datos de Siesa: delta = cartera − CxC.
+                    // Sumamos ese delta exacto a la línea de IVA (TASA>0) más grande -> nuestra CxC se
+                    // mueve hasta la cartera de Siesa -> cuadran. También se ajusta la Caja para mantener
+                    // el pago consistente. Se hace UNA sola vez y solo si |delta| ≤ $10 (rango de
+                    // redondeo); un delta mayor es un error real y se deja fallar.
                     const errorCarteraCxC = Array.isArray(errores) && errores.find(e =>
                         e.f_detalle && e.f_detalle.includes('Valor cartera:')
                     );
-                    if (errorCarteraCxC) {
+                    if (errorCarteraCxC && !cxcConvergido) {
                         const match = errorCarteraCxC.f_detalle.match(/Valor cartera:\s*([\d.]+).*?Valor CxC:\s*([\d.]+)/);
                         if (match) {
                             const cartera = parseFloat(match[1]);
                             const cxc = parseFloat(match[2]);
-                            const diff = Math.abs(cartera - cxc);
-                            if (diff > 0 && diff <= 10 && payload.Caja && payload.Caja.length > 0) {
-                                console.log(`🔁 [${tipoDoctoSiesa} ${consecutivo}] Reemplazando Caja por 1 línea EFE con valor CxC de Siesa: $${cxc} (dif $${diff})...`);
-                                payload.Caja = [{
-                                    "ID_CO": payload.Caja[0].ID_CO,
-                                    "ID_TIPO_DOCTO": payload.Caja[0].ID_TIPO_DOCTO,
-                                    "CONSEC_DOCTO": payload.Caja[0].CONSEC_DOCTO,
-                                    "ID_MEDIOS_PAGO": "EFE",
-                                    "VLR_MEDIO_PAGO": formatDecimal(cxc),
-                                    "NRO_CUENTA": "1",
-                                    "NRO_CHEQUE": "1",
-                                    "REFERENCIA": "1",
-                                    "COD_SEGURIDAD": 1,
-                                    "NRO_AUTORIZACION": "1",
-                                    "FECHA_VCTO": meta.fecha_factura ? formatDate(meta.fecha_factura) : formatDate(new Date().toISOString())
-                                }];
-                                const headers = {
-                                    'ConniKey': process.env.CONNI_KEY,
-                                    'ConniToken': process.env.CONNI_TOKEN,
-                                    'Content-Type': 'application/json'
-                                };
-                                try {
-                                    await axios.post(URL_SIESA_POST, payload, { headers });
-                                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: true, mensaje: `Creado con corrección automática de CxC: cartera ajustada de $${cartera} a $${cxc} (dif $${diff}).` });
-                                } catch (retryError) {
-                                    const msgRetry = retryError.response?.data ? JSON.stringify(retryError.response.data) : retryError.message;
-                                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: `Reintento con CxC ajustado falló: ${msgRetry}` });
+                            const delta = Math.round(cartera - cxc); // p.ej. 72449 − 72446 = +3
+                            // Línea de IVA con TASA>0 y mayor VALOR_TOTAL: ahí absorbemos el delta
+                            // (no se toca ICO/TASA=0, ni VALOR_BRUTO, ni descuentos).
+                            const lineaIva = (payload.Impuestos || [])
+                                .filter(i => parseFloat(i.TASA) > 0)
+                                .sort((a, b) => parseFloat(b.VALOR_TOTAL) - parseFloat(a.VALOR_TOTAL))[0];
+                            if (delta !== 0 && Math.abs(delta) <= 10 && lineaIva) {
+                                console.log(`🔁 [${tipoDoctoSiesa} ${consecutivo}] Convergiendo a la cartera de Siesa: cartera $${cartera} vs CxC $${cxc} -> ${delta > 0 ? '+' : ''}${delta} al IVA y reintentando...`);
+                                lineaIva.VALOR_TOTAL = formatDecimal(parseFloat(lineaIva.VALOR_TOTAL) + delta);
+                                // El delta se suma a la línea de Caja MÁS GRANDE (no a Caja[0]): la Caja
+                                // puede traer una 2ª línea EFE chica de ajuste de redondeo, y un delta
+                                // negativo sobre esa línea chica la dejaría en negativo. La línea mayor
+                                // absorbe ±10 sin riesgo. El total de la Caja se mueve por 'delta' igual.
+                                if (payload.Caja && payload.Caja.length > 0) {
+                                    const lineaCaja = [...payload.Caja].sort((a, b) => parseFloat(b.VLR_MEDIO_PAGO) - parseFloat(a.VLR_MEDIO_PAGO))[0];
+                                    lineaCaja.VLR_MEDIO_PAGO = formatDecimal(parseFloat(lineaCaja.VLR_MEDIO_PAGO) + delta);
                                 }
+                                automatizaciones.push(`cuadre_cxc:${delta}`);
+                                cxcConvergido = true;
+                                accionTomada = true; // NO retornamos: el for re-POSTea con el IVA ya alineado
                             }
                         }
                     }
-                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: JSON.stringify(error.response.data) });
+                    if (!accionTomada) {
+                        return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: JSON.stringify(error.response.data) });
+                    }
                 }
 
                 // Sin rondas restantes y Siesa sigue pidiendo automatización -> fallo.
