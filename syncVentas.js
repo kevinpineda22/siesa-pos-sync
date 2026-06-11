@@ -951,8 +951,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
 
                 // Error no automatizable (maestras, valor inválido, etc.) -> fallo definitivo.
                 if (!faltaCliente && !faltaInventario) {
-                    // Error de cartera vs CxC: si la diferencia es ≤ $10, se reenvía SIN Caja
-                    // para crear el documento "en elaboración" (sin recaudo).
+                    // Error de cartera vs CxC: si la diferencia es ≤ $10, se reenvía ajustando
+                    // VLR_MEDIO_PAGO al valor CxC que Siesa espera para que coincida.
                     const errorCarteraCxC = Array.isArray(errores) && errores.find(e =>
                         e.f_detalle && e.f_detalle.includes('Valor cartera:')
                     );
@@ -962,9 +962,9 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                             const cartera = parseFloat(match[1]);
                             const cxc = parseFloat(match[2]);
                             const diff = Math.abs(cartera - cxc);
-                            if (diff > 0 && diff <= 10) {
-                                console.log(`🔁 [${tipoDoctoSiesa} ${consecutivo}] Reintentando SIN CAJA por dif $${diff} (cartera=${cartera} vs CxC=${cxc})...`);
-                                delete payload.Caja;
+                            if (diff > 0 && diff <= 10 && payload.Caja && payload.Caja.length > 0) {
+                                console.log(`🔁 [${tipoDoctoSiesa} ${consecutivo}] Ajustando VLR_MEDIO_PAGO de $${cartera} → $${cxc} (dif $${diff})...`);
+                                payload.Caja.forEach(p => { p.VLR_MEDIO_PAGO = formatDecimal(cxc); });
                                 const headers = {
                                     'ConniKey': process.env.CONNI_KEY,
                                     'ConniToken': process.env.CONNI_TOKEN,
@@ -972,10 +972,10 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                                 };
                                 try {
                                     await axios.post(URL_SIESA_POST, payload, { headers });
-                                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: true, mensaje: `Creado SIN RECAUDO por diferencia cartera vs CxC de $${diff}. Ajuste manual requerido.` });
+                                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: true, mensaje: `Creado con corrección automática de CxC: cartera ajustada de $${cartera} a $${cxc} (dif $${diff}).` });
                                 } catch (retryError) {
                                     const msgRetry = retryError.response?.data ? JSON.stringify(retryError.response.data) : retryError.message;
-                                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: `Reintento sin Caja falló: ${msgRetry}` });
+                                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: `Reintento con CxC ajustado falló: ${msgRetry}` });
                                 }
                             }
                         }
