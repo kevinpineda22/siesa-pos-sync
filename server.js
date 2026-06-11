@@ -204,6 +204,7 @@ app.get('/api/logs/corridas', async (req, res) => {
  *
  * Query params:
  *   - fecha=YYYY-MM-DD  (opcional, por defecto hoy)
+ *   - caja=Z01|Z02     (opcional, filtra por caja)
  *
  * Respuesta:
  * {
@@ -223,6 +224,7 @@ app.get('/api/logs/corridas', async (req, res) => {
 app.get('/api/logs/resumen-diario', async (req, res) => {
     try {
         const fecha = req.query.fecha || new Date().toISOString().split('T')[0];
+        const filtroCaja = req.query.caja ? req.query.caja.toUpperCase().trim() : null;
         const CIA = process.env.CIA || '7375';
         const queryStats = process.env.QUERY_STATS || 'merkahorro_venta_pos_stats_dev';
         const URL_STATS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=${queryStats}`;
@@ -245,8 +247,9 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
             console.error('⚠️ Error consultando Connekta stats:', e.message);
         }
 
-        // Filtrar por fecha exacta
+        // Filtrar por fecha exacta y por caja (si se especificó)
         const delDia = posDocs.filter(d => {
+            if (filtroCaja && (d.ID_TIPO_DOCTO || '').toUpperCase() !== filtroCaja) return false;
             const fd = d.FECHA_DOCTO ? d.FECHA_DOCTO.split('T')[0] : '';
             return fd === fecha;
         });
@@ -276,10 +279,12 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
         });
 
         // 2) sps_facturas: estado de sincronización, deduplicado por co:caja:consec
-        const { data: facturas, error } = await logger.supabase
+        let query = logger.supabase
             .from('sps_facturas')
             .select('estado, co, caja, consec, neto, fecha_factura')
             .eq('fecha_factura', fecha);
+        if (filtroCaja) query = query.eq('caja', filtroCaja);
+        const { data: facturas, error } = await query;
 
         if (error) throw error;
 
