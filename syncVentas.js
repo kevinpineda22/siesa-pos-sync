@@ -779,24 +779,26 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             cajaConsolidada[p.ID_MEDIOS_PAGO].neto += (p.VLR_MEDIO_PAGO_INGRESO || 0) - (p.VLR_MEDIO_PAGO_EGRESO || 0);
         });
 
-                                // PATCH RECALCULO IMPUESTOS: recalculamos cada impuesto sobre la base neta
-        // (VALOR_BRUTO - descuento de la línea) aplicando su TASA. Mantenemos los decimales
-        // sin redondear por línea para que la sumatoria total cuadre al peso con lo que
-        // calcula Siesa internamente. ICO con tasa 0 sale en 0 naturalmente; si tuviera
-        // tasa > 0 también se calcula. Líneas sin impuesto (TASA null) se ignoran.
+        // RECÁLCULO DE IMPUESTOS (Opción A) — alinear el IVA por línea con el redondeo de Siesa.
+        // Para cada línea con TASA > 0, recalculamos VALOR_TOTAL = round(base_neta × tasa) AL PESO,
+        // que es exactamente como Siesa recalcula el impuesto al derivar la "cartera". Si en cambio
+        // enviáramos el IVA del POS (que a veces redondea distinto, ej. 239.4 → 240 en vez de 239),
+        // la CxC (usa nuestro IVA) y la cartera (Siesa recalcula) difieren 1-N pesos y el documento
+        // rebota con "El valor de la cartera debe ser igual al valor de las CxC".
+        //   base_neta = VALOR_BRUTO − descuento de la línea.
+        //   Math.round coincide con el redondeo half-up de Siesa (verificado con datos reales:
+        //   4398.69 → 4399, 1444.95 → 1445, 940.45 → 940, 239.4 → 239).
+        // ICO (TASA = 0) NO se toca: su VALOR_TOTAL viene de VLR_UNI × CANT y se respeta tal cual.
         Impuestos.forEach(i => {
             if (i.CONSEC_DOCTO === consecDoc && i.TIPO_DOCTO === tipoDoctoSiesa) {
                 const m = Movimientos.find(x => x.nro_registro === i.NRO_REGISTRO && x.consec_docto === consecDoc && x.id_tipo_docto === tipoDoctoSiesa);
                 if (m && i.TASA !== null && i.TASA !== undefined && parseFloat(i.TASA) > 0) {
-                    // Solo recalcular si Connekta no trajo el VALOR_TOTAL
-                    if (!i.VALOR_TOTAL || parseFloat(i.VALOR_TOTAL) === 0) {
-                        const dscLinea = Descuentos.find(d => d.consec_docto === consecDoc && d.id_tipo_docto === tipoDoctoSiesa && d.nro_registro === i.NRO_REGISTRO);
-                        const dsctoVal = dscLinea ? parseFloat(dscLinea.vlr_tot || 0) : 0;
-                        const baseNeta = parseFloat(m.VALOR_BRUTO) - dsctoVal;
-                        const tasa = parseFloat(i.TASA);
-                        const valorImpuesto = baseNeta * tasa / 100;
-                        i.VALOR_TOTAL = formatDecimal(valorImpuesto);
-                    }
+                    const dscLinea = Descuentos.find(d => d.consec_docto === consecDoc && d.id_tipo_docto === tipoDoctoSiesa && d.nro_registro === i.NRO_REGISTRO);
+                    const dsctoVal = dscLinea ? parseFloat(dscLinea.vlr_tot || 0) : 0;
+                    const baseNeta = parseFloat(m.VALOR_BRUTO) - dsctoVal;
+                    const tasa = parseFloat(i.TASA);
+                    const valorImpuesto = Math.round(baseNeta * tasa / 100);
+                    i.VALOR_TOTAL = formatDecimal(valorImpuesto);
                 }
             }
         });
