@@ -963,8 +963,20 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                             const cxc = parseFloat(match[2]);
                             const diff = Math.abs(cartera - cxc);
                             if (diff > 0 && diff <= 10 && payload.Caja && payload.Caja.length > 0) {
-                                console.log(`🔁 [${tipoDoctoSiesa} ${consecutivo}] Ajustando VLR_MEDIO_PAGO de $${cartera} → $${cxc} (dif $${diff})...`);
-                                payload.Caja.forEach(p => { p.VLR_MEDIO_PAGO = formatDecimal(cxc); });
+                                console.log(`🔁 [${tipoDoctoSiesa} ${consecutivo}] Reemplazando Caja por 1 línea EFE con valor CxC de Siesa: $${cxc} (dif $${diff})...`);
+                                payload.Caja = [{
+                                    "ID_CO": payload.Caja[0].ID_CO,
+                                    "ID_TIPO_DOCTO": payload.Caja[0].ID_TIPO_DOCTO,
+                                    "CONSEC_DOCTO": payload.Caja[0].CONSEC_DOCTO,
+                                    "ID_MEDIOS_PAGO": "EFE",
+                                    "VLR_MEDIO_PAGO": formatDecimal(cxc),
+                                    "NRO_CUENTA": "1",
+                                    "NRO_CHEQUE": "1",
+                                    "REFERENCIA": "1",
+                                    "COD_SEGURIDAD": 1,
+                                    "NRO_AUTORIZACION": "1",
+                                    "FECHA_VCTO": meta.fecha_factura ? formatDate(meta.fecha_factura) : formatDate(new Date().toISOString())
+                                }];
                                 const headers = {
                                     'ConniKey': process.env.CONNI_KEY,
                                     'ConniToken': process.env.CONNI_TOKEN,
