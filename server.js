@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const axios = require('axios');
 const { syncPOS } = require('./syncPOS');
 const { syncVentas } = require('./syncVentas');
 const logger = require('./logger');
@@ -194,8 +195,12 @@ app.get('/api/logs/corridas', async (req, res) => {
 
 /**
  * GET /api/logs/resumen-diario
- * Resumen agregado por día: totales, desglose por caja y por tipo de NIT
- * (genérico 2222222222 vs clientes reales).
+ * Resumen agregado por día: total de transacciones POS, estado de sincronización,
+ * desglose por caja y por tipo de NIT (genérico 2222222222 vs clientes reales).
+ *
+ * Combina dos fuentes:
+ *   - Connekta (query stats) → total de transacciones POS por caja/tipo NIT
+ *   - sps_facturas (Supabase) → estado de sincronización (OK/FALLO)
  *
  * Query params:
  *   - fecha=YYYY-MM-DD  (opcional, por defecto hoy)
@@ -204,59 +209,106 @@ app.get('/api/logs/corridas', async (req, res) => {
  * {
  *   success: true,
  *   fecha: "2026-06-11",
- *   total: 45,
- *   ok: 40,
- *   fallo: 5,
+ *   total_pos: 148,          // transacciones reales en POS (desde Connekta)
+ *   total_sync: 14,          // transacciones únicas procesadas (desde sps_facturas, deduplicadas)
+ *   ok: 14,
+ *   fallo: 0,
  *   sin_recaudo: 0,
- *   neto_total: 15234500,
- *   por_caja: { "Z01": { total: 22, neto: 7512300 }, ... },
- *   por_nit:  { generico: { total: 12, neto: 4123000, etiqueta: "2222222222" },
- *               real:     { total: 33, neto: 11111500, etiqueta: "Clientes reales" } }
+ *   neto_total: 625112,
+ *   por_caja: { "Z01": { transacciones: 80, neto: 350000 }, ... },
+ *   por_nit:  { generico: { transacciones: 120, neto: 500000, etiqueta: "2222222222" },
+ *               real:     { transacciones: 28,  neto: 125112, etiqueta: "Clientes reales" } }
  * }
  */
 app.get('/api/logs/resumen-diario', async (req, res) => {
     try {
         const fecha = req.query.fecha || new Date().toISOString().split('T')[0];
+        const CIA = process.env.CIA || '7375';
+        const queryStats = process.env.QUERY_STATS || 'merkahorro_venta_pos_stats_dev';
+        const URL_STATS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=${queryStats}`;
+
+        // 1) Connekta: total de transacciones POS del día
+        let posDocs = [];
+        try {
+            const resp = await axios.get(URL_STATS, {
+                headers: {
+                    'ConniKey': process.env.CONNI_KEY,
+                    'ConniToken': process.env.CONNI_TOKEN
+                }
+            });
+            let raw = resp.data;
+            if (raw.detalle && raw.detalle.Datos) raw = raw.detalle.Datos;
+            else if (raw.detalle && raw.detalle.Table) raw = raw.detalle.Table;
+            else if (raw.Table) raw = raw.Table;
+            posDocs = Array.isArray(raw) ? raw : [];
+        } catch (e) {
+            console.error('⚠️ Error consultando Connekta stats:', e.message);
+        }
+
+        // Filtrar por fecha exacta
+        const delDia = posDocs.filter(d => {
+            const fd = d.FECHA_DOCTO ? d.FECHA_DOCTO.split('T')[0] : '';
+            return fd === fecha;
+        });
+
+        const totalPos = delDia.length;
+        const netoPos = delDia.reduce((s, d) => s + parseFloat(d.VrNetoDocto || 0), 0);
+
+        // Agrupar por caja (desde Connekta)
+        const porCaja = {};
+        delDia.forEach(d => {
+            const c = d.ID_TIPO_DOCTO || 'SIN_CAJA';
+            if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
+            porCaja[c].transacciones++;
+            porCaja[c].neto += parseFloat(d.VrNetoDocto || 0);
+        });
+
+        // Agrupar por tipo NIT (desde Connekta)
+        const porNit = {
+            generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
+            real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
+        };
+        delDia.forEach(d => {
+            const esG = (d.NitTercero || '').trim() === '222222222222';
+            const g = esG ? porNit.generico : porNit.real;
+            g.transacciones++;
+            g.neto += parseFloat(d.VrNetoDocto || 0);
+        });
+
+        // 2) sps_facturas: estado de sincronización, deduplicado por co:caja:consec
         const { data: facturas, error } = await logger.supabase
             .from('sps_facturas')
-            .select('estado, caja, cliente_nit, neto, fecha_factura')
+            .select('estado, co, caja, consec, neto, fecha_factura')
             .eq('fecha_factura', fecha);
 
         if (error) throw error;
 
-        const total = facturas.length;
-        const ok = facturas.filter(f => f.estado === 'OK').length;
-        const fallo = facturas.filter(f => f.estado === 'FALLO').length;
-        const sinRecaudo = facturas.filter(f => f.estado === 'SIN_RECAUDO').length;
-        const netoTotal = facturas.reduce((s, f) => s + parseFloat(f.neto || 0), 0);
-
-        const porCaja = {};
+        // Deduplicar: cada transacción aparece como CNZ + CFZ → contar como 1
+        const unicos = new Map();
         facturas.forEach(f => {
-            const c = f.caja || 'SIN_CAJA';
-            if (!porCaja[c]) porCaja[c] = { total: 0, neto: 0 };
-            porCaja[c].total++;
-            porCaja[c].neto += parseFloat(f.neto || 0);
+            const key = `${f.co || ''}:${f.caja || ''}:${f.consec}`;
+            const prioridad = { 'FALLO': 3, 'SIN_RECAUDO': 2, 'OK': 1 };
+            const existe = unicos.get(key);
+            if (!existe || prioridad[f.estado] > prioridad[existe.estado]) {
+                unicos.set(key, f);
+            }
         });
+        const transaccionesSync = [...unicos.values()];
 
-        const porNit = {
-            generico: { total: 0, neto: 0, etiqueta: '2222222222' },
-            real: { total: 0, neto: 0, etiqueta: 'Clientes reales' }
-        };
-        facturas.forEach(f => {
-            const esGenerico = (f.cliente_nit || '').trim() === '2222222222';
-            const grupo = esGenerico ? porNit.generico : porNit.real;
-            grupo.total++;
-            grupo.neto += parseFloat(f.neto || 0);
-        });
+        const totalSync = transaccionesSync.length;
+        const ok = transaccionesSync.filter(f => f.estado === 'OK').length;
+        const fallo = transaccionesSync.filter(f => f.estado === 'FALLO').length;
+        const sinRecaudo = transaccionesSync.filter(f => f.estado === 'SIN_RECAUDO').length;
 
         res.status(200).json({
             success: true,
             fecha,
-            total,
+            total_pos: totalPos,
+            total_sync: totalSync,
             ok,
             fallo,
             sin_recaudo: sinRecaudo,
-            neto_total: netoTotal,
+            neto_total: netoPos,
             por_caja: porCaja,
             por_nit: porNit
         });
