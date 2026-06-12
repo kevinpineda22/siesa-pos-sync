@@ -327,7 +327,7 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
         nroRegistro++;
         const faltante = faltanteMatch ? Math.abs(parseFloat(faltanteMatch[1])) : 10;
         const det = itemsMap[idItem];
-        const unidad = det ? det.UNIDAD_MEDIDA.trim() : "UND";
+        const unidad = normalizarUM(det ? det.UNIDAD_MEDIDA : null);
 
         // Buscar costo REAL siempre desde merkahorro_costo_promedio_dev (NUNCA de merkahorro_consulta_inventario).
         // PRIORIDAD: el costo de la instalación = CO de la factura que estamos procesando va PRIMERO.
@@ -535,6 +535,17 @@ function formatTasa(number) {
     return num.toFixed(4).padStart(8, '0');
 }
 
+// Normaliza la unidad de medida del POS antes de enviarla a Siesa.
+// Las UM de "presentación / paca" tipo P6, P12, P24 (P seguida de número) NO existen como
+// tales en la maestra de Siesa: el ítem se maneja en UND. Se relabelan a "UND".
+// Cualquier otra UM (KG, GR, LB, UND, …) se respeta tal cual. Vacío -> "UND".
+function normalizarUM(um) {
+    const u = (um ?? '').toString().trim();
+    if (!u) return 'UND';
+    if (/^P\d/i.test(u)) return 'UND'; // P6, P12, P24... -> UND
+    return u;
+}
+
 // Convierte un string "001,002" en array ["001","002"].
 // Prioridad: 1) valor explícito, 2) variable de entorno, 3) array vacío (sin filtro).
 function parseFilterParam(val, envKey) {
@@ -729,7 +740,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 "id_motivo": "03",
                 "ind_naturaleza": esSimulacionCNZ ? 1 : 2,
                 "id_co_movto": enc.CoDoc,
-                "UNIDAD_MEDIDA": det.UNIDAD_MEDIDA ? det.UNIDAD_MEDIDA.trim() : "UND",
+                "UNIDAD_MEDIDA": normalizarUM(det.UNIDAD_MEDIDA),
                 "CANTIDAD": formatDecimal(cant, true),
                 "VALOR_BRUTO": formatDecimal(vrBruto),
                 "id_item": det.id_item,
