@@ -223,69 +223,94 @@ app.get('/api/logs/corridas', async (req, res) => {
  */
 app.get('/api/logs/resumen-diario', async (req, res) => {
     try {
-        const fecha = req.query.fecha || new Date().toISOString().split('T')[0];
+        const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+        const fecha = req.query.fecha || hoy;
         const filtroCaja = req.query.caja ? req.query.caja.toUpperCase().trim() : null;
         const CIA = process.env.CIA || '7375';
         const queryStats = process.env.QUERY_STATS || 'merkahorro_venta_pos_stats_dev';
         const URL_STATS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=${queryStats}`;
+        const esHoy = fecha === hoy;
 
-        // 1) Connekta: total de transacciones POS del día
-        let posDocs = [];
-        try {
-            const resp = await axios.get(URL_STATS, {
-                headers: {
-                    'ConniKey': process.env.CONNI_KEY,
-                    'ConniToken': process.env.CONNI_TOKEN
+        // 1) Datos POS (total_pos, por_caja, por_nit, neto_total)
+        let posData = null;
+
+        if (esHoy) {
+            // Tiempo real desde Connekta — y auto-upsert a sps_estadisticas_diarias
+            try {
+                const resp = await axios.get(URL_STATS, {
+                    headers: {
+                        'ConniKey': process.env.CONNI_KEY,
+                        'ConniToken': process.env.CONNI_TOKEN
+                    }
+                });
+                let raw = resp.data;
+                if (raw.detalle && raw.detalle.Datos) raw = raw.detalle.Datos;
+                else if (raw.detalle && raw.detalle.Table) raw = raw.detalle.Table;
+                else if (raw.Table) raw = raw.Table;
+                const posDocs = Array.isArray(raw) ? raw : [];
+
+                const delDia = posDocs.filter(d => {
+                    if (filtroCaja && (d.ID_TIPO_DOCTO || '').toUpperCase() !== filtroCaja) return false;
+                    return (d.FECHA_DOCTO || '').split('T')[0] === fecha;
+                });
+
+                const totalPos = delDia.length;
+                const netoTotal = delDia.reduce((s, d) => s + parseFloat(d.VrNetoDocto || 0), 0);
+                const porCaja = {};
+                const porNit = {
+                    generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
+                    real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
+                };
+                delDia.forEach(d => {
+                    const c = d.ID_TIPO_DOCTO || 'SIN_CAJA';
+                    if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
+                    porCaja[c].transacciones++;
+                    porCaja[c].neto += parseFloat(d.VrNetoDocto || 0);
+                    const esG = (d.NitTercero || '').trim() === '222222222222';
+                    (esG ? porNit.generico : porNit.real).transacciones++;
+                    (esG ? porNit.generico : porNit.real).neto += parseFloat(d.VrNetoDocto || 0);
+                });
+
+                posData = { total_pos: totalPos, neto_total: netoTotal, por_caja: porCaja, por_nit: porNit };
+
+                // Snapshot en Supabase (lecturas futuras)
+                await logger.supabase.from('sps_estadisticas_diarias').upsert({
+                    fecha,
+                    total_pos: totalPos,
+                    neto_total: netoTotal,
+                    por_caja: porCaja,
+                    por_nit: porNit,
+                    actualizado_en: new Date().toISOString()
+                }, { onConflict: 'fecha' });
+            } catch (e) {
+                console.error('⚠️ Error consultando Connekta stats:', e.message);
+            }
+        } else {
+            // Histórico desde sps_estadisticas_diarias
+            try {
+                const { data: historico } = await logger.supabase
+                    .from('sps_estadisticas_diarias')
+                    .select('*')
+                    .eq('fecha', fecha)
+                    .single();
+                if (historico) {
+                    posData = {
+                        total_pos: historico.total_pos,
+                        neto_total: historico.neto_total,
+                        por_caja: historico.por_caja || {},
+                        por_nit: historico.por_nit || {}
+                    };
                 }
-            });
-            let raw = resp.data;
-            if (raw.detalle && raw.detalle.Datos) raw = raw.detalle.Datos;
-            else if (raw.detalle && raw.detalle.Table) raw = raw.detalle.Table;
-            else if (raw.Table) raw = raw.Table;
-            posDocs = Array.isArray(raw) ? raw : [];
-        } catch (e) {
-            console.error('⚠️ Error consultando Connekta stats:', e.message);
+            } catch (_) { /* no encontrado → fallback */ }
         }
 
-        // Filtrar por fecha exacta y por caja (si se especificó)
-        const delDia = posDocs.filter(d => {
-            if (filtroCaja && (d.ID_TIPO_DOCTO || '').toUpperCase() !== filtroCaja) return false;
-            const fd = d.FECHA_DOCTO ? d.FECHA_DOCTO.split('T')[0] : '';
-            return fd === fecha;
-        });
-
-        const totalPos = delDia.length;
-        const netoPos = delDia.reduce((s, d) => s + parseFloat(d.VrNetoDocto || 0), 0);
-
-        // Agrupar por caja (desde Connekta)
-        const porCaja = {};
-        delDia.forEach(d => {
-            const c = d.ID_TIPO_DOCTO || 'SIN_CAJA';
-            if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
-            porCaja[c].transacciones++;
-            porCaja[c].neto += parseFloat(d.VrNetoDocto || 0);
-        });
-
-        // Agrupar por tipo NIT (desde Connekta)
-        const porNit = {
-            generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
-            real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
-        };
-        delDia.forEach(d => {
-            const esG = (d.NitTercero || '').trim() === '222222222222';
-            const g = esG ? porNit.generico : porNit.real;
-            g.transacciones++;
-            g.neto += parseFloat(d.VrNetoDocto || 0);
-        });
-
-        // 2) sps_facturas: estado de sincronización, deduplicado por co:caja:consec
+        // 2) sps_facturas: estado de sincronización + fallback POS
         let query = logger.supabase
             .from('sps_facturas')
-            .select('estado, co, caja, consec, neto, fecha_factura')
+            .select('estado, co, caja, consec, neto, fecha_factura, cliente_nit')
             .eq('fecha_factura', fecha);
         if (filtroCaja) query = query.eq('caja', filtroCaja);
         const { data: facturas, error } = await query;
-
         if (error) throw error;
 
         // Deduplicar: cada transacción aparece como CNZ + CFZ → contar como 1
@@ -300,22 +325,38 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
         });
         const transaccionesSync = [...unicos.values()];
 
-        const totalSync = transaccionesSync.length;
-        const ok = transaccionesSync.filter(f => f.estado === 'OK').length;
-        const fallo = transaccionesSync.filter(f => f.estado === 'FALLO').length;
-        const sinRecaudo = transaccionesSync.filter(f => f.estado === 'SIN_RECAUDO').length;
+        // 3) Fallback: si no hay datos POS, calcular desde sps_facturas
+        if (!posData) {
+            const totalPos = transaccionesSync.length;
+            const netoTotal = transaccionesSync.reduce((s, f) => s + (parseFloat(f.neto) || 0), 0);
+            const porCaja = {};
+            const porNit = {
+                generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
+                real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
+            };
+            transaccionesSync.forEach(f => {
+                const c = f.caja || 'SIN_CAJA';
+                if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
+                porCaja[c].transacciones++;
+                porCaja[c].neto += parseFloat(f.neto) || 0;
+                const esG = (f.cliente_nit || '').trim() === '222222222222';
+                (esG ? porNit.generico : porNit.real).transacciones++;
+                (esG ? porNit.generico : porNit.real).neto += parseFloat(f.neto) || 0;
+            });
+            posData = { total_pos: totalPos, neto_total: netoTotal, por_caja: porCaja, por_nit: porNit };
+        }
 
         res.status(200).json({
             success: true,
             fecha,
-            total_pos: totalPos,
-            total_sync: totalSync,
-            ok,
-            fallo,
-            sin_recaudo: sinRecaudo,
-            neto_total: netoPos,
-            por_caja: porCaja,
-            por_nit: porNit
+            total_pos: posData.total_pos,
+            total_sync: transaccionesSync.length,
+            ok: transaccionesSync.filter(f => f.estado === 'OK').length,
+            fallo: transaccionesSync.filter(f => f.estado === 'FALLO').length,
+            sin_recaudo: transaccionesSync.filter(f => f.estado === 'SIN_RECAUDO').length,
+            neto_total: posData.neto_total,
+            por_caja: posData.por_caja,
+            por_nit: posData.por_nit
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });

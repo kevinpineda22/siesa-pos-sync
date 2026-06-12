@@ -18,6 +18,8 @@ const URL_COSTO_PROMEDIO_BASE = `https://servicios.siesacloud.com/api/connekta/v
 const INVENTARIO_TAM_PAGINA = parseInt(process.env.INVENTARIO_TAM_PAGINA || '1000');
 const INVENTARIO_MAX_PAGINAS = parseInt(process.env.INVENTARIO_MAX_PAGINAS || '100');
 
+const URL_VENTAS_STATS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=${process.env.QUERY_STATS || 'merkahorro_venta_pos_stats_dev'}`;
+
 // URL de Siesa PROD (POST) - Documento 242756 (FACTURA_DEV)
 const URL_SIESA_POST = `https://servicios.siesacloud.com/api/siesa/v3.1/conectoresimportar?idCompania=${CIA}&idSistema=1&idDocumento=242756&nombreDocumento=FACTURA_DEV`;
 // QA: serviciosqa.siesacloud.com
@@ -1152,6 +1154,40 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     return resultados;
 }
 
+async function guardarEstadisticasDiarias(totalSync) {
+    const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const datos = await fetchFromConnekta(URL_VENTAS_STATS);
+    const delDia = (Array.isArray(datos) ? datos : []).filter(d =>
+        (d.FECHA_DOCTO || '').split('T')[0] === hoy
+    );
+
+    const generico = { transacciones: 0, neto: 0, etiqueta: '2222222222' };
+    const real = { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' };
+    const porCaja = {};
+    delDia.forEach(d => {
+        const esG = (d.NitTercero || '').trim() === '222222222222';
+        const g = esG ? generico : real;
+        g.transacciones++;
+        g.neto += parseFloat(d.VrNetoDocto || 0);
+        const c = d.ID_TIPO_DOCTO || 'SIN_CAJA';
+        if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
+        porCaja[c].transacciones++;
+        porCaja[c].neto += parseFloat(d.VrNetoDocto || 0);
+    });
+
+    await logger.supabase.from('sps_estadisticas_diarias').upsert({
+        fecha: hoy,
+        total_pos: delDia.length,
+        total_sync: totalSync,
+        neto_total: delDia.reduce((s, d) => s + parseFloat(d.VrNetoDocto || 0), 0),
+        por_caja: porCaja,
+        por_nit: { generico, real },
+        actualizado_en: new Date().toISOString()
+    }, { onConflict: 'fecha' });
+
+    console.log(`📊 Estadísticas diarias guardadas: ${delDia.length} POS, ${totalSync} sync, ${generico.transacciones} genéricas`);
+}
+
 module.exports = { syncVentas: async (opciones = {}) => {
     // Resetear caché de inventario y costos al inicio de cada corrida
     _inventarioPromise = null;
@@ -1246,6 +1282,14 @@ module.exports = { syncVentas: async (opciones = {}) => {
         console.log(`   - Maestras Siesa faltantes sincronizadas\n`);
     } catch (e) {
         console.warn(`⚠️ Error guardando logs: ${e.message}`);
+    }
+
+    // Guardar estadísticas diarias (total POS, genéricas, por caja) en Supabase.
+    // Esto permite consultar días anteriores aunque Connekta purgue datos históricos.
+    try {
+        await guardarEstadisticasDiarias(todos.length);
+    } catch (e) {
+        console.warn(`⚠️ Error guardando estadísticas diarias: ${e.message}`);
     }
 
     return { total: todos.length, ok: okCount, fail: failCount, detalle: todos };
