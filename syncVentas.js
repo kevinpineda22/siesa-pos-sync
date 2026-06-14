@@ -626,10 +626,25 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         if (facturas[key]) facturas[key].pagos.push(p);
     });
 
-    // Mapear impuestos por RowidMvto para búsqueda rápida
+    // Mapear impuestos por RowidMvto para búsqueda rápida.
+    // DEDUP por (RowidMvto + ID_LLAVE_IMPUESTO): la PK de t472_cm_movto_invent_imp en Siesa es
+    // (movimiento, impuesto), así que un mismo impuesto NO puede ir dos veces en la misma línea.
+    // Si la query de Connekta trae el impuesto duplicado (p.ej. IV03 dos veces para un movimiento),
+    // Siesa rebota con "Violation of PRIMARY KEY constraint 'PK_t472' ... duplicate key (..., IV03)".
+    // Nos quedamos con la PRIMERA aparición (el VALOR_TOTAL se recalcula luego en la Opción A,
+    // así que el valor del duplicado no importa).
     const impuestosPorRowid = {};
+    const impVistos = new Set();
     impuestosRawFiltrados.forEach(imp => {
         if (imp.ID_LLAVE_IMPUESTO && imp.ID_LLAVE_IMPUESTO !== 'null' && imp.VALOR_TOTAL > 0) {
+            const llave = `${imp.RowidMvto}|${String(imp.ID_LLAVE_IMPUESTO).trim()}`;
+            if (impVistos.has(llave)) {
+                // Connekta trajo el mismo impuesto repetido para este movimiento. Se omite (evita la
+                // PK duplicada en t472). El warning permite detectar el dato redundante en el origen.
+                console.warn(`⚠️ [impuesto duplicado] mov ${imp.RowidMvto} · impuesto ${String(imp.ID_LLAVE_IMPUESTO).trim()}${imp.CONSEC_DOCTO ? ` · consec ${imp.CONSEC_DOCTO}` : ''} — repetido por Connekta, se omite.`);
+                return;
+            }
+            impVistos.add(llave);
             if (!impuestosPorRowid[imp.RowidMvto]) impuestosPorRowid[imp.RowidMvto] = [];
             impuestosPorRowid[imp.RowidMvto].push(imp);
         }

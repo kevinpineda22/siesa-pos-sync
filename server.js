@@ -325,25 +325,29 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
         });
         const transaccionesSync = [...unicos.values()];
 
+        // neto_sync y por_nit_sync: desglose de LO QUE PROCESÓ EL FLUJO (desde sps_facturas)
+        const netoSync = transaccionesSync.reduce((s, f) => s + (parseFloat(f.neto) || 0), 0);
+        const porNitSync = {
+            generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
+            real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
+        };
+        transaccionesSync.forEach(f => {
+            const esG = (f.cliente_nit || '').trim() === '222222222222';
+            (esG ? porNitSync.generico : porNitSync.real).transacciones++;
+            (esG ? porNitSync.generico : porNitSync.real).neto += parseFloat(f.neto) || 0;
+        });
+
         // 3) Fallback: si no hay datos POS, calcular desde sps_facturas
         if (!posData) {
             const totalPos = transaccionesSync.length;
-            const netoTotal = transaccionesSync.reduce((s, f) => s + (parseFloat(f.neto) || 0), 0);
             const porCaja = {};
-            const porNit = {
-                generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
-                real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
-            };
             transaccionesSync.forEach(f => {
                 const c = f.caja || 'SIN_CAJA';
                 if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
                 porCaja[c].transacciones++;
                 porCaja[c].neto += parseFloat(f.neto) || 0;
-                const esG = (f.cliente_nit || '').trim() === '222222222222';
-                (esG ? porNit.generico : porNit.real).transacciones++;
-                (esG ? porNit.generico : porNit.real).neto += parseFloat(f.neto) || 0;
             });
-            posData = { total_pos: totalPos, neto_total: netoTotal, por_caja: porCaja, por_nit: porNit };
+            posData = { total_pos: totalPos, neto_total: netoSync, por_caja: porCaja, por_nit: porNitSync };
         }
 
         res.status(200).json({
@@ -355,8 +359,10 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
             fallo: transaccionesSync.filter(f => f.estado === 'FALLO').length,
             sin_recaudo: transaccionesSync.filter(f => f.estado === 'SIN_RECAUDO').length,
             neto_total: posData.neto_total,
+            neto_sync: netoSync,
             por_caja: posData.por_caja,
-            por_nit: posData.por_nit
+            por_nit: posData.por_nit,
+            por_nit_sync: porNitSync
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
