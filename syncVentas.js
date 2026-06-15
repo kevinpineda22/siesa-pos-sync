@@ -613,8 +613,28 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     const facturas = {};
     detalles.forEach(det => {
         const key = buildKey(det.CoDoc, det.ID_TIPO_DOCTO, det.CONSEC_DOCTO);
-        if (!facturas[key]) facturas[key] = { items: [], pagos: [] };
-        facturas[key].items.push(det);
+        if (!facturas[key]) facturas[key] = { items: [], pagos: [], _porRowid: {} };
+
+        // DEDUP de líneas por RowidMvto (GUID único del movimiento). Connekta puede traer la MISMA
+        // línea repetida por el fan-out del JOIN de descuentos (t9831): un movimiento con varios
+        // registros de descuento sale como varias filas (mismo RowidMvto, distinto vlr_tot_dscto).
+        // Si la duplicáramos contaríamos el BRUTO y el IVA dos veces -> se infla la cartera y Siesa
+        // rebota con "cartera != CxC". Fusionamos en UNA sola línea por movimiento SUMANDO los
+        // descuentos de las filas repetidas (para no perder ninguno). El IVA se recalcula luego en
+        // la Opción A sobre (BRUTO - descuento_total), así que queda correcto.
+        const rowid = det.RowidMvto;
+        const previo = (rowid != null && rowid !== '') ? facturas[key]._porRowid[rowid] : null;
+        if (previo) {
+            const dPrev = parseFloat(previo.vlr_tot_dscto) || 0;
+            const dDup = parseFloat(det.vlr_tot_dscto) || 0;
+            previo.vlr_tot_dscto = dPrev + dDup;
+            previo.vlr_uni_dscto = null; // se recalcula (total / cantidad) al armar el descuento
+            console.warn(`⚠️ [línea duplicada] consec ${det.CONSEC_DOCTO} · item ${det.id_item} · Rowid ${rowid} — fan-out de descuento, se fusiona (dscto ${dPrev}+${dDup}=${previo.vlr_tot_dscto}).`);
+        } else {
+            const copia = { ...det }; // copia: acumulamos descuentos sin mutar el dato crudo
+            facturas[key].items.push(copia);
+            if (rowid != null && rowid !== '') facturas[key]._porRowid[rowid] = copia;
+        }
     });
 
     const facturasKeysValidas = new Set(detalles.map(d => buildKey(d.CoDoc, d.ID_TIPO_DOCTO, d.CONSEC_DOCTO)));
