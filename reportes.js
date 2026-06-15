@@ -155,7 +155,7 @@ async function generarPDF(datos) {
     const kpiH = 62;
 
     const kpis = [
-        { label: 'PROCESADOS', value: String(datos.total || 0), sub: 'Documentos del período', color: COLORS.azul, bg: COLORS.azulSoft },
+        { label: 'DOCUMENTOS', value: String(datos.total || 0), sub: 'CFZ + CNZ del período', color: COLORS.azul, bg: COLORS.azulSoft },
         { label: 'REGISTRADOS', value: String(datos.ok || 0),   sub: 'Correctos en Siesa', color: COLORS.verde, bg: COLORS.verdeSoft },
         { label: 'PENDIENTES', value: String(datos.fail || 0),  sub: 'Requieren acción', color: COLORS.rojo, bg: COLORS.rojoSoft },
         { label: '% REGISTRADO', value: calcularPct(datos.ok, datos.total) + '%', sub: `$${formatearCOP(datos.totalNeto)} neto`, color: COLORS.gris, bg: COLORS.grisSoft },
@@ -200,15 +200,8 @@ async function generarPDF(datos) {
         .stroke();
 
     const facturasArr = datos.facturas || [];
-
-    const uniqueConsecs = new Set(facturasArr.map(f => f.consec)).size;
-
-    const genericas = facturasArr.filter(f => {
-        const nit = String(f.cliente_nit || '').trim();
-        return nit === '2222222222' || nit === '222222222222';
-    });
-    const totalGenericasTransacciones = genericas.length;
-    const totalGenericasNeto = genericas.reduce((s, f) => s + (parseFloat(f.neto) || 0), 0);
+    const totalGenericas = datos.totalGenericasStats || { transacciones: 0, neto: 0 };
+    const uniqueConsecs = datos.uniqueConsecs || new Set(facturasArr.map(f => f.consec)).size;
 
     const porCaja = {};
     facturasArr.forEach(f => {
@@ -227,7 +220,7 @@ async function generarPDF(datos) {
         { label: 'Documentos totales (CFZ + CNZ)',      value: String(datos.total || 0) },
         { label: 'CFZ registradas',                     value: String(contarPorTipoYEstado(facturasArr, 'CFZ', 'OK')) },
         { label: 'CNZ registradas',                     value: String(contarPorTipoYEstado(facturasArr, 'CNZ', 'OK')) },
-        { label: 'Clientes genéricos (NIT 2222)',       value: `${totalGenericasTransacciones} — $${formatearCOP(totalGenericasNeto)}` },
+        { label: 'Clientes genéricos (NIT 2222)',       value: `${totalGenericas.transacciones} — $${formatearCOP(totalGenericas.neto)}` },
     ];
 
     let itemY = resY + 26;
@@ -370,11 +363,11 @@ async function generarPDF(datos) {
     };
     dibujarTipoHeader();
 
-    const totalRealesTransacciones = facturasArr.length - totalGenericasTransacciones;
-    const totalRealesNeto = datos.totalNeto - totalGenericasNeto;
+    const totalRealesTransacciones = facturasArr.length - totalGenericas.transacciones;
+    const totalRealesNeto = datos.totalNeto - totalGenericas.neto;
 
     const tipoFilas = [
-        { label: 'Genéricos (NIT 2222)', trans: totalGenericasTransacciones, neto: totalGenericasNeto },
+        { label: 'Genéricos (NIT 2222)', trans: totalGenericas.transacciones, neto: totalGenericas.neto },
         { label: 'Reales',                trans: totalRealesTransacciones,    neto: totalRealesNeto },
     ];
 
@@ -408,124 +401,47 @@ async function generarPDF(datos) {
     const finTipoY = tipoRowY + 10;
 
     // =====================================================================
-    // TABLA DE FACTURAS (si hay)
+    // PENDIENTES — ACCIÓN REQUERIDA (en lenguaje de negocio)
     // =====================================================================
-    const tablaY = finTipoY;
+    const pendientes = facturasArr.filter(f => f.estado === 'FALLO');
+    if (pendientes.length > 0) {
+        let secY = finTipoY;
+        if (secY > 680) { doc.addPage(); secY = MARGEN + 20; }
 
-    if (datos.facturas && datos.facturas.length > 0) {
-        doc.fontSize(12)
-            .font('Helvetica-Bold')
-            .fillColor(COLORS.azul)
-            .text('Detalle de Documentos', MARGEN, tablaY);
+        doc.fontSize(12).font('Helvetica-Bold').fillColor(COLORS.rojo)
+            .text('Pendientes — Acción requerida', MARGEN, secY);
+        doc.moveTo(MARGEN, secY + 18).lineTo(ANCHO_PAGINA - MARGEN, secY + 18)
+            .strokeColor(COLORS.borde).stroke();
+        doc.fontSize(8).font('Helvetica').fillColor(COLORS.textoSec)
+            .text('Documentos que aún no se registran en Siesa, agrupados por motivo:', MARGEN, secY + 24);
 
-        doc.moveTo(MARGEN, tablaY + 18)
-            .lineTo(ANCHO_PAGINA - MARGEN, tablaY + 18)
-            .strokeColor(COLORS.borde)
-            .stroke();
-
-        // Determinar cuántas filas mostrar (top 60 para no saturar el PDF)
-        const maxFilas = 60;
-        const facturasMostrar = datos.facturas.slice(0, maxFilas);
-        const encabezados = ['Consec', 'Tipo', 'Fecha', 'Cliente NIT', 'CO·Caja', 'Valor', 'Estado'];
-        const colWidths = [48, 34, 52, 66, 56, 66, 56];
-        const aligns = ['left', 'center', 'left', 'left', 'center', 'right', 'center'];
-        const totalW = colWidths.reduce((a, b) => a + b, 0);
-        const startX = MARGEN + (ANCHO_UTIL - totalW) / 2;
-
-        let rowY = tablaY + 26;
-
-        const dibujarHeaderTabla = () => {
-            doc.roundedRect(startX - 4, rowY - 4, totalW + 8, 22, 4).fill(COLORS.azul);
-            let hX = startX;
-            encabezados.forEach((h, i) => {
-                doc.fontSize(7).font('Helvetica-Bold').fillColor(COLORS.blanco)
-                    .text(h, hX + 4, rowY, { width: colWidths[i] - 4, align: aligns[i] });
-                hX += colWidths[i];
-            });
-            rowY += 22;
-        };
-        dibujarHeaderTabla();
-
-        facturasMostrar.forEach((f, idx) => {
-            if (rowY > 720) { doc.addPage(); rowY = MARGEN + 20; dibujarHeaderTabla(); }
-
-            const bg = idx % 2 === 0 ? COLORS.blanco : COLORS.grisSoft;
-            doc.rect(startX - 4, rowY - 2, totalW + 8, 18).fill(bg);
-
-            const isFallo = f.estado === 'FALLO';
-            let hX = startX;
-            const valores = [
-                String(f.consec || ''),
-                f.tipo || '',
-                f.fecha_factura ? f.fecha_factura.slice(0, 10) : '',
-                String(f.cliente_nit || '').slice(0, 12),
-                `${f.co || '—'}·${f.caja || '—'}`,
-                f.neto ? `$${Math.round(f.neto).toLocaleString('es-CO')}` : '',
-                isFallo ? 'Pendiente' : 'Registrada',
-            ];
-
-            valores.forEach((v, i) => {
-                doc.fontSize(7)
-                    .font(i === 6 && isFallo ? 'Helvetica-Bold' : 'Helvetica')
-                    .fillColor(i === 6 ? (isFallo ? COLORS.rojo : COLORS.verde) : COLORS.texto)
-                    .text(v, hX + 4, rowY, { width: colWidths[i] - 4, align: aligns[i] });
-                hX += colWidths[i];
-            });
-            rowY += 18;
+        const grupos = {};
+        pendientes.forEach(f => {
+            const motivo = MOTIVO_PENDIENTE[f.categoria_error] || MOTIVO_PENDIENTE.OTRO;
+            (grupos[motivo] = grupos[motivo] || []).push(f);
         });
 
-        if (datos.facturas.length > maxFilas) {
-            doc.fontSize(8)
-                .font('Helvetica')
-                .fillColor(COLORS.gris)
-                .text(`... y ${datos.facturas.length - maxFilas} documentos más`, MARGEN, rowY + 4);
-            rowY += 16;
-        }
-
-        // =====================================================================
-        // PENDIENTES — ACCIÓN REQUERIDA (en lenguaje de negocio)
-        // =====================================================================
-        const pendientes = facturasArr.filter(f => f.estado === 'FALLO');
-        if (pendientes.length > 0) {
-            let secY = rowY + 24;
-            if (secY > 680) { doc.addPage(); secY = MARGEN + 20; }
-
-            doc.fontSize(12).font('Helvetica-Bold').fillColor(COLORS.rojo)
-                .text('Pendientes — Acción requerida', MARGEN, secY);
-            doc.moveTo(MARGEN, secY + 18).lineTo(ANCHO_PAGINA - MARGEN, secY + 18)
-                .strokeColor(COLORS.borde).stroke();
-            doc.fontSize(8).font('Helvetica').fillColor(COLORS.textoSec)
-                .text('Documentos que aún no se registran en Siesa, agrupados por motivo:', MARGEN, secY + 24);
-
-            // Agrupar los pendientes por motivo (traducido a lenguaje de negocio)
-            const grupos = {};
-            pendientes.forEach(f => {
-                const motivo = MOTIVO_PENDIENTE[f.categoria_error] || MOTIVO_PENDIENTE.OTRO;
-                (grupos[motivo] = grupos[motivo] || []).push(f);
+        let pY = secY + 42;
+        Object.entries(grupos).forEach(([motivo, fs]) => {
+            if (pY > 750) { doc.addPage(); pY = MARGEN + 20; }
+            doc.circle(MARGEN + 7, pY + 5, 3).fill(COLORS.rojo);
+            doc.fontSize(9.5).font('Helvetica-Bold').fillColor(COLORS.texto)
+                .text(`${motivo}  (${fs.length})`, MARGEN + 18, pY, { width: ANCHO_UTIL - 24 });
+            pY += 16;
+            fs.slice(0, 10).forEach(f => {
+                if (pY > 770) { doc.addPage(); pY = MARGEN + 20; }
+                const linea = `Consec ${f.consec}   ·   NIT ${f.cliente_nit || '—'}   ·   ${f.co || '—'}/${f.caja || '—'}   ·   $${formatearCOP(f.neto)}`;
+                doc.fontSize(8).font('Helvetica').fillColor(COLORS.textoSec)
+                    .text(linea, MARGEN + 22, pY, { width: ANCHO_UTIL - 30 });
+                pY += 12;
             });
-
-            let pY = secY + 42;
-            Object.entries(grupos).forEach(([motivo, fs]) => {
-                if (pY > 750) { doc.addPage(); pY = MARGEN + 20; }
-                doc.circle(MARGEN + 7, pY + 5, 3).fill(COLORS.rojo);
-                doc.fontSize(9.5).font('Helvetica-Bold').fillColor(COLORS.texto)
-                    .text(`${motivo}  (${fs.length})`, MARGEN + 18, pY, { width: ANCHO_UTIL - 24 });
-                pY += 16;
-                fs.slice(0, 10).forEach(f => {
-                    if (pY > 770) { doc.addPage(); pY = MARGEN + 20; }
-                    const linea = `Consec ${f.consec}   ·   NIT ${f.cliente_nit || '—'}   ·   ${f.co || '—'}/${f.caja || '—'}   ·   $${formatearCOP(f.neto)}`;
-                    doc.fontSize(8).font('Helvetica').fillColor(COLORS.textoSec)
-                        .text(linea, MARGEN + 22, pY, { width: ANCHO_UTIL - 30 });
-                    pY += 12;
-                });
-                if (fs.length > 10) {
-                    doc.fontSize(8).font('Helvetica-Oblique').fillColor(COLORS.gris)
-                        .text(`… y ${fs.length - 10} documento(s) más con este motivo`, MARGEN + 22, pY);
-                    pY += 12;
-                }
-                pY += 10;
-            });
-        }
+            if (fs.length > 10) {
+                doc.fontSize(8).font('Helvetica-Oblique').fillColor(COLORS.gris)
+                    .text(`… y ${fs.length - 10} documento(s) más con este motivo`, MARGEN + 22, pY);
+                pY += 12;
+            }
+            pY += 10;
+        });
     }
 
     // =====================================================================
@@ -711,6 +627,19 @@ async function generarYEnviar(opciones = {}) {
     const fail = total - ok;
     const totalNeto = facturas.reduce((sum, f) => sum + (parseFloat(f.neto) || 0), 0);
     const automatizaciones = facturas.filter(f => f.automatizaciones_aplicadas && f.automatizaciones_aplicadas.length > 0).length;
+    const uniqueConsecs = new Set(facturas.map(f => f.consec)).size;
+
+    // Consultar sps_estadisticas_diarias para datos de genéricos (NIT 2222)
+    const { data: statsArr } = await logger.supabase
+        .from('sps_estadisticas_diarias')
+        .select('por_nit')
+        .gte('fecha', fechaInicio)
+        .lte('fecha', fechaFin);
+
+    const totalGenericasStats = (statsArr || []).reduce((sum, s) => ({
+        transacciones: sum.transacciones + (s.por_nit?.generico?.transacciones || 0),
+        neto: sum.neto + (s.por_nit?.generico?.neto || 0),
+    }), { transacciones: 0, neto: 0 });
 
     // Consultar errores de maestras
     const { data: maestras } = await logger.supabase
@@ -728,6 +657,8 @@ async function generarYEnviar(opciones = {}) {
         ok,
         fail,
         totalNeto,
+        uniqueConsecs,
+        totalGenericasStats,
         automatizaciones,
         facturas,
         erroresMaestras,
