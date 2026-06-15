@@ -200,18 +200,34 @@ async function generarPDF(datos) {
         .stroke();
 
     const facturasArr = datos.facturas || [];
-    const valorRegistrado = facturasArr.filter(f => f.estado === 'OK').reduce((s, f) => s + (parseFloat(f.neto) || 0), 0);
-    const valorPendiente = facturasArr.filter(f => f.estado !== 'OK').reduce((s, f) => s + (parseFloat(f.neto) || 0), 0);
+
+    const uniqueConsecs = new Set(facturasArr.map(f => f.consec)).size;
+
+    const genericas = facturasArr.filter(f => {
+        const nit = String(f.cliente_nit || '').trim();
+        return nit === '2222222222' || nit === '222222222222';
+    });
+    const totalGenericasTransacciones = genericas.length;
+    const totalGenericasNeto = genericas.reduce((s, f) => s + (parseFloat(f.neto) || 0), 0);
+
+    const porCaja = {};
+    facturasArr.forEach(f => {
+        const caja = f.caja || 'SIN CAJA';
+        if (!porCaja[caja]) porCaja[caja] = { transacciones: 0, neto: 0, ok: 0 };
+        porCaja[caja].transacciones++;
+        porCaja[caja].neto += parseFloat(f.neto) || 0;
+        if (f.estado === 'OK') porCaja[caja].ok++;
+    });
 
     const resItems = [
-        { label: 'Facturas de venta registradas (CFZ)', value: String(contarPorTipoYEstado(facturasArr, 'CFZ', 'OK')) },
-        { label: 'Notas crédito registradas (CNZ)',     value: String(contarPorTipoYEstado(facturasArr, 'CNZ', 'OK')) },
+        { label: 'Consecutivos únicos procesados',     value: String(uniqueConsecs) },
         { label: 'Documentos pendientes',               value: String(datos.fail || 0) },
         { label: '% registrado en Siesa',               value: calcularPct(datos.ok, datos.total) + '%' },
-        { label: 'Valor registrado en Siesa',           value: `$${formatearCOP(valorRegistrado)}` },
-        { label: 'Valor pendiente por registrar',       value: `$${formatearCOP(valorPendiente)}` },
         { label: 'Valor neto total del período',        value: `$${formatearCOP(datos.totalNeto)}` },
-        { label: 'Total de documentos',                 value: String(datos.total || 0) },
+        { label: 'Documentos totales (CFZ + CNZ)',      value: String(datos.total || 0) },
+        { label: 'CFZ registradas',                     value: String(contarPorTipoYEstado(facturasArr, 'CFZ', 'OK')) },
+        { label: 'CNZ registradas',                     value: String(contarPorTipoYEstado(facturasArr, 'CNZ', 'OK')) },
+        { label: 'Clientes genéricos (NIT 2222)',       value: `${totalGenericasTransacciones} — $${formatearCOP(totalGenericasNeto)}` },
     ];
 
     let itemY = resY + 26;
@@ -220,7 +236,7 @@ async function generarPDF(datos) {
 
     resItems.forEach((item, i) => {
         const x = i < 4 ? col1X : col2X;
-        const y = i < 4 ? itemY + (i % 4) * 18 : itemY + (i % 4) * 18;
+        const y = itemY + (i % 4) * 18;
 
         doc.fontSize(9)
             .font('Helvetica')
@@ -233,10 +249,168 @@ async function generarPDF(datos) {
             .text(item.value, x + ANCHO_UTIL / 2 - 80, y, { width: 80, align: 'right' });
     });
 
+    const finResY = itemY + 4 * 18 + 10;
+
+    // =====================================================================
+    // RESUMEN POR CAJA
+    // =====================================================================
+    const cajaY = finResY;
+    doc.fontSize(12)
+        .font('Helvetica-Bold')
+        .fillColor(COLORS.azul)
+        .text('Resumen por Caja', MARGEN, cajaY);
+
+    doc.moveTo(MARGEN, cajaY + 18)
+        .lineTo(ANCHO_PAGINA - MARGEN, cajaY + 18)
+        .strokeColor(COLORS.borde)
+        .stroke();
+
+    const cajaEncabezados = ['Caja', 'Transacciones', 'Neto', 'OK', 'Pend.'];
+    const cajaWidths = [56, 80, 100, 60, 60];
+    const cajaTotalW = cajaWidths.reduce((a, b) => a + b, 0);
+    const cajaStartX = MARGEN + (ANCHO_UTIL - cajaTotalW) / 2;
+
+    let cajaRowY = cajaY + 26;
+
+    const dibujarCajaHeader = () => {
+        doc.roundedRect(cajaStartX - 4, cajaRowY - 4, cajaTotalW + 8, 22, 4).fill(COLORS.azul);
+        let hX = cajaStartX;
+        cajaEncabezados.forEach((h, i) => {
+            doc.fontSize(7).font('Helvetica-Bold').fillColor(COLORS.blanco)
+                .text(h, hX + 4, cajaRowY, { width: cajaWidths[i] - 4, align: 'center' });
+            hX += cajaWidths[i];
+        });
+        cajaRowY += 22;
+    };
+    dibujarCajaHeader();
+
+    const cajasOrdenadas = Object.keys(porCaja).sort();
+    let cajaIdx = 0;
+    let totalCajaTrans = 0;
+    let totalCajaNeto = 0;
+    let totalCajaOk = 0;
+
+    cajasOrdenadas.forEach(caja => {
+        const c = porCaja[caja];
+        totalCajaTrans += c.transacciones;
+        totalCajaNeto += c.neto;
+        totalCajaOk += c.ok;
+
+        if (cajaRowY > 720) { doc.addPage(); cajaRowY = MARGEN + 20; dibujarCajaHeader(); }
+
+        const bg = cajaIdx % 2 === 0 ? COLORS.blanco : COLORS.grisSoft;
+        doc.rect(cajaStartX - 4, cajaRowY - 2, cajaTotalW + 8, 18).fill(bg);
+
+        const vals = [
+            caja,
+            String(c.transacciones),
+            `$${formatearCOP(c.neto)}`,
+            String(c.ok),
+            String(c.transacciones - c.ok),
+        ];
+        let hX = cajaStartX;
+        vals.forEach((v, i) => {
+            doc.fontSize(8).font('Helvetica').fillColor(COLORS.texto)
+                .text(v, hX + 4, cajaRowY, { width: cajaWidths[i] - 4, align: i === 0 ? 'left' : 'center' });
+            hX += cajaWidths[i];
+        });
+        cajaRowY += 18;
+        cajaIdx++;
+    });
+
+    // Total row
+    doc.rect(cajaStartX - 4, cajaRowY - 2, cajaTotalW + 8, 18).fill(COLORS.azulSoft);
+    const totalVals = [
+        'Total',
+        String(totalCajaTrans),
+        `$${formatearCOP(totalCajaNeto)}`,
+        String(totalCajaOk),
+        String(totalCajaTrans - totalCajaOk),
+    ];
+    hX = cajaStartX;
+    totalVals.forEach((v, i) => {
+        doc.fontSize(8).font('Helvetica-Bold').fillColor(COLORS.azul)
+            .text(v, hX + 4, cajaRowY, { width: cajaWidths[i] - 4, align: i === 0 ? 'left' : 'center' });
+        hX += cajaWidths[i];
+    });
+    cajaRowY += 18;
+
+    const finCajaY = cajaRowY + 10;
+
+    // =====================================================================
+    // RESUMEN POR TIPO DE CLIENTE
+    // =====================================================================
+    const tipoY = finCajaY;
+    doc.fontSize(12)
+        .font('Helvetica-Bold')
+        .fillColor(COLORS.azul)
+        .text('Resumen por Tipo de Cliente', MARGEN, tipoY);
+
+    doc.moveTo(MARGEN, tipoY + 18)
+        .lineTo(ANCHO_PAGINA - MARGEN, tipoY + 18)
+        .strokeColor(COLORS.borde)
+        .stroke();
+
+    const tipoEncabezados = ['Tipo', 'Transacciones', 'Neto'];
+    const tipoWidths = [120, 90, 100];
+    const tipoTotalW = tipoWidths.reduce((a, b) => a + b, 0);
+    const tipoStartX = MARGEN + (ANCHO_UTIL - tipoTotalW) / 2;
+
+    let tipoRowY = tipoY + 26;
+
+    const dibujarTipoHeader = () => {
+        doc.roundedRect(tipoStartX - 4, tipoRowY - 4, tipoTotalW + 8, 22, 4).fill(COLORS.azul);
+        let hX = tipoStartX;
+        tipoEncabezados.forEach((h, i) => {
+            doc.fontSize(7).font('Helvetica-Bold').fillColor(COLORS.blanco)
+                .text(h, hX + 4, tipoRowY, { width: tipoWidths[i] - 4, align: i === 0 ? 'left' : 'center' });
+            hX += tipoWidths[i];
+        });
+        tipoRowY += 22;
+    };
+    dibujarTipoHeader();
+
+    const totalRealesTransacciones = facturasArr.length - totalGenericasTransacciones;
+    const totalRealesNeto = datos.totalNeto - totalGenericasNeto;
+
+    const tipoFilas = [
+        { label: 'Genéricos (NIT 2222)', trans: totalGenericasTransacciones, neto: totalGenericasNeto },
+        { label: 'Reales',                trans: totalRealesTransacciones,    neto: totalRealesNeto },
+    ];
+
+    tipoFilas.forEach((fila, i) => {
+        if (tipoRowY > 720) { doc.addPage(); tipoRowY = MARGEN + 20; dibujarTipoHeader(); }
+
+        const bg = i % 2 === 0 ? COLORS.blanco : COLORS.grisSoft;
+        doc.rect(tipoStartX - 4, tipoRowY - 2, tipoTotalW + 8, 18).fill(bg);
+
+        const vals = [fila.label, String(fila.trans), `$${formatearCOP(fila.neto)}`];
+        let hX = tipoStartX;
+        vals.forEach((v, j) => {
+            doc.fontSize(8).font('Helvetica').fillColor(COLORS.texto)
+                .text(v, hX + 4, tipoRowY, { width: tipoWidths[j] - 4, align: j === 0 ? 'left' : 'center' });
+            hX += tipoWidths[j];
+        });
+        tipoRowY += 18;
+    });
+
+    // Total row
+    doc.rect(tipoStartX - 4, tipoRowY - 2, tipoTotalW + 8, 18).fill(COLORS.azulSoft);
+    const totalTipoVals = ['Total', String(facturasArr.length), `$${formatearCOP(datos.totalNeto)}`];
+    let hXT = tipoStartX;
+    totalTipoVals.forEach((v, j) => {
+        doc.fontSize(8).font('Helvetica-Bold').fillColor(COLORS.azul)
+            .text(v, hXT + 4, tipoRowY, { width: tipoWidths[j] - 4, align: j === 0 ? 'left' : 'center' });
+        hXT += tipoWidths[j];
+    });
+    tipoRowY += 18;
+
+    const finTipoY = tipoRowY + 10;
+
     // =====================================================================
     // TABLA DE FACTURAS (si hay)
     // =====================================================================
-    const tablaY = resY + 26 + 4 * 18 + 20;
+    const tablaY = finTipoY;
 
     if (datos.facturas && datos.facturas.length > 0) {
         doc.fontSize(12)
