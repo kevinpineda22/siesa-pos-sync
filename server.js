@@ -224,18 +224,19 @@ app.get('/api/logs/corridas', async (req, res) => {
 app.get('/api/logs/resumen-diario', async (req, res) => {
     try {
         const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
-        const fecha = req.query.fecha || hoy;
+        const fechaInicio = req.query.fechaInicio || req.query.fecha || hoy;
+        const fechaFin = req.query.fechaFin || req.query.fecha || hoy;
         const filtroCaja = req.query.caja ? req.query.caja.toUpperCase().trim() : null;
+        const esRango = fechaInicio !== fechaFin;
         const CIA = process.env.CIA || '7375';
         const queryStats = process.env.QUERY_STATS || 'merkahorro_venta_pos_stats_dev';
         const URL_STATS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=${queryStats}`;
-        const esHoy = fecha === hoy;
 
         // 1) Datos POS (total_pos, por_caja, por_nit, neto_total)
         let posData = null;
 
-        if (esHoy) {
-            // Tiempo real desde Connekta — y auto-upsert a sps_estadisticas_diarias
+        if (!esRango && fechaInicio === hoy) {
+            // Día único = hoy: tiempo real desde Connekta + auto-upsert
             try {
                 const resp = await axios.get(URL_STATS, {
                     headers: {
@@ -251,7 +252,7 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
 
                 const delDia = posDocs.filter(d => {
                     if (filtroCaja && (d.ID_TIPO_DOCTO || '').toUpperCase() !== filtroCaja) return false;
-                    return (d.FECHA_DOCTO || '').split('T')[0] === fecha;
+                    return (d.FECHA_DOCTO || '').split('T')[0] === fechaInicio;
                 });
 
                 const totalPos = delDia.length;
@@ -273,9 +274,8 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
 
                 posData = { total_pos: totalPos, neto_total: netoTotal, por_caja: porCaja, por_nit: porNit };
 
-                // Snapshot en Supabase (lecturas futuras)
                 await logger.supabase.from('sps_estadisticas_diarias').upsert({
-                    fecha,
+                    fecha: fechaInicio,
                     total_pos: totalPos,
                     neto_total: netoTotal,
                     por_caja: porCaja,
@@ -286,34 +286,145 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                 console.error('⚠️ Error consultando Connekta stats:', e.message);
             }
         } else {
-            // Histórico desde sps_estadisticas_diarias
-            try {
-                const { data: historico } = await logger.supabase
-                    .from('sps_estadisticas_diarias')
-                    .select('*')
-                    .eq('fecha', fecha)
-                    .single();
-                if (historico) {
-                    posData = {
-                        total_pos: historico.total_pos,
-                        neto_total: historico.neto_total,
-                        por_caja: historico.por_caja || {},
-                        por_nit: historico.por_nit || {}
-                    };
+            // Histórico desde sps_estadisticas_diarias (día único pasado o rango)
+            const fechasAConsultar = [];
+            if (esRango) {
+                // Si el rango incluye hoy, obtener Connekta para hoy y agregarlo
+                if (fechaInicio <= hoy && fechaFin >= hoy) {
+                    try {
+                        const resp = await axios.get(URL_STATS, {
+                            headers: {
+                                'ConniKey': process.env.CONNI_KEY,
+                                'ConniToken': process.env.CONNI_TOKEN
+                            }
+                        });
+                        let raw = resp.data;
+                        if (raw.detalle && raw.detalle.Datos) raw = raw.detalle.Datos;
+                        else if (raw.detalle && raw.detalle.Table) raw = raw.detalle.Table;
+                        else if (raw.Table) raw = raw.Table;
+                        const posDocs = Array.isArray(raw) ? raw : [];
+
+                        const delDia = posDocs.filter(d => {
+                            if (filtroCaja && (d.ID_TIPO_DOCTO || '').toUpperCase() !== filtroCaja) return false;
+                            return (d.FECHA_DOCTO || '').split('T')[0] === hoy;
+                        });
+
+                        const totalPos = delDia.length;
+                        const netoTotal = delDia.reduce((s, d) => s + parseFloat(d.VrNetoDocto || 0), 0);
+                        const porCaja = {};
+                        const porNit = {
+                            generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
+                            real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
+                        };
+                        delDia.forEach(d => {
+                            const c = d.ID_TIPO_DOCTO || 'SIN_CAJA';
+                            if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
+                            porCaja[c].transacciones++;
+                            porCaja[c].neto += parseFloat(d.VrNetoDocto || 0);
+                            const esG = (d.NitTercero || '').trim() === '222222222222';
+                            (esG ? porNit.generico : porNit.real).transacciones++;
+                            (esG ? porNit.generico : porNit.real).neto += parseFloat(d.VrNetoDocto || 0);
+                        });
+
+                        posData = { total_pos: totalPos, neto_total: netoTotal, por_caja: porCaja, por_nit: porNit };
+
+                        await logger.supabase.from('sps_estadisticas_diarias').upsert({
+                            fecha: hoy,
+                            total_pos: totalPos,
+                            neto_total: netoTotal,
+                            por_caja: porCaja,
+                            por_nit: porNit,
+                            actualizado_en: new Date().toISOString()
+                        }, { onConflict: 'fecha' });
+                    } catch (e) {
+                        console.error('⚠️ Error consultando Connekta stats para hoy:', e.message);
+                    }
                 }
-            } catch (_) { /* no encontrado → fallback */ }
+
+                // Consultar sps_estadisticas_diarias para el rango (excluyendo hoy si ya se consultó)
+                try {
+                    let query = logger.supabase
+                        .from('sps_estadisticas_diarias')
+                        .select('*')
+                        .gte('fecha', fechaInicio)
+                        .lte('fecha', fechaFin);
+                    const { data: historicos } = await query;
+                    if (historicos && historicos.length > 0) {
+                        const agregado = {
+                            total_pos: 0,
+                            neto_total: 0,
+                            por_caja: {},
+                            por_nit: {
+                                generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
+                                real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
+                            }
+                        };
+                        historicos.forEach(h => {
+                            agregado.total_pos += h.total_pos || 0;
+                            agregado.neto_total += h.neto_total || 0;
+                            const cajas = h.por_caja || {};
+                            Object.keys(cajas).forEach(c => {
+                                if (!agregado.por_caja[c]) agregado.por_caja[c] = { transacciones: 0, neto: 0 };
+                                agregado.por_caja[c].transacciones += cajas[c].transacciones || 0;
+                                agregado.por_caja[c].neto += cajas[c].neto || 0;
+                            });
+                            const nit = h.por_nit || {};
+                            if (nit.generico) {
+                                agregado.por_nit.generico.transacciones += nit.generico.transacciones || 0;
+                                agregado.por_nit.generico.neto += nit.generico.neto || 0;
+                            }
+                            if (nit.real) {
+                                agregado.por_nit.real.transacciones += nit.real.transacciones || 0;
+                                agregado.por_nit.real.neto += nit.real.neto || 0;
+                            }
+                        });
+                        // Si hoy ya se consultó via Connekta, sumar
+                        if (posData) {
+                            agregado.total_pos += posData.total_pos;
+                            agregado.neto_total += posData.neto_total;
+                            Object.keys(posData.por_caja).forEach(c => {
+                                if (!agregado.por_caja[c]) agregado.por_caja[c] = { transacciones: 0, neto: 0 };
+                                agregado.por_caja[c].transacciones += posData.por_caja[c].transacciones || 0;
+                                agregado.por_caja[c].neto += posData.por_caja[c].neto || 0;
+                            });
+                            agregado.por_nit.generico.transacciones += posData.por_nit.generico.transacciones || 0;
+                            agregado.por_nit.generico.neto += posData.por_nit.generico.neto || 0;
+                            agregado.por_nit.real.transacciones += posData.por_nit.real.transacciones || 0;
+                            agregado.por_nit.real.neto += posData.por_nit.real.neto || 0;
+                        }
+                        posData = agregado;
+                    }
+                } catch (_) { /* no encontrado → fallback */ }
+            } else {
+                // Día único pasado
+                try {
+                    const { data: historico } = await logger.supabase
+                        .from('sps_estadisticas_diarias')
+                        .select('*')
+                        .eq('fecha', fechaInicio)
+                        .single();
+                    if (historico) {
+                        posData = {
+                            total_pos: historico.total_pos,
+                            neto_total: historico.neto_total,
+                            por_caja: historico.por_caja || {},
+                            por_nit: historico.por_nit || {}
+                        };
+                    }
+                } catch (_) { /* no encontrado → fallback */ }
+            }
         }
 
         // 2) sps_facturas: estado de sincronización + fallback POS
         let query = logger.supabase
             .from('sps_facturas')
             .select('estado, co, caja, consec, neto, fecha_factura, cliente_nit')
-            .eq('fecha_factura', fecha);
+            .gte('fecha_factura', fechaInicio)
+            .lte('fecha_factura', fechaFin);
         if (filtroCaja) query = query.eq('caja', filtroCaja);
         const { data: facturas, error } = await query;
         if (error) throw error;
 
-        // Deduplicar: cada transacción aparece como CNZ + CFZ → contar como 1
         const unicos = new Map();
         facturas.forEach(f => {
             const key = `${f.co || ''}:${f.caja || ''}:${f.consec}`;
@@ -325,7 +436,6 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
         });
         const transaccionesSync = [...unicos.values()];
 
-        // neto_sync y por_nit_sync: desglose de LO QUE PROCESÓ EL FLUJO (desde sps_facturas)
         const netoSync = transaccionesSync.reduce((s, f) => s + (parseFloat(f.neto) || 0), 0);
         const porNitSync = {
             generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
@@ -352,7 +462,9 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
 
         res.status(200).json({
             success: true,
-            fecha,
+            fecha: esRango ? `${fechaInicio}—${fechaFin}` : fechaInicio,
+            fecha_inicio: fechaInicio,
+            fecha_fin: fechaFin,
             total_pos: posData.total_pos,
             total_sync: transaccionesSync.length,
             ok: transaccionesSync.filter(f => f.estado === 'OK').length,
