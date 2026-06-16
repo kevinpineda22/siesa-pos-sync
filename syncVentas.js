@@ -283,7 +283,12 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
     let nroRegistro = 0;
 
     errores.forEach(err => {
-        const match = err.f_valor && err.f_valor.match(/Item:(\d+)Bodega:(\w+)/);
+        // El código de ítem en el f_valor de Siesa puede ser ALFANUMÉRICO o traer guiones /
+        // equivalencias (ej. "Item:0002979A-0002979Bodega:PV001"), no solo dígitos. Capturamos
+        // TODO lo que haya entre "Item:" y "Bodega:" (no-greedy). Antes la regex usaba \d+ y NO
+        // casaba con esos ítems -> se descartaban del CPE -> seguían fallando con "Item sin
+        // cantidad disponible" porque nunca se les inyectaba inventario.
+        const match = err.f_valor && err.f_valor.match(/Item:(.+?)Bodega:(\w+)/);
         const faltanteMatch = err.f_detalle && err.f_detalle.match(/Faltante Inv\.:\s*(-?[\d.]+)/);
         if (!match) return;
 
@@ -459,7 +464,7 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
                 if (Array.isArray(erroresAjuste)) {
                     erroresAjuste.forEach(errAjuste => {
                         const matchFaltante = errAjuste.f_detalle && errAjuste.f_detalle.match(/Faltante Inv\.:\s*(-?[\d.]+)/);
-                        const matchItem = errAjuste.f_valor && errAjuste.f_valor.match(/Item:(\d+)Bodega:(\w+)/);
+                        const matchItem = errAjuste.f_valor && errAjuste.f_valor.match(/Item:(.+?)Bodega:(\w+)/);
                         
                         if (matchFaltante && matchItem) {
                             const errorIdStr = matchItem[1].substring(0, 7).replace(/^0+/, '');
