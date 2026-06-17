@@ -124,6 +124,10 @@ async function registrarResultado(resultado, meta = {}) {
         payload.cpe_items = meta.cpeItems;
     }
 
+    if (meta.impuestos && meta.impuestos.length > 0) {
+        payload.impuestos = meta.impuestos;
+    }
+
     if (!existente) {
         payload.primera_corrida = payload.ultima_corrida;
         if (!payload.automatizaciones_aplicadas) payload.automatizaciones_aplicadas = [];

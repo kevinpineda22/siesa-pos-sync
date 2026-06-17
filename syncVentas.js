@@ -839,16 +839,21 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         //   Math.round coincide con el redondeo half-up de Siesa (verificado con datos reales:
         //   4398.69 → 4399, 1444.95 → 1445, 940.45 → 940, 239.4 → 239).
         // ICO (TASA = 0) NO se toca: su VALOR_TOTAL viene de VLR_UNI × CANT y se respeta tal cual.
+        // Además se calcula BASE_GRAVABLE para cada impuesto (valor bruto − descuentos),
+        // que se persiste en sps_facturas para mostrarlo en el frontend (ModalDetalle).
         Impuestos.forEach(i => {
             if (i.CONSEC_DOCTO === consecDoc && i.TIPO_DOCTO === tipoDoctoSiesa) {
                 const m = Movimientos.find(x => x.nro_registro === i.NRO_REGISTRO && x.consec_docto === consecDoc && x.id_tipo_docto === tipoDoctoSiesa);
-                if (m && i.TASA !== null && i.TASA !== undefined && parseFloat(i.TASA) > 0) {
+                if (m) {
                     const dscLinea = Descuentos.find(d => d.consec_docto === consecDoc && d.id_tipo_docto === tipoDoctoSiesa && d.nro_registro === i.NRO_REGISTRO);
                     const dsctoVal = dscLinea ? parseFloat(dscLinea.vlr_tot || 0) : 0;
                     const baseNeta = parseFloat(m.VALOR_BRUTO) - dsctoVal;
-                    const tasa = parseFloat(i.TASA);
-                    const valorImpuesto = Math.round(baseNeta * tasa / 100);
-                    i.VALOR_TOTAL = formatDecimal(valorImpuesto);
+                    if (parseFloat(i.TASA) > 0) {
+                        const tasa = parseFloat(i.TASA);
+                        const valorImpuesto = Math.round(baseNeta * tasa / 100);
+                        i.VALOR_TOTAL = formatDecimal(valorImpuesto);
+                    }
+                    i.BASE_GRAVABLE = formatDecimal(baseNeta);
                 }
             }
         });
@@ -1152,6 +1157,15 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 return;
             }
             const payload = generarPayloadDocumento(fac, enc, 'CNZ', co, caja);
+            meta.impuestos = (payload.Impuestos || []).map(i => ({
+                NRO_REGISTRO: i.NRO_REGISTRO,
+                ID_LLAVE_IMPUESTO: i.ID_LLAVE_IMPUESTO,
+                TASA: i.TASA,
+                PORCENTAJE_BASE: i.PORCENTAJE_BASE,
+                VLR_UNI: i.VLR_UNI,
+                VALOR_TOTAL: i.VALOR_TOTAL,
+                BASE_GRAVABLE: i.BASE_GRAVABLE || "0.00"
+            }));
             tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDocto, meta });
         } else if (pasoActual === 3) {
             const tipoDoc = 'CFZ';
@@ -1161,6 +1175,15 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 return;
             }
             const payload = generarPayloadDocumento(fac, enc, 'CFZ', co, caja);
+            meta.impuestos = (payload.Impuestos || []).map(i => ({
+                NRO_REGISTRO: i.NRO_REGISTRO,
+                ID_LLAVE_IMPUESTO: i.ID_LLAVE_IMPUESTO,
+                TASA: i.TASA,
+                PORCENTAJE_BASE: i.PORCENTAJE_BASE,
+                VLR_UNI: i.VLR_UNI,
+                VALOR_TOTAL: i.VALOR_TOTAL,
+                BASE_GRAVABLE: i.BASE_GRAVABLE || "0.00"
+            }));
             tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDoc, meta });
         }
     });
