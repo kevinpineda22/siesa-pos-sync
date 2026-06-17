@@ -342,14 +342,16 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                 }
 
                 // Consultar sps_estadisticas_diarias para el rango (excluyendo hoy si ya se consultó)
+                let historicos = [];
                 try {
                     let query = logger.supabase
                         .from('sps_estadisticas_diarias')
                         .select('*')
                         .gte('fecha', fechaInicio)
                         .lte('fecha', fechaFin);
-                    const { data: historicos } = await query;
-                    if (historicos && historicos.length > 0) {
+                    const { data: snapData } = await query;
+                    historicos = snapData || [];
+                    if (historicos.length > 0) {
                         const agregado = {
                             total_pos: 0,
                             neto_total: 0,
@@ -395,6 +397,53 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                         posData = agregado;
                     }
                 } catch (_) { /* no encontrado → fallback */ }
+
+                // Rellenar días sin snapshot con sps_facturas (solo clientes reales)
+                if (esRango && posData) {
+                    const fechasSnap = new Set(historicos.map(h => h.fecha));
+                    const diasFaltantes = [];
+                    let iter = new Date(fechaInicio + 'T12:00:00');
+                    const end = new Date(fechaFin + 'T12:00:00');
+                    while (iter <= end) {
+                        const dia = iter.toLocaleDateString('en-CA');
+                        if (!fechasSnap.has(dia) && dia !== hoy) diasFaltantes.push(dia);
+                        iter.setDate(iter.getDate() + 1);
+                    }
+                    if (diasFaltantes.length > 0) {
+                        try {
+                            const { data: faltantes } = await logger.supabase
+                                .from('sps_facturas')
+                                .select('estado, co, caja, consec, neto, fecha_factura, cliente_nit')
+                                .in('fecha_factura', diasFaltantes);
+                            if (faltantes && faltantes.length > 0) {
+                                const unicos = new Map();
+                                faltantes.forEach(f => {
+                                    const key = `${f.co || ''}:${f.caja || ''}:${f.consec}`;
+                                    const prioridad = { 'FALLO': 3, 'SIN_RECAUDO': 2, 'OK': 1 };
+                                    const existe = unicos.get(key);
+                                    if (!existe || prioridad[f.estado] > prioridad[existe.estado]) {
+                                        unicos.set(key, f);
+                                    }
+                                });
+                                const trans = [...unicos.values()];
+                                const reales = trans.filter(f => (f.cliente_nit || '').trim() !== '222222222222');
+                                if (reales.length > 0) {
+                                    posData.total_pos += reales.length;
+                                    const netoReal = reales.reduce((s, f) => s + (parseFloat(f.neto) || 0), 0);
+                                    posData.neto_total += netoReal;
+                                    posData.por_nit.real.transacciones += reales.length;
+                                    posData.por_nit.real.neto += netoReal;
+                                    reales.forEach(f => {
+                                        const c = f.caja || 'SIN_CAJA';
+                                        if (!posData.por_caja[c]) posData.por_caja[c] = { transacciones: 0, neto: 0 };
+                                        posData.por_caja[c].transacciones++;
+                                        posData.por_caja[c].neto += parseFloat(f.neto) || 0;
+                                    });
+                                }
+                            }
+                        } catch (_) { /* fallback silencioso */ }
+                    }
+                }
             } else {
                 // Día único pasado
                 try {
