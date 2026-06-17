@@ -347,8 +347,12 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                     let query = logger.supabase
                         .from('sps_estadisticas_diarias')
                         .select('*')
-                        .gte('fecha', fechaInicio)
-                        .lte('fecha', fechaFin);
+                        .gte('fecha', fechaInicio);
+                    if (posData) {
+                        query = query.lt('fecha', hoy);
+                    } else {
+                        query = query.lte('fecha', fechaFin);
+                    }
                     const { data: snapData } = await query;
                     historicos = snapData || [];
                     if (historicos.length > 0) {
