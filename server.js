@@ -614,6 +614,30 @@ app.get('/api/reportes/historial', async (req, res) => {
     }
 });
 
+/**
+ * GET /api/logs/estadisticas
+ * Devuelve el detalle día por día de sps_estadisticas_diarias para un rango.
+ * Query params: fechaInicio (YYYY-MM-DD), fechaFin (YYYY-MM-DD)
+ */
+app.get('/api/logs/estadisticas', async (req, res) => {
+    try {
+        const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+        const fechaInicio = req.query.fechaInicio || hoy;
+        const fechaFin = req.query.fechaFin || hoy;
+        let query = logger.supabase
+            .from('sps_estadisticas_diarias')
+            .select('*')
+            .gte('fecha', fechaInicio)
+            .lte('fecha', fechaFin)
+            .order('fecha', { ascending: true });
+        const { data, error } = await query;
+        if (error) throw error;
+        res.status(200).json({ success: true, data: data || [] });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // Iniciar el servidor (solo en local; en Vercel corre como serverless)
 if (!process.env.VERCEL) {
     app.listen(PORT, () => {
