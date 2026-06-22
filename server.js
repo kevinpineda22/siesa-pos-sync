@@ -638,6 +638,42 @@ app.get('/api/logs/estadisticas', async (req, res) => {
     }
 });
 
+/**
+ * GET /api/logs/ajustes
+ * Devuelve todos los ajustes de inventario (CPE) aplanados.
+ * Cada cpe_item se convierte en una fila independiente con datos de la factura.
+ */
+app.get('/api/logs/ajustes', async (req, res) => {
+    try {
+        const { data, error } = await logger.supabase
+            .from('sps_facturas')
+            .select('consec, tipo, co, caja, fecha_factura, cpe_items')
+            .not('cpe_items', 'is', null)
+            .order('ultima_corrida', { ascending: false })
+            .limit(500);
+        if (error) throw error;
+
+        const filas = (data || []).flatMap(f =>
+            (f.cpe_items || []).map(item => ({
+                consec: f.consec,
+                tipo: f.tipo,
+                co: f.co,
+                caja: f.caja,
+                fecha: f.fecha_factura,
+                item: item.item,
+                bodega: item.bodega,
+                cantidad: item.cantidad,
+                un: item.un,
+                costo: item.costo
+            }))
+        );
+
+        res.status(200).json({ success: true, count: filas.length, data: filas });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // Iniciar el servidor (solo en local; en Vercel corre como serverless)
 if (!process.env.VERCEL) {
     app.listen(PORT, () => {
@@ -651,6 +687,7 @@ if (!process.env.VERCEL) {
         console.log(`- GET  http://localhost:${PORT}/api/logs`);
             console.log(`- GET  http://localhost:${PORT}/api/logs/corridas`);
             console.log(`- GET  http://localhost:${PORT}/api/logs/resumen-diario`);
+        console.log(`- GET  http://localhost:${PORT}/api/logs/ajustes`);
             console.log(`- POST http://localhost:${PORT}/api/reportes/generar`);
         console.log(`- GET  http://localhost:${PORT}/api/reportes/config`);
         console.log(`- POST http://localhost:${PORT}/api/reportes/config`);
