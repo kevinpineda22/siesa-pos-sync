@@ -674,6 +674,93 @@ app.get('/api/logs/ajustes', async (req, res) => {
     }
 });
 
+/**
+ * GET /api/logs/resumen-impuestos
+ * Devuelve el agregado de impuestos por llave (IV02, IV03, ICO, etc.) para un rango de fechas.
+ * También incluye el total base (neto antes de impuestos).
+ *
+ * Query params: fechaInicio (YYYY-MM-DD), fechaFin (YYYY-MM-DD)
+ *
+ * Respuesta:
+ * {
+ *   success: true,
+ *   totalBase: 12345678,           // Suma de netos de facturas con impuestos
+ *   totalImpuestos: 2345678,       // Suma de todos los VALOR_TOTAL
+ *   totalFacturas: 123,            // Facturas que contribuyeron
+ *   porLlave: [
+ *     { llave: "IV03", descripcion: "IVA 19% BIENES", valorTotal: 1234567, baseGravable: 6500000, count: 45 },
+ *     ...
+ *   ]
+ * }
+ */
+app.get('/api/logs/resumen-impuestos', async (req, res) => {
+    try {
+        const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+        const fechaInicio = req.query.fechaInicio || req.query.fecha || hoy;
+        const fechaFin = req.query.fechaFin || req.query.fecha || hoy;
+
+        const { data, error } = await logger.supabase
+            .from('sps_facturas')
+            .select('neto, impuestos, fecha_factura')
+            .not('impuestos', 'is', null)
+            .gte('fecha_factura', fechaInicio)
+            .lte('fecha_factura', fechaFin);
+
+        if (error) throw error;
+
+        // Mapas de descripciones de llaves de impuesto
+        const DESCRIPCIONES = {
+            'IV02': 'IVA 5% BIENES',
+            'IV03': 'IVA 19% BIENES',
+            'IV04': 'IVA 19% SERVICIOS',
+            'IV05': 'IVA 19% HONORARIOS',
+            'IV06': 'IVA 19% ARRENDAMIENTOS',
+            'IV07': 'IVA 19% CERVEZA',
+            'IV08': 'IVA DEL 19% EN GASEOSAS',
+            'ICO': 'IMPUESTO AL CONSUMO'
+        };
+
+        // Procesar en memoria: agregar por ID_LLAVE_IMPUESTO
+        const porLlave = {};
+        let totalBase = 0;
+
+        (data || []).forEach(f => {
+            const neto = parseFloat(f.neto) || 0;
+            totalBase += neto;
+
+            (f.impuestos || []).forEach(imp => {
+                const llave = imp.ID_LLAVE_IMPUESTO || 'OTROS';
+                if (!porLlave[llave]) {
+                    porLlave[llave] = {
+                        llave,
+                        descripcion: DESCRIPCIONES[llave] || llave,
+                        valorTotal: 0,
+                        baseGravable: 0,
+                        count: 0
+                    };
+                }
+                porLlave[llave].valorTotal += parseFloat(imp.VALOR_TOTAL) || 0;
+                porLlave[llave].baseGravable += parseFloat(imp.BASE_GRAVABLE) || 0;
+                porLlave[llave].count++;
+            });
+        });
+
+        const totalImpuestos = Object.values(porLlave).reduce((s, v) => s + v.valorTotal, 0);
+        const totalBaseGravable = Object.values(porLlave).reduce((s, v) => s + v.baseGravable, 0);
+
+        res.status(200).json({
+            success: true,
+            totalBase: Math.round(totalBase),
+            totalBaseGravable: Math.round(totalBaseGravable),
+            totalImpuestos: Math.round(totalImpuestos),
+            totalFacturas: (data || []).length,
+            porLlave: Object.values(porLlave).sort((a, b) => b.valorTotal - a.valorTotal)
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // Iniciar el servidor (solo en local; en Vercel corre como serverless)
 if (!process.env.VERCEL) {
     app.listen(PORT, () => {
@@ -688,6 +775,7 @@ if (!process.env.VERCEL) {
             console.log(`- GET  http://localhost:${PORT}/api/logs/corridas`);
             console.log(`- GET  http://localhost:${PORT}/api/logs/resumen-diario`);
         console.log(`- GET  http://localhost:${PORT}/api/logs/ajustes`);
+        console.log(`- GET  http://localhost:${PORT}/api/logs/resumen-impuestos`);
             console.log(`- POST http://localhost:${PORT}/api/reportes/generar`);
         console.log(`- GET  http://localhost:${PORT}/api/reportes/config`);
         console.log(`- POST http://localhost:${PORT}/api/reportes/config`);
