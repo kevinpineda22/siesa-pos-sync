@@ -58,7 +58,8 @@ async function fetchClientesPOS(nitsRequeridos = null) {
         ? new Set(nitsRequeridos.map(n => String(n).trim()))
         : null;
     const todos = [];
-    for (let pagina = 1; pagina <= MAX_PAGINAS; pagina++) {
+    let pagina = 0;
+    for (pagina = 1; pagina <= MAX_PAGINAS; pagina++) {
         let registros = [];
         try {
             const r = await axios.get(`${BASE}&paginacion=numPag=${pagina}|tamPag=${TAM}`, {
