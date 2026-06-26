@@ -89,6 +89,9 @@ async function fetchClientesPOS(nitsRequeridos = null) {
 }
 
 async function probarSincronizacion(nitsRequeridos = null) {
+    let fetchResult = null;
+    let clientesDatos = [];
+    let paginasTotales = 0;
     try {
         console.log('----------------------------------------------------');
         if (nitsRequeridos && nitsRequeridos.length > 0) {
@@ -100,9 +103,9 @@ async function probarSincronizacion(nitsRequeridos = null) {
         
         // Connekta no acepta parámetros y trunca en una sola página: paginamos la maestra de
         // clientes (con corte temprano si ya encontramos los NITs requeridos).
-        const fetchResult = await fetchClientesPOS(nitsRequeridos);
-        let clientesDatos = fetchResult.datos;
-        const paginasTotales = fetchResult.paginas;
+        fetchResult = await fetchClientesPOS(nitsRequeridos);
+        clientesDatos = fetchResult.datos;
+        paginasTotales = fetchResult.paginas;
         console.log(`   📥 Clientes POS descargados (paginado): ${clientesDatos.length} registros en ${paginasTotales} página(s)`);
 
         // Si Siesa nos dijo qué NITs faltan, filtramos solo esos. Si no, mandamos todo el pool.
