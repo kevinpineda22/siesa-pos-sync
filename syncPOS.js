@@ -114,7 +114,7 @@ async function probarSincronizacion(nitsRequeridos = null) {
 
         if (clientesDatos.length === 0) {
             console.log('\n⚠️ No se encontraron clientes para sincronizar.');
-            return;
+            return { success: true, creados: 0, no_encontrados: nitsRequeridos || [], mensaje: 'Ningún cliente encontrado en la maestra POS' };
         }
 
         console.log(`\n✅ Se extrajeron ${clientesDatos.length} clientes. Procesando...`);
@@ -219,7 +219,14 @@ async function probarSincronizacion(nitsRequeridos = null) {
 
         console.log('\n✅ ¡Respuesta exitosa masiva de Siesa PROD!');
         console.log(responsePost.data);
-        return responsePost.data;
+        return {
+            success: true,
+            creados: payloadSiesa.Terceros.length,
+            no_encontrados: nitsRequeridos && nitsRequeridos.length > 0
+                ? [...new Set(nitsRequeridos.map(n => String(n).trim()))].filter(n => !clientesDatos.some(c => String(c.NIT).trim() === n))
+                : [],
+            siesa: responsePost.data
+        };
 
     } catch (error) {
         console.error('\n❌ Error en la conexión con Siesa:');
