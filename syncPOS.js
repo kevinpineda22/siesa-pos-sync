@@ -15,6 +15,38 @@ function truncar(valor, maxLen) {
     return s.length > maxLen ? s.slice(0, maxLen) : s;
 }
 
+// Limpia el campo NOMBRES cuando detecta que contiene apellidos que ya están
+// en APELLIDO1 o APELLIDO2. Esto pasa cuando en el POS meten el nombre completo
+// (nombre + apellido) en el campo de nombres, y también el apellido en el campo
+// de apellidos — Siesa termina mostrando "MONICA SIERRA SIERRA" (duplicado).
+//
+// Caso real: NOMBRES="MONICA SIERRA", APELLIDO1="SIERRA" → NOMBRES="MONICA"
+function limpiarNombres(nombres, apellido1, apellido2) {
+    let n = (nombres || '').trim();
+    if (!n) return '';
+
+    const a1 = (apellido1 || '').trim().toUpperCase();
+    const a2 = (apellido2 || '').trim().toUpperCase();
+
+    // Si NOMBRES termina con APELLIDO1, quitarlo
+    let nUpper = n.toUpperCase();
+    if (a1 && nUpper.endsWith(' ' + a1)) {
+        n = n.slice(0, n.length - a1.length - 1).trim();
+        nUpper = n.toUpperCase();
+    }
+    // Si NOMBRES termina con APELLIDO2, quitarlo
+    if (a2 && nUpper.endsWith(' ' + a2)) {
+        n = n.slice(0, n.length - a2.length - 1).trim();
+        nUpper = n.toUpperCase();
+    }
+    // Si NOMBRES empieza con APELLIDO1 (formato "APELLIDO NOMBRE")
+    if (a1 && nUpper.startsWith(a1 + ' ')) {
+        n = n.slice(a1.length + 1).trim();
+    }
+
+    return n;
+}
+
 // Consulta la maestra de clientes del POS PAGINANDO. Connekta no acepta parámetros y trunca
 // en una sola página (tamPag), así que paginamos. Si se pasan nitsRequeridos, corta apenas
 // los encuentra a todos (eficiente: no recorre toda la maestra si no hace falta).
@@ -99,6 +131,7 @@ async function probarSincronizacion(nitsRequeridos = null) {
         // Recorremos los 5 clientes y los metemos en los arrays
         for (const cliente of clientesDatos) {
             const fechaSiesa = formatearFechaSiesa(cliente.FECHA_INGRESO);
+            const nombresLimpios = limpiarNombres(cliente.NOMBRES, cliente.APELLIDO1, cliente.APELLIDO2);
 
             let tipoTercero = cliente.IND_TIPO_TERCERO;
             if (tipoTercero === 0 || tipoTercero === "0" || tipoTercero === 1 || tipoTercero === "1") {
@@ -118,7 +151,7 @@ async function probarSincronizacion(nitsRequeridos = null) {
                 "RAZON_SOCIAL": truncar(cliente.RAZON_SOCIAL, 40),
                 "APELLIDO1": truncar(cliente.APELLIDO1, 30),
                 "APELLIDO2": truncar(cliente.APELLIDO2, 30),
-                "NOMBRES": truncar(cliente.NOMBRES, 30),
+                "NOMBRES": truncar(nombresLimpios || cliente.NOMBRES, 30),
                 "CONTACTO": truncar(cliente.CONTACTO, 40),
                 "DIRECCION1": truncar(cliente.DIRECCION1, 40),
                 "DIRECCION2": truncar(cliente.DIRECCION2, 40),

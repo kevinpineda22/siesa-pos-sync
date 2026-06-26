@@ -41,8 +41,13 @@ function leerLog(nombreArchivo) {
 // Endpoints (Rutas)
 app.post('/api/sync-clientes', async (req, res) => {
     try {
-        console.log('--- 🔄 Recibida petición HTTP para sincronizar clientes ---');
-        const result = await syncPOS();
+        const nits = Array.isArray(req.body?.nits) ? req.body.nits.filter(Boolean).map(String).map(s => s.trim()).filter(Boolean) : null;
+        if (nits && nits.length > 0) {
+            console.log(`--- 🔄 Recibida petición HTTP para sincronizar ${nits.length} cliente(s) específico(s): ${nits.join(', ')} ---`);
+        } else {
+            console.log('--- 🔄 Recibida petición HTTP para sincronizar clientes (todos los pendientes) ---');
+        }
+        const result = await syncPOS(nits);
         res.status(200).json({ success: true, data: result });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
