@@ -701,12 +701,25 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
 
         const { data, error } = await logger.supabase
             .from('sps_facturas')
-            .select('neto, impuestos, fecha_factura')
+            .select('co, caja, consec, estado, neto, impuestos, fecha_factura')
             .not('impuestos', 'is', null)
             .gte('fecha_factura', fechaInicio)
             .lte('fecha_factura', fechaFin);
 
         if (error) throw error;
+
+        // Deduplicar igual que el frontend: CNZ+CFZ del mismo consec = 1 factura
+        // Se queda con el estado de mayor prioridad (FALLO > SIN_RECAUDO > OK)
+        const PRIORIDAD = { 'FALLO': 3, 'SIN_RECAUDO': 2, 'OK': 1 };
+        const unicos = new Map();
+        (data || []).forEach(f => {
+            const key = `${f.co || ''}:${f.caja || ''}:${f.consec}`;
+            const prev = unicos.get(key);
+            if (!prev || (PRIORIDAD[f.estado] || 0) > (PRIORIDAD[prev.estado] || 0)) {
+                unicos.set(key, f);
+            }
+        });
+        const facturas = [...unicos.values()];
 
         // Mapas de descripciones de llaves de impuesto
         const DESCRIPCIONES = {
@@ -724,7 +737,7 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
         const porLlave = {};
         let totalBase = 0;
 
-        (data || []).forEach(f => {
+        facturas.forEach(f => {
             const neto = parseFloat(f.neto) || 0;
             totalBase += neto;
 
@@ -753,8 +766,75 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
             totalBase: Math.round(totalBase),
             totalBaseGravable: Math.round(totalBaseGravable),
             totalImpuestos: Math.round(totalImpuestos),
-            totalFacturas: (data || []).length,
+            totalFacturas: facturas.length,
+            totalDocumentos: (data || []).length,
             porLlave: Object.values(porLlave).sort((a, b) => b.valorTotal - a.valorTotal)
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * GET /api/logs/resumen-ajustes
+ * Devuelve el resumen agregado de ajustes de inventario (CPE) para un rango de fechas.
+ *
+ * Query params: fechaInicio (YYYY-MM-DD), fechaFin (YYYY-MM-DD)
+ *
+ * Respuesta:
+ * {
+ *   success: true,
+ *   totalItems: 45,              // Suma de cantidades de todos los ajustes
+ *   totalValor: 12345678,        // Suma de (cantidad * costo) de todos los ajustes
+ *   totalProductos: 12,          // Cantidad de ítems únicos ajustados
+ *   totalFacturas: 8,            // Facturas que tienen CPE
+ *   data: [ ... ]                // Detalle opcional si se necesita
+ * }
+ */
+app.get('/api/logs/resumen-ajustes', async (req, res) => {
+    try {
+        const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+        const fechaInicio = req.query.fechaInicio || req.query.fecha || hoy;
+        const fechaFin = req.query.fechaFin || req.query.fecha || hoy;
+
+        const { data, error } = await logger.supabase
+            .from('sps_facturas')
+            .select('consec, tipo, co, caja, fecha_factura, cpe_items')
+            .not('cpe_items', 'is', null)
+            .gte('fecha_factura', fechaInicio)
+            .lte('fecha_factura', fechaFin)
+            .order('ultima_corrida', { ascending: false });
+
+        if (error) throw error;
+
+        const filas = (data || []).flatMap(f =>
+            (f.cpe_items || []).map(item => ({
+                consec: f.consec,
+                tipo: f.tipo,
+                co: f.co,
+                caja: f.caja,
+                fecha: f.fecha_factura,
+                item: item.item,
+                bodega: item.bodega,
+                cantidad: parseInt(item.cantidad) || 0,
+                un: item.un,
+                costo: parseFloat(item.costo) || 0,
+                valorTotal: (parseInt(item.cantidad) || 0) * (parseFloat(item.costo) || 0)
+            }))
+        );
+
+        const totalItems = filas.reduce((s, r) => s + r.cantidad, 0);
+        const totalValor = filas.reduce((s, r) => s + r.valorTotal, 0);
+        const productosUnicos = new Set(filas.map(r => r.item)).size;
+        const facturasUnicas = new Set(filas.map(r => r.consec)).size;
+
+        res.status(200).json({
+            success: true,
+            totalItems,
+            totalValor: Math.round(totalValor),
+            totalProductos: productosUnicos,
+            totalFacturas: facturasUnicas,
+            totalFilas: filas.length
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -776,6 +856,7 @@ if (!process.env.VERCEL) {
             console.log(`- GET  http://localhost:${PORT}/api/logs/resumen-diario`);
         console.log(`- GET  http://localhost:${PORT}/api/logs/ajustes`);
         console.log(`- GET  http://localhost:${PORT}/api/logs/resumen-impuestos`);
+        console.log(`- GET  http://localhost:${PORT}/api/logs/resumen-ajustes`);
             console.log(`- POST http://localhost:${PORT}/api/reportes/generar`);
         console.log(`- GET  http://localhost:${PORT}/api/reportes/config`);
         console.log(`- POST http://localhost:${PORT}/api/reportes/config`);
