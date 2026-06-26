@@ -59,7 +59,9 @@ async function fetchClientesPOS(nitsRequeridos = null) {
         : null;
     const todos = [];
     let pagina = 0;
+    let paginasRecorridas = 0;
     for (pagina = 1; pagina <= MAX_PAGINAS; pagina++) {
+        paginasRecorridas = pagina;
         let registros = [];
         try {
             const r = await axios.get(`${BASE}&paginacion=numPag=${pagina}|tamPag=${TAM}`, {
@@ -83,7 +85,7 @@ async function fetchClientesPOS(nitsRequeridos = null) {
     }
     return {
         datos: todos,
-        paginas: pagina,  // última página recorrida
+        paginas: paginasRecorridas,
         total_clientes: todos.length
     };
 }
