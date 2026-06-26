@@ -80,8 +80,11 @@ async function fetchClientesPOS(nitsRequeridos = null) {
         }
         if (registros.length < TAM) break; // última página
     }
-    console.log(`   📥 Clientes POS descargados (paginado): ${todos.length}`);
-    return todos;
+    return {
+        datos: todos,
+        paginas: pagina,  // última página recorrida
+        total_clientes: todos.length
+    };
 }
 
 async function probarSincronizacion(nitsRequeridos = null) {
@@ -96,7 +99,10 @@ async function probarSincronizacion(nitsRequeridos = null) {
         
         // Connekta no acepta parámetros y trunca en una sola página: paginamos la maestra de
         // clientes (con corte temprano si ya encontramos los NITs requeridos).
-        let clientesDatos = await fetchClientesPOS(nitsRequeridos);
+        const fetchResult = await fetchClientesPOS(nitsRequeridos);
+        let clientesDatos = fetchResult.datos;
+        const paginasTotales = fetchResult.paginas;
+        console.log(`   📥 Clientes POS descargados (paginado): ${clientesDatos.length} registros en ${paginasTotales} página(s)`);
 
         // Si Siesa nos dijo qué NITs faltan, filtramos solo esos. Si no, mandamos todo el pool.
         if (nitsRequeridos && nitsRequeridos.length > 0) {
@@ -114,7 +120,7 @@ async function probarSincronizacion(nitsRequeridos = null) {
 
         if (clientesDatos.length === 0) {
             console.log('\n⚠️ No se encontraron clientes para sincronizar.');
-            return { success: true, creados: 0, no_encontrados: nitsRequeridos || [], mensaje: 'Ningún cliente encontrado en la maestra POS' };
+            return { success: true, creados: 0, paginas: paginasTotales, total_clientes_pos: fetchResult.total_clientes, no_encontrados: nitsRequeridos || [], mensaje: 'Ningún cliente encontrado en la maestra POS' };
         }
 
         console.log(`\n✅ Se extrajeron ${clientesDatos.length} clientes. Procesando...`);
@@ -222,6 +228,8 @@ async function probarSincronizacion(nitsRequeridos = null) {
         return {
             success: true,
             creados: payloadSiesa.Terceros.length,
+            paginas: paginasTotales,
+            total_clientes_pos: fetchResult.total_clientes,
             no_encontrados: nitsRequeridos && nitsRequeridos.length > 0
                 ? [...new Set(nitsRequeridos.map(n => String(n).trim()))].filter(n => !clientesDatos.some(c => String(c.NIT).trim() === n))
                 : [],
