@@ -48,6 +48,9 @@ app.post('/api/sync-clientes', async (req, res) => {
             console.log('--- 🔄 Recibida petición HTTP para sincronizar clientes (todos los pendientes) ---');
         }
         const result = await syncPOS(nits);
+        if (result && result.success === false) {
+            return res.status(500).json(result);
+        }
         res.status(200).json({ success: true, data: result });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });

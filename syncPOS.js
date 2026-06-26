@@ -239,14 +239,22 @@ async function probarSincronizacion(nitsRequeridos = null) {
 
     } catch (error) {
         console.error('\n❌ Error en la conexión con Siesa:');
+        let detalle = '(sin detalle)';
         if (error.response) {
             console.error('Status:', error.response.status);
             console.error('Data:', JSON.stringify(error.response.data, null, 2));
-            throw new Error(JSON.stringify(error.response.data));
+            detalle = typeof error.response.data === 'string' ? error.response.data : JSON.stringify(error.response.data);
         } else {
             console.error(error.message);
-            throw error;
+            detalle = error.message;
         }
+        // Retornamos error estructurado con datos de paginación
+        return {
+            success: false,
+            error: detalle,
+            paginas: typeof paginasTotales !== 'undefined' ? paginasTotales : null,
+            total_clientes_pos: fetchResult ? fetchResult.total_clientes : null
+        };
     }
 }
 
