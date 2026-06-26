@@ -74,8 +74,8 @@ async function obtenerConsecsExitosos() {
     const { data, error } = await supabase
         .from('sps_facturas')
         .select('tipo, consec, co, caja')
-        .eq('estado', 'OK');
-        
+        .in('estado', ['OK', 'ICO']);
+
     if (error) {
         console.error('⚠️ Error leyendo consecs exitosos de Supabase:', error.message);
         return new Set();
@@ -97,11 +97,12 @@ async function registrarResultado(resultado, meta = {}) {
         .single();
         
     const esSinRecaudo = resultado.mensaje && resultado.mensaje.includes('SIN RECAUDO');
+    const estadoCalculado = resultado.estadoOverride || (resultado.ok ? (esSinRecaudo ? 'SIN_RECAUDO' : 'OK') : 'FALLO');
     const payload = {
         id,
         consec: String(resultado.consecutivo),
         tipo: resultado.tipo,
-        estado: resultado.ok ? (esSinRecaudo ? 'SIN_RECAUDO' : 'OK') : 'FALLO',
+        estado: estadoCalculado,
         intentos: existente ? (existente.intentos || 1) + 1 : 1,
         ultima_corrida: new Date().toISOString(),
         categoria_error: errorInfo ? errorInfo.categoria : null,
