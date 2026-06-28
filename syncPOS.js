@@ -53,7 +53,7 @@ function limpiarNombres(nombres, apellido1, apellido2) {
 async function fetchClientesPOS(nitsRequeridos = null) {
     const BASE = 'https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=7375&descripcion=merkahorro_Cliente_pos_dev';
     const TAM = 1000;       // máximo que acepta Connekta
-    const MAX_PAGINAS = 50; // tope de seguridad (~50k clientes)
+    const MAX_PAGINAS = 500; // tope de seguridad (~500k clientes)
     const pendientes = (nitsRequeridos && nitsRequeridos.length > 0)
         ? new Set(nitsRequeridos.map(n => String(n).trim()))
         : null;
@@ -66,7 +66,7 @@ async function fetchClientesPOS(nitsRequeridos = null) {
         try {
             const r = await axios.get(`${BASE}&paginacion=numPag=${pagina}|tamPag=${TAM}`, {
                 headers: { 'ConniKey': process.env.CONNI_KEY, 'ConniToken': process.env.CONNI_TOKEN },
-                timeout: 60000,
+                timeout: 15000,
             });
             const d = r.data;
             registros = (d && d.detalle && d.detalle.Datos) ? d.detalle.Datos : (Array.isArray(d) ? d : []);
