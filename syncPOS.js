@@ -155,15 +155,31 @@ async function probarSincronizacion(nitsRequeridos = null) {
                 }
             }
 
+            // Fallback: si APELLIDO1 está vacío y tenemos NOMBRES, extraer la última palabra como apellido
+            // Soluciona el error "el nombre y el apellido 1 son obligatorios" en Siesa para Persona Natural
+            let apellido1Final = (cliente.APELLIDO1 || '').trim();
+            let nombresFinal = (nombresLimpios || cliente.NOMBRES || '').trim();
+            if (!apellido1Final && nombresFinal && tipoTercero === 1) {
+                const partes = nombresFinal.split(/\s+/);
+                if (partes.length >= 2) {
+                    apellido1Final = partes.pop();
+                    nombresFinal = partes.join(' ');
+                } else {
+                    // Solo 1 palabra: usarla como apellido y nombres vacío (Siesa requiere al menos apellido)
+                    apellido1Final = nombresFinal;
+                    nombresFinal = '';
+                }
+            }
+
             payloadSiesa.Terceros.push({
                 "ID": truncar(cliente.NIT, 20),
                 "NIT": truncar(cliente.NIT, 20),
                 "ID_TIPO_IDENT": tipoTercero === 0 ? "" : (cliente.ID_TIPO_IDENT || ""),
                 "IND_TIPO_TERCERO": tipoTercero,
                 "RAZON_SOCIAL": truncar(cliente.RAZON_SOCIAL, 40),
-                "APELLIDO1": truncar(cliente.APELLIDO1, 30),
+                "APELLIDO1": truncar(apellido1Final, 30),
                 "APELLIDO2": truncar(cliente.APELLIDO2, 30),
-                "NOMBRES": truncar(nombresLimpios || cliente.NOMBRES, 30),
+                "NOMBRES": truncar(nombresFinal, 30),
                 "CONTACTO": truncar(cliente.CONTACTO, 40),
                 "DIRECCION1": truncar(cliente.DIRECCION1, 40),
                 "DIRECCION2": truncar(cliente.DIRECCION2, 40),
