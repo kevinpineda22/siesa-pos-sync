@@ -1155,7 +1155,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     const consecsExitosos = await logger.obtenerConsecsExitosos();
     const omitidas = [];
     const tareas = [];
-    const icoskips = []; // facturas con ICO: se registran sin enviar a Siesa
+    // NOTA: ICO ya no se salta — se envía a Siesa con VLR_UNI corregido
     facturasOrdenadas.forEach(key => {
         const { co, caja, consec: consecutivo } = parseKey(key);
         const fac = facturas[key];
@@ -1196,15 +1196,6 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     BASE_GRAVABLE: String(Math.round(baseGravable))
                 };
             });
-            // ICO SKIP: si la factura tiene Impuesto al Consumo, se omite el envío a Siesa
-            // (debe procesarse manualmente). Se registra en sps_facturas con estado 'ICO'
-            // para trazabilidad y para que no se reintente en futuras corridas.
-            const tieneICO_CNZ = (meta.impuestos || []).some(i => String(i.ID_LLAVE_IMPUESTO || '').trim() === 'ICO');
-            if (tieneICO_CNZ) {
-                console.log(`⏭️ [${tipoDocto} ${consecutivo}] ICO detectado — se omite envío a Siesa. La factura debe procesarse manualmente en Siesa.`);
-                icoskips.push({ consecutivo, tipo: tipoDocto, meta });
-                return;
-            }
             tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDocto, meta });
         } else if (pasoActual === 3) {
             const tipoDoc = 'CFZ';
@@ -1233,14 +1224,6 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     BASE_GRAVABLE: String(Math.round(baseGravable))
                 };
             });
-            // ICO SKIP (CFZ): misma lógica que en paso CNZ — si la factura tiene ICO,
-            // se registra con estado 'ICO' y se omite el envío a Siesa.
-            const tieneICO_CFZ = (meta.impuestos || []).some(i => String(i.ID_LLAVE_IMPUESTO || '').trim() === 'ICO');
-            if (tieneICO_CFZ) {
-                console.log(`⏭️ [${tipoDoc} ${consecutivo}] ICO detectado — se omite envío a Siesa (CFZ). La factura debe procesarse manualmente en Siesa.`);
-                icoskips.push({ consecutivo, tipo: tipoDoc, meta });
-                return;
-            }
             tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDoc, meta });
         }
     });
@@ -1249,22 +1232,9 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         console.log(`⏭️ Omitidas por idempotencia (ya procesadas OK): ${omitidas.length} -> ${omitidas.join(', ')}`);
     }
 
-    // Registrar facturas con ICO (sin enviar a Siesa) para trazabilidad.
-    // Se guardan en sps_facturas con estado 'ICO' y todos los datos (items, impuestos, neto, etc.)
-    // para que quede constancia en el historial sin afectar el flujo normal.
-    const resultadosICO = [];
-    for (const skip of icoskips) {
-        await logger.registrarResultado(
-            { consecutivo: skip.consecutivo, tipo: skip.tipo, ok: true, estadoOverride: 'ICO', mensaje: 'ICO detectado — envío manual en Siesa' },
-            skip.meta
-        );
-        resultadosICO.push({ consecutivo: skip.consecutivo, tipo: skip.tipo, ok: true, mensaje: 'ICO — envío manual', co: skip.meta.co, caja: skip.meta.caja });
-        console.log(`⏭️ [${skip.tipo} ${skip.consecutivo}] ICO — registrado sin envío a Siesa`);
-    }
-
     if (tareas.length === 0) {
         console.log(`ℹ️ Paso ${pasoActual === 3 ? 'CFZ' : 'CNZ'}: no hay facturas aplicables.`);
-        return resultadosICO; // retorna los ICO (si los hay) o []
+        return [];
     }
 
     // Se omite respaldo local (ahora todo se persiste en Supabase via logger.js)
@@ -1273,7 +1243,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     const CONCURRENCIA = Math.max(1, parseInt(process.env.CONCURRENCIA || '2'));
     console.log(`\n🚀 Enviando ${tareas.length} factura(s) al paso ${pasoActual === 3 ? 'CFZ' : 'CNZ'} con concurrencia=${CONCURRENCIA}...`);
 
-    const resultados = [...resultadosICO];
+    const resultados = [];
     for (let i = 0; i < tareas.length; i += CONCURRENCIA) {
         const lote = tareas.slice(i, i + CONCURRENCIA);
         const resLote = await Promise.allSettled(
