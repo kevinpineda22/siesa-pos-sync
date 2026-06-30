@@ -811,6 +811,10 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 const unitarioImp = Number(cant || 0) > 0
                     ? absIfCNZ(totalImp) / Number(cant)
                     : 0;
+                // Si TASA=0, Siesa rechaza con "No pueden venir asignados valores en la tasa,
+                // porcentaje base y en el valor unitario del impuesto". Para tasa 0% el valor
+                // unitario es 0 por definición — se manda a 0 y se deja solo VALOR_TOTAL.
+                const vlrUniFinal = parseFloat(imp.TASA || 0) === 0 ? 0 : unitarioImp;
                 Impuestos.push({
                     "ID_CO": enc.CoDoc,
                     "TIPO_DOCTO": tipoDoctoSiesa,
@@ -819,7 +823,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     "ID_LLAVE_IMPUESTO": (imp.ID_LLAVE_IMPUESTO || '').trim(),
                     "PORCENTAJE_BASE": formatTasa(imp.PORCENTAJE_BASE), 
                     "TASA": formatTasa(imp.TASA),
-                    "VLR_UNI": formatDecimal(unitarioImp),
+                    "VLR_UNI": formatDecimal(vlrUniFinal),
                     "VALOR_TOTAL": formatDecimal(totalImp) 
                 });
             });
