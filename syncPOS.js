@@ -1,6 +1,15 @@
 require('dotenv').config();
 const axios = require('axios');
 
+// ──────────────────────────────────────────────────────────
+// ENTORNO: PROD (default) vs QA
+// Connekta (lectura datos POS) → siempre PROD
+// Siesa (escritura) → switchea según ENT
+// ──────────────────────────────────────────────────────────
+const ENTORNO = (process.env.ENTORNO_SIESA || 'PROD').toUpperCase();
+const SIESA_DOMAIN = ENTORNO === 'QA' ? 'serviciosqa.siesacloud.com' : 'servicios.siesacloud.com';
+const CONNEKTA_DOMAIN = 'servicios.siesacloud.com';
+
 // Función para formatear fecha de "2023-10-13T00:00:00" a "20231013"
 function formatearFechaSiesa(fechaISO) {
     if (!fechaISO) return "";
@@ -51,7 +60,7 @@ function limpiarNombres(nombres, apellido1, apellido2) {
 // en una sola página (tamPag), así que paginamos. Si se pasan nitsRequeridos, corta apenas
 // los encuentra a todos (eficiente: no recorre toda la maestra si no hace falta).
 async function fetchClientesPOS(nitsRequeridos = null) {
-    const BASE = 'https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=7375&descripcion=merkahorro_Cliente_pos_dev';
+    const BASE = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=7375&descripcion=merkahorro_Cliente_pos_dev`;
     const TAM = 1000;       // máximo que acepta Connekta
     const MAX_PAGINAS = 500; // tope de seguridad (~500k clientes)
     const pendientes = (nitsRequeridos && nitsRequeridos.length > 0)
@@ -231,11 +240,10 @@ async function probarSincronizacion(nitsRequeridos = null) {
         // Se omite respaldo local (ahora todo se persiste en Supabase via logger.js)
 
         console.log('\n----------------------------------------------------');
-        console.log('3. Haciendo el POST MASIVO a Siesa PROD...');
+        console.log(`3. Haciendo el POST MASIVO a Siesa ${ENTORNO}...`);
         console.log('----------------------------------------------------');
 
-        const urlSiesa = 'https://servicios.siesacloud.com/api/siesa/v3.1/conectoresimportar?idCompania=7375&idSistema=1&idDocumento=242590&nombreDocumento=TERCEROS_DEV_POS';
-        // QA: serviciosqa.siesacloud.com
+        const urlSiesa = `https://${SIESA_DOMAIN}/api/siesa/v3.1/conectoresimportar?idCompania=7375&idSistema=1&idDocumento=242590&nombreDocumento=TERCEROS_DEV_POS`;
         
         const responsePost = await axios.post(urlSiesa, payloadSiesa, {
             headers: {
@@ -245,7 +253,7 @@ async function probarSincronizacion(nitsRequeridos = null) {
             }
         });
 
-        console.log('\n✅ ¡Respuesta exitosa masiva de Siesa PROD!');
+        console.log(`\n✅ ¡Respuesta exitosa masiva de Siesa ${ENTORNO}!`);
         console.log(responsePost.data);
         return {
             success: true,

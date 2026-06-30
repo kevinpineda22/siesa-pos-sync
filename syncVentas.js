@@ -5,28 +5,40 @@ require('dotenv').config();
 
 const CIA = process.env.CIA || '7375';
 
-// URLs de Connekta
-const URL_VENTAS_DETALLE = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_venta_pos_dev`;
-const URL_VENTAS_PAGOS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_pagos_pos_dev`;
-const URL_VENTAS_IMPUESTOS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_imptos_pos_dev`;
-const URL_CAJAS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_cajas_pos_dev`;
-const URL_CONSULTA_INVENTARIO_BASE = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_consulta_inventario`;
-// QA: serviciosqa.siesacloud.com
+// ──────────────────────────────────────────────────────────
+// ENTORNO: PROD (default) vs QA
+//   PROD → servicios.siesacloud.com
+//   QA   → serviciosqa.siesacloud.com
+//
+// Connekta (lectura de datos POS) SIEMPRE apunta a PRODUCCIÓN
+// porque los datos reales de ventas están ahí. Solo las URLs
+// de escritura a Siesa se switchean según el entorno.
+// ──────────────────────────────────────────────────────────
+const ENTORNO = (process.env.ENTORNO_SIESA || 'PROD').toUpperCase();
+const SIESA_DOMAIN = ENTORNO === 'QA' ? 'serviciosqa.siesacloud.com' : 'servicios.siesacloud.com';
+const CONNEKTA_DOMAIN = 'servicios.siesacloud.com'; // siempre PROD para lectura POS
+
+console.log(`🌍 ENTORNO_SIESA=${ENTORNO} | Connekta=${CONNEKTA_DOMAIN} | Siesa=${SIESA_DOMAIN}`);
+
+// URLs de Connekta (lectura — siempre PROD)
+const URL_VENTAS_DETALLE = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_venta_pos_dev`;
+const URL_VENTAS_PAGOS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_pagos_pos_dev`;
+const URL_VENTAS_IMPUESTOS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_imptos_pos_dev`;
+const URL_CAJAS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_cajas_pos_dev`;
+const URL_CONSULTA_INVENTARIO_BASE = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_consulta_inventario`;
 // OJO: el costo promedio se lee de PRODUCCIÓN (servicios, no serviciosqa) a propósito: solo se
 // CONSULTA (GET, no escribe nada) para tener el costo real.
-const URL_COSTO_PROMEDIO_BASE = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_costo_promedio_dev`;
+const URL_COSTO_PROMEDIO_BASE = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_costo_promedio_dev`;
 const INVENTARIO_TAM_PAGINA = parseInt(process.env.INVENTARIO_TAM_PAGINA || '1000');
 const INVENTARIO_MAX_PAGINAS = parseInt(process.env.INVENTARIO_MAX_PAGINAS || '100');
 
-const URL_VENTAS_STATS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=${process.env.QUERY_STATS || 'merkahorro_venta_pos_stats_dev'}`;
+const URL_VENTAS_STATS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=${process.env.QUERY_STATS || 'merkahorro_venta_pos_stats_dev'}`;
 
-// URL de Siesa PROD (POST) - Documento 242756 (FACTURA_DEV)
-const URL_SIESA_POST = `https://servicios.siesacloud.com/api/siesa/v3.1/conectoresimportar?idCompania=${CIA}&idSistema=1&idDocumento=242756&nombreDocumento=FACTURA_DEV`;
-// QA: serviciosqa.siesacloud.com
-
-// URL de Siesa PROD (POST) - Documento 241913 (AJUSTE_INVENTARIO_DEV)
-const URL_AJUSTE_INVENTARIO = `https://servicios.siesacloud.com/api/siesa/v3.1/conectoresimportar?idCompania=${CIA}&idSistema=1&idDocumento=241913&nombreDocumento=AJUSTE_INVENTARIO_DEV`;
-// QA: serviciosqa.siesacloud.com
+// URLs de Siesa (escritura — switchean según ENTORNO)
+// Documento 242756 (FACTURA_DEV)
+const URL_SIESA_POST = `https://${SIESA_DOMAIN}/api/siesa/v3.1/conectoresimportar?idCompania=${CIA}&idSistema=1&idDocumento=242756&nombreDocumento=FACTURA_DEV`;
+// Documento 241913 (AJUSTE_INVENTARIO_DEV)
+const URL_AJUSTE_INVENTARIO = `https://${SIESA_DOMAIN}/api/siesa/v3.1/conectoresimportar?idCompania=${CIA}&idSistema=1&idDocumento=241913&nombreDocumento=AJUSTE_INVENTARIO_DEV`;
 
 async function fetchFromConnekta(url) {
     try {
@@ -552,9 +564,9 @@ function normalizarUM(um) {
 }
 
 // Convierte un string "001,002" en array ["001","002"].
-// Prioridad: 1) valor explícito, 2) variable de entorno, 3) array vacío (sin filtro).
-function parseFilterParam(val, envKey) {
-    const raw = (val !== null && val !== undefined) ? String(val) : (process.env[envKey] || '');
+// Prioridad: 1) valor explícito, 2) variable de entorno, 3) fallback hardcodeado, 4) array vacío.
+function parseFilterParam(val, envKey, fallback = '') {
+    const raw = (val !== null && val !== undefined) ? String(val) : (process.env[envKey] || fallback);
     return raw.split(',').map(s => s.trim()).filter(Boolean);
 }
 
@@ -580,9 +592,9 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         console.log('🎯 Modo consec específico: se IGNORAN los filtros CO/Caja/hoy (el consec se busca en su propio CO/Caja).');
     } else {
         // CO: normalizamos AMBOS lados a 3 dígitos (ej. "1" → "001") para evitar fallos por padding.
-        const coList = parseFilterParam(filtros.co, 'CO_FILTER').map(c => c.padStart(3, '0'));
+        const coList = parseFilterParam(filtros.co, 'CO_FILTER', '001').map(c => c.padStart(3, '0'));
         // Caja: normalizamos a MAYÚSCULAS en ambos lados (ej. "p05" → "P05").
-        const cajaList = parseFilterParam(filtros.caja, 'CAJA_FILTER').map(c => c.toUpperCase());
+        const cajaList = parseFilterParam(filtros.caja, 'CAJA_FILTER', 'Z01,Z02').map(c => c.toUpperCase());
         if (coList.length > 0) {
             detalles = detalles.filter(d => coList.includes((d.CoDoc ?? '').toString().trim().padStart(3, '0')));
             console.log(`🔍 Filtrando por CO: ${coList.join(', ')} → ${detalles.length} registros de facturas`);
@@ -791,6 +803,14 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             // CRUCE DE IMPUESTOS POR ROWIDMVTO
             const imptosItem = impuestosPorRowid[det.RowidMvto] || [];
             imptosItem.forEach(imp => {
+                // VALOR_TOTAL viene de Connekta (o se calcula como VLR_UNI × cant si falta).
+                // VLR_UNI se deriva SIEMPRE de VALOR_TOTAL / cantidad para garantizar que sea
+                // el valor unitario REAL. Connekta a veces devuelve el total en VLR_UNI (ej. ICO),
+                // así que no podemos confiar en imp.VLR_UNI directo.
+                const totalImp = absIfCNZ(imp.VALOR_TOTAL) || (Number(imp.VLR_UNI || 0) * Number(cant || 0));
+                const unitarioImp = Number(cant || 0) > 0
+                    ? absIfCNZ(totalImp) / Number(cant)
+                    : 0;
                 Impuestos.push({
                     "ID_CO": enc.CoDoc,
                     "TIPO_DOCTO": tipoDoctoSiesa,
@@ -799,8 +819,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     "ID_LLAVE_IMPUESTO": (imp.ID_LLAVE_IMPUESTO || '').trim(),
                     "PORCENTAJE_BASE": formatTasa(imp.PORCENTAJE_BASE), 
                     "TASA": formatTasa(imp.TASA),
-                    "VLR_UNI": formatDecimal(imp.VLR_UNI != null ? imp.VLR_UNI : 0),
-                    "VALOR_TOTAL": formatDecimal(absIfCNZ(imp.VALOR_TOTAL) || (Number(imp.VLR_UNI || 0) * Number(cant || 0))) 
+                    "VLR_UNI": formatDecimal(unitarioImp),
+                    "VALOR_TOTAL": formatDecimal(totalImp) 
                 });
             });
 
@@ -1360,20 +1380,12 @@ module.exports = { syncVentas: async (opciones = {}) => {
 
     // Orden de ejecución: en AMBOS entornos se procesa primero la Nota Crédito (CNZ,
     // simulación / paso 1) y luego la Factura real (CFZ, paso 3).
-    const entornoSiesa = (process.env.ENTORNO_SIESA || 'QA').toUpperCase();
-    
+    console.log(`🌍 Entorno: ${ENTORNO} (Siesa: ${SIESA_DOMAIN}, Connekta: ${CONNEKTA_DOMAIN})`);
+    console.log(`   Ejecutando primero Notas Crédito (CNZ) y luego Facturas (CFZ)...`);
     let resCFZ = [];
     let resCNZ = [];
-    
-    if (entornoSiesa === 'PROD') {
-        console.log("🌍 Entorno: PROD -> Ejecutando primero Notas Crédito (CNZ) y luego Facturas (CFZ)");
-        resCNZ = (await ejecutarPaso(1, consecsOverride, filtrosCOCaja)) || []; // CNZ - Notas crédito
-        resCFZ = (await ejecutarPaso(3, consecsOverride, filtrosCOCaja)) || []; // CFZ - Facturas de venta
-    } else {
-        console.log("🌍 Entorno: QA -> Ejecutando primero Notas Crédito (CNZ) y luego Facturas (CFZ)");
-        resCNZ = (await ejecutarPaso(1, consecsOverride, filtrosCOCaja)) || []; // CNZ - Notas crédito
-        resCFZ = (await ejecutarPaso(3, consecsOverride, filtrosCOCaja)) || []; // CFZ - Facturas de venta
-    }
+    resCNZ = (await ejecutarPaso(1, consecsOverride, filtrosCOCaja)) || []; // CNZ - Notas crédito
+    resCFZ = (await ejecutarPaso(3, consecsOverride, filtrosCOCaja)) || []; // CFZ - Facturas de venta
 
     // Orden del resumen = orden de ejecución (CNZ primero, luego CFZ) en ambos entornos.
     const todos = [...resCNZ, ...resCFZ];
