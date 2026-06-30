@@ -811,10 +811,14 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 const unitarioImp = Number(cant || 0) > 0
                     ? absIfCNZ(totalImp) / Number(cant)
                     : 0;
-                // Si TASA=0, Siesa rechaza con "No pueden venir asignados valores en la tasa,
-                // porcentaje base y en el valor unitario del impuesto". Para tasa 0% el valor
-                // unitario es 0 por definición — se manda a 0 y se deja solo VALOR_TOTAL.
-                const vlrUniFinal = parseFloat(imp.TASA || 0) === 0 ? 0 : unitarioImp;
+                // Regla del documento FACTURA_DEV:
+                //   TASA > 0 → VLR_UNI debe ser 0 (el impuesto se calcula como %)
+                //   VLR_UNI > 0 → TASA debe ser 0 (el impuesto es valor fijo)
+                // Siesa tolera VLR_UNI>0 con TASA>0 cuando solo hay IVA, pero
+                // si aparece ICO (TASA=0, VLR_UNI>0) en la misma factura, activa
+                // la validación estricta y rechaza las líneas de IVA.
+                const tasaNum = parseFloat(imp.TASA || 0);
+                const vlrUniFinal = tasaNum > 0 ? 0 : unitarioImp;
                 Impuestos.push({
                     "ID_CO": enc.CoDoc,
                     "TIPO_DOCTO": tipoDoctoSiesa,
