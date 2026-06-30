@@ -74,7 +74,7 @@ async function obtenerConsecsExitosos() {
     const { data, error } = await supabase
         .from('sps_facturas')
         .select('tipo, consec, co, caja')
-        .in('estado', ['OK', 'ICO']);
+        .in('estado', ['OK']);
 
     if (error) {
         console.error('⚠️ Error leyendo consecs exitosos de Supabase:', error.message);
