@@ -146,7 +146,8 @@ async function probarSincronizacion(nitsRequeridos = null) {
         
         const payloadSiesa = {
             "Terceros": [],
-            "Clientes": []
+            "Clientes": [],
+            "Imptos y Reten": []
         };
 
         // Recorremos los 5 clientes y los metemos en los arrays
@@ -206,7 +207,6 @@ async function probarSincronizacion(nitsRequeridos = null) {
 
             payloadSiesa.Clientes.push({
                 "ID_TERCERO": truncar(cliente.NIT, 20),
-                "ID_SUCURSAL": "001",
                 "IND_ESTADO_ACTIVO": 1,
                 "RAZON_SOCIAL": truncar(cliente.RAZON_SOCIAL, 40),
                 "ID_MONEDA": "COP",
@@ -233,9 +233,23 @@ async function probarSincronizacion(nitsRequeridos = null) {
                 "FRECUENCIA_ENTREGA": "1111111",
                 "VALIDA_CUPO_DESPACHO": 0
             });
+
+            // Agregar configuración de impuestos/retenciones (IVA e ICO) para cada cliente
+            payloadSiesa["Imptos y Reten"].push({
+                "ID_TERCERO": truncar(cliente.NIT, 20),
+                "ID_SUCURSAL": "001",
+                "ID_CLASE": "1",
+                "ID_VALOR_TERCERO": "1"
+            });
+            payloadSiesa["Imptos y Reten"].push({
+                "ID_TERCERO": truncar(cliente.NIT, 20),
+                "ID_SUCURSAL": "001",
+                "ID_CLASE": "1",
+                "ID_VALOR_TERCERO": "1"
+            });
         }
 
-        console.log(`Se armaron ${payloadSiesa.Terceros.length} Terceros y ${payloadSiesa.Clientes.length} Clientes.`);
+        console.log(`Se armaron ${payloadSiesa.Terceros.length} Terceros, ${payloadSiesa.Clientes.length} Clientes y ${payloadSiesa["Imptos y Reten"].length} Imptos y Reten.`);
 
         // Se omite respaldo local (ahora todo se persiste en Supabase via logger.js)
 
@@ -243,7 +257,7 @@ async function probarSincronizacion(nitsRequeridos = null) {
         console.log(`3. Haciendo el POST MASIVO a Siesa ${ENTORNO}...`);
         console.log('----------------------------------------------------');
 
-        const urlSiesa = `https://${SIESA_DOMAIN}/api/siesa/v3.1/conectoresimportar?idCompania=7375&idSistema=1&idDocumento=242590&nombreDocumento=TERCEROS_DEV_POS`;
+        const urlSiesa = `https://${SIESA_DOMAIN}/api/siesa/v3.1/conectoresimportar?idCompania=7375&idSistema=1&idDocumento=248059&nombreDocumento=TERCERO_POS_CLIENTES_DEV`;
         
         const responsePost = await axios.post(urlSiesa, payloadSiesa, {
             headers: {
