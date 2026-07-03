@@ -837,7 +837,9 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
             totalImpuestos: Math.round(totalImpuestos),
             totalFacturas: facturas.length + offlineFacturas,
             totalDocumentos: (data || []).length + offlineFacturas,
-            porLlave: Object.values(porLlave).sort((a, b) => b.valorTotal - a.valorTotal)
+            porLlave: Object.values(porLlave)
+                .filter(p => p.llave !== 'GEN_OFFLINE')
+                .sort((a, b) => b.valorTotal - a.valorTotal)
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
