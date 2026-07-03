@@ -768,7 +768,6 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
 
         // --- Sumar datos offline de sps_impuestos_offline (junio histórico) ---
         let offlineBase = 0;
-        let offlineImpuestos = 0;
         let offlineFacturas = 0;
         try {
             const { data: offline } = await logger.supabase
@@ -780,10 +779,12 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
             if (offline && offline.length > 0) {
                 offline.forEach(o => {
                     offlineBase += parseFloat(o.total_base) || 0;
-                    offlineImpuestos += parseFloat(o.total_impuestos) || 0;
                     offlineFacturas += o.total_facturas || 0;
 
-                    // Fusionar desglose por llave si existe
+                    const totalImp = parseFloat(o.total_impuestos) || 0;
+                    let desglosado = 0;
+
+                    // Fusionar desglose por llave (solo reales)
                     if (o.por_llave && typeof o.por_llave === 'object') {
                         Object.entries(o.por_llave).forEach(([llave, datos]) => {
                             if (!porLlave[llave]) {
@@ -798,7 +799,25 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
                             porLlave[llave].valorTotal += parseFloat(datos.valorTotal) || 0;
                             porLlave[llave].baseGravable += parseFloat(datos.baseGravable) || 0;
                             porLlave[llave].count += datos.count || 0;
+                            desglosado += parseFloat(datos.valorTotal) || 0;
                         });
+                    }
+
+                    // Lo que no está desglosado (genéricos) va como entrada aparte
+                    const noDesglosado = totalImp - desglosado;
+                    if (noDesglosado > 0) {
+                        const LLAVE_GEN = 'GEN_OFFLINE';
+                        if (!porLlave[LLAVE_GEN]) {
+                            porLlave[LLAVE_GEN] = {
+                                llave: LLAVE_GEN,
+                                descripcion: 'Genéricos (offline)',
+                                valorTotal: 0,
+                                baseGravable: 0,
+                                count: 0
+                            };
+                        }
+                        porLlave[LLAVE_GEN].valorTotal += noDesglosado;
+                        porLlave[LLAVE_GEN].count += o.total_facturas || 0;
                     }
                 });
             }
@@ -815,7 +834,7 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
             success: true,
             totalBase: Math.round(totalBase + offlineBase),
             totalBaseGravable: Math.round(totalBaseGravable + offlineBase),
-            totalImpuestos: Math.round(totalImpuestos + offlineImpuestos),
+            totalImpuestos: Math.round(totalImpuestos),
             totalFacturas: facturas.length + offlineFacturas,
             totalDocumentos: (data || []).length + offlineFacturas,
             porLlave: Object.values(porLlave).sort((a, b) => b.valorTotal - a.valorTotal)
