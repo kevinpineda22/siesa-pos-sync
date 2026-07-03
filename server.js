@@ -827,8 +827,9 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
         }
         // ----------------------------------------------------------------
 
-        const totalImpuestos = Object.values(porLlave).reduce((s, v) => s + v.valorTotal, 0);
-        const totalBaseGravable = Object.values(porLlave).reduce((s, v) => s + v.baseGravable, 0);
+        const excluirGen = p => p.llave !== 'GEN_OFFLINE';
+        const totalImpuestos = Object.values(porLlave).filter(excluirGen).reduce((s, v) => s + v.valorTotal, 0);
+        const totalBaseGravable = Object.values(porLlave).filter(excluirGen).reduce((s, v) => s + v.baseGravable, 0);
 
         res.status(200).json({
             success: true,
