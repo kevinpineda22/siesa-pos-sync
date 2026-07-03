@@ -707,29 +707,9 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
         const fechaInicio = req.query.fechaInicio || req.query.fecha || hoy;
         const fechaFin = req.query.fechaFin || req.query.fecha || hoy;
 
-        const { data, error } = await logger.supabase
-            .from('sps_facturas')
-            .select('co, caja, consec, estado, neto, impuestos, fecha_factura')
-            .not('impuestos', 'is', null)
-            .gte('fecha_factura', fechaInicio)
-            .lte('fecha_factura', fechaFin);
+        // Junio 2026 se sirve EXCLUSIVAMENTE desde sps_impuestos_offline
+        const esSoloJunio = fechaInicio >= '2026-06-01' && fechaFin <= '2026-06-30';
 
-        if (error) throw error;
-
-        // Deduplicar igual que el frontend: CNZ+CFZ del mismo consec = 1 factura
-        // Se queda con el estado de mayor prioridad (FALLO > SIN_RECAUDO > OK)
-        const PRIORIDAD = { 'FALLO': 3, 'SIN_RECAUDO': 2, 'OK': 1 };
-        const unicos = new Map();
-        (data || []).forEach(f => {
-            const key = `${f.co || ''}:${f.caja || ''}:${f.consec}`;
-            const prev = unicos.get(key);
-            if (!prev || (PRIORIDAD[f.estado] || 0) > (PRIORIDAD[prev.estado] || 0)) {
-                unicos.set(key, f);
-            }
-        });
-        const facturas = [...unicos.values()];
-
-        // Mapas de descripciones de llaves de impuesto
         const DESCRIPCIONES = {
             'IV02': 'IVA 5% BIENES',
             'IV03': 'IVA 19% BIENES',
@@ -741,50 +721,102 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
             'ICO': 'IMPUESTO AL CONSUMO'
         };
 
-        // Procesar en memoria: agregar por ID_LLAVE_IMPUESTO
         const porLlave = {};
         let totalBase = 0;
+        let totalFacturas = 0;
+        let totalDocumentos = 0;
 
-        facturas.forEach(f => {
-            const neto = parseFloat(f.neto) || 0;
-            totalBase += neto;
-
-            (f.impuestos || []).forEach(imp => {
-                const llave = imp.ID_LLAVE_IMPUESTO || 'OTROS';
-                if (!porLlave[llave]) {
-                    porLlave[llave] = {
-                        llave,
-                        descripcion: DESCRIPCIONES[llave] || llave,
-                        valorTotal: 0,
-                        baseGravable: 0,
-                        count: 0
-                    };
-                }
-                porLlave[llave].valorTotal += parseFloat(imp.VALOR_TOTAL) || 0;
-                porLlave[llave].baseGravable += parseFloat(imp.BASE_GRAVABLE) || 0;
-                porLlave[llave].count++;
-            });
-        });
-
-        // --- Sumar datos offline de sps_impuestos_offline (junio histórico) ---
-        let offlineBase = 0;
-        let offlineFacturas = 0;
-        try {
-            const { data: offline } = await logger.supabase
+        if (esSoloJunio) {
+            // --- MODO JUNIO: solo sps_impuestos_offline ---
+            const { data: offline, error } = await logger.supabase
                 .from('sps_impuestos_offline')
                 .select('total_base, total_impuestos, total_facturas, por_llave')
                 .gte('fecha', fechaInicio)
                 .lte('fecha', fechaFin);
 
-            if (offline && offline.length > 0) {
-                offline.forEach(o => {
-                    offlineBase += parseFloat(o.total_base) || 0;
-                    offlineFacturas += o.total_facturas || 0;
+            if (error) throw error;
 
-                    const totalImp = parseFloat(o.total_impuestos) || 0;
-                    let desglosado = 0;
+            (offline || []).forEach(o => {
+                totalBase += parseFloat(o.total_base) || 0;
+                totalFacturas += o.total_facturas || 0;
 
-                    // Fusionar desglose por llave (solo reales)
+                if (o.por_llave && typeof o.por_llave === 'object') {
+                    Object.entries(o.por_llave).forEach(([llave, datos]) => {
+                        if (!porLlave[llave]) {
+                            porLlave[llave] = {
+                                llave,
+                                descripcion: DESCRIPCIONES[llave] || llave,
+                                valorTotal: 0,
+                                baseGravable: 0,
+                                count: 0
+                            };
+                        }
+                        porLlave[llave].valorTotal += parseFloat(datos.valorTotal) || 0;
+                        porLlave[llave].baseGravable += parseFloat(datos.baseGravable) || 0;
+                        porLlave[llave].count += datos.count || 0;
+                    });
+                }
+            });
+
+            totalDocumentos = totalFacturas;
+        } else {
+            // --- MODO NORMAL: sps_facturas + offline como complemento ---
+            const { data, error } = await logger.supabase
+                .from('sps_facturas')
+                .select('co, caja, consec, estado, neto, impuestos, fecha_factura')
+                .not('impuestos', 'is', null)
+                .gte('fecha_factura', fechaInicio)
+                .lte('fecha_factura', fechaFin);
+
+            if (error) throw error;
+
+            // Deduplicar
+            const PRIORIDAD = { 'FALLO': 3, 'SIN_RECAUDO': 2, 'OK': 1 };
+            const unicos = new Map();
+            (data || []).forEach(f => {
+                const key = `${f.co || ''}:${f.caja || ''}:${f.consec}`;
+                const prev = unicos.get(key);
+                if (!prev || (PRIORIDAD[f.estado] || 0) > (PRIORIDAD[prev.estado] || 0)) {
+                    unicos.set(key, f);
+                }
+            });
+            const facturas = [...unicos.values()];
+
+            facturas.forEach(f => {
+                totalBase += parseFloat(f.neto) || 0;
+                (f.impuestos || []).forEach(imp => {
+                    const llave = imp.ID_LLAVE_IMPUESTO || 'OTROS';
+                    if (!porLlave[llave]) {
+                        porLlave[llave] = {
+                            llave,
+                            descripcion: DESCRIPCIONES[llave] || llave,
+                            valorTotal: 0,
+                            baseGravable: 0,
+                            count: 0
+                        };
+                    }
+                    porLlave[llave].valorTotal += parseFloat(imp.VALOR_TOTAL) || 0;
+                    porLlave[llave].baseGravable += parseFloat(imp.BASE_GRAVABLE) || 0;
+                    porLlave[llave].count++;
+                });
+            });
+
+            totalFacturas = facturas.length;
+            totalDocumentos = (data || []).length;
+
+            // Complemento offline para meses anteriores (ej. junio en consultas cross-month)
+            try {
+                const { data: offline } = await logger.supabase
+                    .from('sps_impuestos_offline')
+                    .select('total_base, total_impuestos, total_facturas, por_llave')
+                    .gte('fecha', fechaInicio)
+                    .lte('fecha', fechaFin);
+
+                (offline || []).forEach(o => {
+                    totalBase += parseFloat(o.total_base) || 0;
+                    totalFacturas += o.total_facturas || 0;
+                    totalDocumentos += o.total_facturas || 0;
+
                     if (o.por_llave && typeof o.por_llave === 'object') {
                         Object.entries(o.por_llave).forEach(([llave, datos]) => {
                             if (!porLlave[llave]) {
@@ -799,48 +831,25 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
                             porLlave[llave].valorTotal += parseFloat(datos.valorTotal) || 0;
                             porLlave[llave].baseGravable += parseFloat(datos.baseGravable) || 0;
                             porLlave[llave].count += datos.count || 0;
-                            desglosado += parseFloat(datos.valorTotal) || 0;
                         });
                     }
-
-                    // Lo que no está desglosado (genéricos) va como entrada aparte
-                    const noDesglosado = totalImp - desglosado;
-                    if (noDesglosado > 0) {
-                        const LLAVE_GEN = 'GEN_OFFLINE';
-                        if (!porLlave[LLAVE_GEN]) {
-                            porLlave[LLAVE_GEN] = {
-                                llave: LLAVE_GEN,
-                                descripcion: 'Genéricos (offline)',
-                                valorTotal: 0,
-                                baseGravable: 0,
-                                count: 0
-                            };
-                        }
-                        porLlave[LLAVE_GEN].valorTotal += noDesglosado;
-                        porLlave[LLAVE_GEN].count += o.total_facturas || 0;
-                    }
                 });
+            } catch (e) {
+                console.warn('⚠️ Error consultando sps_impuestos_offline:', e.message);
             }
-        } catch (e) {
-            console.warn('⚠️ Error consultando sps_impuestos_offline:', e.message);
-            // No es crítico, seguir sin datos offline
         }
-        // ----------------------------------------------------------------
 
-        const excluirGen = p => p.llave !== 'GEN_OFFLINE';
-        const totalImpuestos = Object.values(porLlave).filter(excluirGen).reduce((s, v) => s + v.valorTotal, 0);
-        const totalBaseGravable = Object.values(porLlave).filter(excluirGen).reduce((s, v) => s + v.baseGravable, 0);
+        const totalImpuestos = Object.values(porLlave).reduce((s, v) => s + v.valorTotal, 0);
+        const totalBaseGravable = Object.values(porLlave).reduce((s, v) => s + v.baseGravable, 0);
 
         res.status(200).json({
             success: true,
-            totalBase: Math.round(totalBase + offlineBase),
-            totalBaseGravable: Math.round(totalBaseGravable + offlineBase),
+            totalBase: Math.round(totalBase),
+            totalBaseGravable: Math.round(totalBaseGravable),
             totalImpuestos: Math.round(totalImpuestos),
-            totalFacturas: facturas.length + offlineFacturas,
-            totalDocumentos: (data || []).length + offlineFacturas,
-            porLlave: Object.values(porLlave)
-                .filter(p => p.llave !== 'GEN_OFFLINE')
-                .sort((a, b) => b.valorTotal - a.valorTotal)
+            totalFacturas,
+            totalDocumentos,
+            porLlave: Object.values(porLlave).sort((a, b) => b.valorTotal - a.valorTotal)
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
