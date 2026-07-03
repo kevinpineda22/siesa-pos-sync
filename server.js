@@ -760,7 +760,7 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
 
             totalDocumentos = totalFacturas;
         } else {
-            // --- MODO NORMAL: sps_facturas + offline como complemento ---
+            // --- MODO NORMAL: solo sps_facturas ---
             const { data, error } = await logger.supabase
                 .from('sps_facturas')
                 .select('co, caja, consec, estado, neto, impuestos, fecha_factura')
@@ -803,40 +803,6 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
 
             totalFacturas = facturas.length;
             totalDocumentos = (data || []).length;
-
-            // Complemento offline para meses anteriores (ej. junio en consultas cross-month)
-            try {
-                const { data: offline } = await logger.supabase
-                    .from('sps_impuestos_offline')
-                    .select('total_base, total_impuestos, total_facturas, por_llave')
-                    .gte('fecha', fechaInicio)
-                    .lte('fecha', fechaFin);
-
-                (offline || []).forEach(o => {
-                    totalBase += parseFloat(o.total_base) || 0;
-                    totalFacturas += o.total_facturas || 0;
-                    totalDocumentos += o.total_facturas || 0;
-
-                    if (o.por_llave && typeof o.por_llave === 'object') {
-                        Object.entries(o.por_llave).forEach(([llave, datos]) => {
-                            if (!porLlave[llave]) {
-                                porLlave[llave] = {
-                                    llave,
-                                    descripcion: DESCRIPCIONES[llave] || llave,
-                                    valorTotal: 0,
-                                    baseGravable: 0,
-                                    count: 0
-                                };
-                            }
-                            porLlave[llave].valorTotal += parseFloat(datos.valorTotal) || 0;
-                            porLlave[llave].baseGravable += parseFloat(datos.baseGravable) || 0;
-                            porLlave[llave].count += datos.count || 0;
-                        });
-                    }
-                });
-            } catch (e) {
-                console.warn('⚠️ Error consultando sps_impuestos_offline:', e.message);
-            }
         }
 
         const totalImpuestos = Object.values(porLlave).reduce((s, v) => s + v.valorTotal, 0);
