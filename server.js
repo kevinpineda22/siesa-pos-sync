@@ -766,16 +766,58 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
             });
         });
 
+        // --- Sumar datos offline de sps_impuestos_offline (junio histórico) ---
+        let offlineBase = 0;
+        let offlineImpuestos = 0;
+        let offlineFacturas = 0;
+        try {
+            const { data: offline } = await logger.supabase
+                .from('sps_impuestos_offline')
+                .select('total_base, total_impuestos, total_facturas, por_llave')
+                .gte('fecha', fechaInicio)
+                .lte('fecha', fechaFin);
+
+            if (offline && offline.length > 0) {
+                offline.forEach(o => {
+                    offlineBase += parseFloat(o.total_base) || 0;
+                    offlineImpuestos += parseFloat(o.total_impuestos) || 0;
+                    offlineFacturas += o.total_facturas || 0;
+
+                    // Fusionar desglose por llave si existe
+                    if (o.por_llave && typeof o.por_llave === 'object') {
+                        Object.entries(o.por_llave).forEach(([llave, datos]) => {
+                            if (!porLlave[llave]) {
+                                porLlave[llave] = {
+                                    llave,
+                                    descripcion: DESCRIPCIONES[llave] || llave,
+                                    valorTotal: 0,
+                                    baseGravable: 0,
+                                    count: 0
+                                };
+                            }
+                            porLlave[llave].valorTotal += parseFloat(datos.valorTotal) || 0;
+                            porLlave[llave].baseGravable += parseFloat(datos.baseGravable) || 0;
+                            porLlave[llave].count += datos.count || 0;
+                        });
+                    }
+                });
+            }
+        } catch (e) {
+            console.warn('⚠️ Error consultando sps_impuestos_offline:', e.message);
+            // No es crítico, seguir sin datos offline
+        }
+        // ----------------------------------------------------------------
+
         const totalImpuestos = Object.values(porLlave).reduce((s, v) => s + v.valorTotal, 0);
         const totalBaseGravable = Object.values(porLlave).reduce((s, v) => s + v.baseGravable, 0);
 
         res.status(200).json({
             success: true,
-            totalBase: Math.round(totalBase),
-            totalBaseGravable: Math.round(totalBaseGravable),
-            totalImpuestos: Math.round(totalImpuestos),
-            totalFacturas: facturas.length,
-            totalDocumentos: (data || []).length,
+            totalBase: Math.round(totalBase + offlineBase),
+            totalBaseGravable: Math.round(totalBaseGravable + offlineBase),
+            totalImpuestos: Math.round(totalImpuestos + offlineImpuestos),
+            totalFacturas: facturas.length + offlineFacturas,
+            totalDocumentos: (data || []).length + offlineFacturas,
             porLlave: Object.values(porLlave).sort((a, b) => b.valorTotal - a.valorTotal)
         });
     } catch (error) {
