@@ -244,7 +244,7 @@ async function probarSincronizacion(nitsRequeridos = null) {
             payloadSiesa["Imptos y Reten"].push({
                 "ID_TERCERO": truncar(cliente.NIT, 20),
                 "ID_SUCURSAL": "001",
-                "ID_CLASE": "2",
+                "ID_CLASE": "3",
                 "ID_VALOR_TERCERO": "1"
             });
         }

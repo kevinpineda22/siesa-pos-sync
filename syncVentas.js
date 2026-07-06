@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { syncPOS } = require('./syncPOS');
 const logger = require('./logger');
+const notifier = require('./notifier');
 require('dotenv').config();
 
 const CIA = process.env.CIA || '7375';
@@ -995,6 +996,19 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         const automatizaciones = [];
         const registrar = async (resultado) => {
             await logger.registrarResultado(resultado, { ...meta, automatizaciones });
+            // Notificar por correo si es un error final
+            if (!resultado.ok) {
+                notifier.sendErrorNotification({
+                    tipo: resultado.tipo,
+                    consecutivo: resultado.consecutivo,
+                    mensaje: resultado.mensaje,
+                    co: meta.co,
+                    caja: meta.caja,
+                    fecha: meta.fecha_factura,
+                    cliente_nit: meta.cliente_nit,
+                    neto: meta.neto,
+                }).catch(err => console.error(`⚠️ Error en notificación de error: ${err.message}`));
+            }
             // Incluir co/caja en el resultado para que el snapshot de corrida (sps_corridas)
             // y el Historial del frontend puedan mostrar de qué CO/Caja es cada CNZ/CFZ.
             return { ...resultado, co: meta.co, caja: meta.caja };
@@ -1125,6 +1139,15 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                         const itemsInyectados = await ajustarInventario(errores, detallesFactura, consecAjuste) || [];
                         if (itemsInyectados.length > 0) {
                             meta.cpeItems = [...(meta.cpeItems || []), ...itemsInyectados];
+                            // Notificar ajuste de inventario
+                            notifier.sendCpeNotification({
+                                tipo: tipoDoctoSiesa,
+                                consecutivo,
+                                items: itemsInyectados,
+                                co: meta.co,
+                                caja: meta.caja,
+                                fecha: meta.fecha_factura,
+                            }).catch(err => console.error(`⚠️ Error en notificación de CPE: ${err.message}`));
                         }
                         accionTomada = true;
                         fallosInyeccion = 0;

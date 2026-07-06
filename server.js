@@ -120,7 +120,7 @@ app.post('/api/sync-ventas', async (req, res) => {
  */
 app.get('/api/logs', async (req, res) => {
     try {
-        const { estado, tipo, categoria, consec, limit, solo_pendientes } = req.query;
+        const { estado, tipo, categoria, consec, limit, solo_pendientes, fecha_desde, fecha_hasta } = req.query;
 
         let query = logger.supabase.from('sps_facturas').select('*');
 
@@ -130,6 +130,8 @@ app.get('/api/logs', async (req, res) => {
         else if (estado) query = query.eq('estado', estado.toUpperCase());
         if (tipo) query = query.eq('tipo', tipo.toUpperCase());
         if (categoria) query = query.eq('categoria_error', categoria.toUpperCase());
+        if (fecha_desde) query = query.gte('fecha_factura', fecha_desde);
+        if (fecha_hasta) query = query.lte('fecha_factura', fecha_hasta);
 
         // Orden y limite
         const max = limit ? parseInt(limit, 10) : 200;
@@ -519,6 +521,35 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                 porCaja[c].neto += parseFloat(f.neto) || 0;
             });
             posData = { total_pos: totalPos, neto_total: netoSync, por_caja: porCaja, por_nit: porNitSync };
+        }
+
+        // 3b) Si hay filtro de caja activo, recalcular POS data para reflejar SOLO esa caja
+        if (filtroCaja) {
+            const cajaSel = posData.por_caja?.[filtroCaja];
+            if (cajaSel) {
+                // Recalcular total_pos y neto_total desde la caja seleccionada
+                posData.total_pos = cajaSel.transacciones || 0;
+                posData.neto_total = cajaSel.neto || 0;
+                posData.por_caja = { [filtroCaja]: cajaSel };
+                // Recalcular por_nit desde sps_facturas (filtrada por caja) como aproximación POS
+                const totalReal = porNitSync.real?.transacciones || 0;
+                const netoReal = porNitSync.real?.neto || 0;
+                const totalGen = porNitSync.generico?.transacciones || 0;
+                const netoGen = porNitSync.generico?.neto || 0;
+                posData.por_nit = {
+                    generico: { transacciones: totalGen, neto: netoGen, etiqueta: '2222222222' },
+                    real: { transacciones: totalReal, neto: netoReal, etiqueta: 'Clientes reales' }
+                };
+            } else {
+                // La caja no tiene datos en el rango → todo en cero
+                posData.total_pos = 0;
+                posData.neto_total = 0;
+                posData.por_caja = {};
+                posData.por_nit = {
+                    generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
+                    real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
+                };
+            }
         }
 
         res.status(200).json({
