@@ -919,6 +919,20 @@ app.get('/api/logs/resumen-ajustes', async (req, res) => {
     }
 });
 
+/**
+ * GET /api/diagnostico/env
+ * Diagnóstico: muestra estado de variables de entorno para notificaciones
+ */
+app.get('/api/diagnostico/env', (req, res) => {
+    res.json({
+        NOTIFY_ERROR_EMAILS: process.env.NOTIFY_ERROR_EMAILS ? '✅ configurado' : '❌ VACÍO',
+        NOTIFY_CPE_EMAILS: process.env.NOTIFY_CPE_EMAILS ? '✅ configurado' : '❌ VACÍO',
+        SMTP_HOST: process.env.SMTP_HOST ? '✅ ' + process.env.SMTP_HOST : '❌ VACÍO',
+        SMTP_USER: process.env.SMTP_USER ? '✅ ' + process.env.SMTP_USER.replace(/(.{3}).*(@.*)/, '$1***$2') : '❌ VACÍO',
+        VERCEL_ENV: process.env.VERCEL_ENV || '(no Vercel)',
+    });
+});
+
 // Iniciar el servidor (solo en local; en Vercel corre como serverless)
 if (!process.env.VERCEL) {
     app.listen(PORT, () => {
