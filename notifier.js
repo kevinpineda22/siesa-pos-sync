@@ -16,23 +16,30 @@ const transporter = nodemailer.createTransport({
 
 const SMTP_FROM = process.env.SMTP_FROM || 'notificacion@merkahorro.com';
 
-// Destinatarios para errores del flujo
-const NOTIFY_ERROR_EMAILS = (process.env.NOTIFY_ERROR_EMAILS || process.env.NOTIFY_EMAILS || '')
-    .split(',')
-    .map(e => e.trim())
-    .filter(Boolean);
+// ──────────────────────────────────────────────────────────
+// Las variables de entorno se leen EN CADA LLAMADA, no al cargar el módulo,
+// para evitar que Vercel las quede cacheadas con valores viejos.
+// ──────────────────────────────────────────────────────────
+function getNotifyErrorEmails() {
+    return (process.env.NOTIFY_ERROR_EMAILS || process.env.NOTIFY_EMAILS || '')
+        .split(',')
+        .map(e => e.trim())
+        .filter(Boolean);
+}
 
-// Destinatarios para ajustes de inventario (CPE)
-const NOTIFY_CPE_EMAILS = (process.env.NOTIFY_CPE_EMAILS || process.env.NOTIFY_EMAILS || '')
-    .split(',')
-    .map(e => e.trim())
-    .filter(Boolean);
+function getNotifyCpeEmails() {
+    return (process.env.NOTIFY_CPE_EMAILS || process.env.NOTIFY_EMAILS || '')
+        .split(',')
+        .map(e => e.trim())
+        .filter(Boolean);
+}
 
 // ──────────────────────────────────────────────────────────
 // Notificación de ERROR en factura del flujo
 // ──────────────────────────────────────────────────────────
 async function sendErrorNotification({ tipo, consecutivo, mensaje, co, caja, fecha, cliente_nit, neto }) {
-    if (NOTIFY_ERROR_EMAILS.length === 0) {
+    const emails = getNotifyErrorEmails();
+    if (emails.length === 0) {
         console.log('📧 NOTIFY_ERROR_EMAILS no configurado — se omite notificación de error.');
         return;
     }
@@ -82,11 +89,11 @@ async function sendErrorNotification({ tipo, consecutivo, mensaje, co, caja, fec
     try {
         const info = await transporter.sendMail({
             from: SMTP_FROM,
-            to: NOTIFY_ERROR_EMAILS.join(', '),
+            to: emails.join(', '),
             subject: `❌ [SiesaPOS] Error en ${tipo || 'factura'} ${consecutivo}`,
             html,
         });
-        console.log(`📧 Notificación de error enviada a ${NOTIFY_ERROR_EMAILS.join(', ')}: ${info.messageId}`);
+        console.log(`📧 Notificación de error enviada a ${emails.join(', ')}: ${info.messageId}`);
     } catch (err) {
         console.error(`⚠️ Error enviando notificación de error: ${err.message}`);
     }
@@ -96,7 +103,8 @@ async function sendErrorNotification({ tipo, consecutivo, mensaje, co, caja, fec
 // Notificación de AJUSTE DE INVENTARIO (CPE)
 // ──────────────────────────────────────────────────────────
 async function sendCpeNotification({ tipo, consecutivo, items, co, caja, fecha }) {
-    if (NOTIFY_CPE_EMAILS.length === 0) {
+    const emails = getNotifyCpeEmails();
+    if (emails.length === 0) {
         console.log('📧 NOTIFY_CPE_EMAILS no configurado — se omite notificación de CPE.');
         return;
     }
@@ -187,11 +195,11 @@ async function sendCpeNotification({ tipo, consecutivo, items, co, caja, fecha }
     try {
         const info = await transporter.sendMail({
             from: SMTP_FROM,
-            to: NOTIFY_CPE_EMAILS.join(', '),
+            to: emails.join(', '),
             subject: `📦 [SiesaPOS] Ajuste inventario en ${tipo || 'factura'} ${consecutivo} (${items.length} item(s))`,
             html,
         });
-        console.log(`📧 Notificación de CPE enviada a ${NOTIFY_CPE_EMAILS.join(', ')}: ${info.messageId}`);
+        console.log(`📧 Notificación de CPE enviada a ${emails.join(', ')}: ${info.messageId}`);
     } catch (err) {
         console.error(`⚠️ Error enviando notificación de CPE: ${err.message}`);
     }
