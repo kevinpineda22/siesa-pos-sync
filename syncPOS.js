@@ -86,8 +86,19 @@ async function fetchClientesPOS(nitsRequeridos = null) {
         if (!registros.length) break;
         todos.push(...registros);
         // Corte temprano: si ya aparecieron todos los NITs requeridos, no seguimos paginando.
+        // Algunos POS guardan el NIT con sufijo ("900200807-1") y otros sin él ("42683051").
+        // Para matchear, probamos: 1) NIT completo, 2) NIT base (sin último -N).
         if (pendientes) {
-            registros.forEach(c => pendientes.delete(String(c.NIT).trim()));
+            registros.forEach(c => {
+                const nitPos = String(c.NIT).trim();
+                // Buscar qué NIT requerido matchea (completo o base)
+                for (const req of pendientes) {
+                    if (nitPos === req || nitPos.replace(/-\d+$/, '') === req || req.replace(/-\d+$/, '') === nitPos) {
+                        pendientes.delete(req);
+                        break;
+                    }
+                }
+            });
             if (pendientes.size === 0) { console.log(`   📥 NIT(s) requerido(s) encontrado(s) en la página ${pagina}.`); break; }
         }
         if (registros.length < TAM) break; // última página
@@ -120,14 +131,26 @@ async function probarSincronizacion(nitsRequeridos = null) {
         console.log(`   📥 Clientes POS descargados (paginado): ${clientesDatos.length} registros en ${paginasTotales} página(s)`);
 
         // Si Siesa nos dijo qué NITs faltan, filtramos solo esos. Si no, mandamos todo el pool.
+        // El matching es flexible: probamos NIT completo y base (sin último -N).
         if (nitsRequeridos && nitsRequeridos.length > 0) {
             const setNits = new Set(nitsRequeridos.map(n => String(n).trim()));
             const antes = clientesDatos.length;
-            clientesDatos = clientesDatos.filter(c => setNits.has(String(c.NIT).trim()));
+            clientesDatos = clientesDatos.filter(c => {
+                const nitPos = String(c.NIT).trim();
+                return setNits.has(nitPos)
+                    || setNits.has(nitPos.replace(/-\d+$/, ''))
+                    || [...setNits].some(n => n.replace(/-\d+$/, '') === nitPos);
+            });
             console.log(`🔍 Filtrado por NITs requeridos: ${antes} → ${clientesDatos.length} cliente(s) a enviar.`);
 
+            // Determinar qué NITs requeridos NO se encontraron (flexible: probamos completo y base)
             const encontrados = new Set(clientesDatos.map(c => String(c.NIT).trim()));
-            const noEncontrados = [...setNits].filter(n => !encontrados.has(n));
+            const noEncontrados = [...setNits].filter(req => {
+                if (encontrados.has(req)) return false;
+                if (encontrados.has(req.replace(/-\d+$/, ''))) return false;
+                // Algun encontrado matchea el req?
+                return ![...encontrados].some(e => e.replace(/-\d+$/, '') === req);
+            });
             if (noEncontrados.length > 0) {
                 console.warn(`⚠️ ${noEncontrados.length} NIT(s) NO existen en la maestra POS y no se podrán crear en Siesa: ${noEncontrados.join(', ')}`);
             }

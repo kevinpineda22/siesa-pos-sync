@@ -1104,8 +1104,10 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
 
                 if (faltaCliente && !clientesSincronizados) {
                     console.log(`⚠️ [${tipoDoctoSiesa} ${consecutivo}] Cliente no existe en Siesa. Ejecutando syncPOS()...`);
-                    // Siesa devuelve el NIT en `f_valor` (ej. "42683051" o "42683051-001"); nos
-                    // quedamos con el NIT base (antes del guión). `f_detalle` solo trae el mensaje genérico.
+                    // Siesa devuelve el NIT en `f_valor` (ej. "42683051" o "900200807-1").
+                    // Algunos POS guardan el NIT con sufijo (900200807-1) y otros sin él (42683051).
+                    // Extraemos TANTEO: primero el valor completo, luego el base sin guión.
+                    // syncPOS se encarga de matchear cualquiera de los dos formatos.
                     const nitsFaltantes = [...new Set(
                         errores
                             .filter(e => e.f_detalle && (
@@ -1113,10 +1115,12 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                                 e.f_detalle.toLowerCase().includes('sucursal del cliente') ||
                                 e.f_detalle.toLowerCase().includes('sucursal de la')
                             ))
-                            .map(e => {
+                            .flatMap(e => {
                                 const raw = String(e.f_valor || '').trim();
-                                if (!raw) return null;
-                                return raw.split('-')[0].trim();
+                                if (!raw) return [];
+                                const base = raw.split('-')[0].trim();
+                                // Si el raw ya es igual al base, no duplicar
+                                return raw === base ? [base] : [raw, base];
                             })
                             .filter(Boolean)
                     )];
