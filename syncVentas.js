@@ -942,12 +942,20 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             console.log(`✅ Cuadre exacto [${tipoDoctoSiesa}] consec ${consecDoc}: Total ${totalSiesa} = Caja ${posCaja}.`);
         }
 
+        // Algunos medios de pago (DOM = domicilio) activan validación de CxC en Siesa que no
+        // manejamos. Los forzamos a EFE (efectivo) para que el documento pase sin CxC.
+        const MEDIOS_FORZAR_EFE = new Set(["DOM"]);
         Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0).forEach(pago => {
+            const idMedioOriginal = pago.ID_MEDIOS_PAGO;
+            const idMedioEfectivo = MEDIOS_FORZAR_EFE.has(idMedioOriginal) ? "EFE" : idMedioOriginal;
+            if (idMedioOriginal !== idMedioEfectivo) {
+                console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Medio de pago ${idMedioOriginal} → forzado a EFE (evita validación CxC).`);
+            }
             Caja.push({
                 "ID_CO": enc.CoDoc,
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
                 "CONSEC_DOCTO": consecDoc,
-                "ID_MEDIOS_PAGO": esSimulacionCNZ ? "EFE" : pago.ID_MEDIOS_PAGO,
+                "ID_MEDIOS_PAGO": esSimulacionCNZ ? "EFE" : idMedioEfectivo,
                 "VLR_MEDIO_PAGO": formatDecimal(absIfCNZ(pago.neto)),
                 "NRO_CUENTA": pago.NRO_CUENTA || "1",
                 "NRO_CHEQUE": "1",
