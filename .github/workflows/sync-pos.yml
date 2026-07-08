@@ -73,4 +73,10 @@ jobs:
           # --- Modo prueba (solo aplica en "Run workflow"; el cron los deja vacíos = producción) ---
           CRON_LIMITE: ${{ github.event.inputs.limite || '' }}
           CRON_SOLO_HOY: ${{ github.event.inputs.solo_hoy || 'true' }}
-          # NOTA: el cron NO envía reporte por correo. Si se quisiera, agregar aquí las SMTP_*.
+          # --- Notificaciones por correo (GitHub Secrets) ---
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          NOTIFY_ERROR_EMAILS: ${{ secrets.NOTIFY_ERROR_EMAILS }}
+          NOTIFY_CPE_EMAILS: ${{ secrets.NOTIFY_CPE_EMAILS }}
