@@ -270,6 +270,7 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                 const porCaja = {};
                 const porNit = {
                     generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
+                    sinNit: { transacciones: 0, neto: 0, etiqueta: 'Sin NIT' },
                     real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
                 };
                 delDia.forEach(d => {
@@ -277,9 +278,15 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                     if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
                     porCaja[c].transacciones++;
                     porCaja[c].neto += parseFloat(d.VrNetoDocto || 0);
-                    const esG = (d.NitTercero || '').trim() === '222222222222';
-                    (esG ? porNit.generico : porNit.real).transacciones++;
-                    (esG ? porNit.generico : porNit.real).neto += parseFloat(d.VrNetoDocto || 0);
+                    const nit = (d.NitTercero || '').trim();
+                    const esG = nit === '222222222222';
+                    const esSinNIT = !d.NitTercero;
+                    if (esSinNIT) {
+                        porNit.sinNit.transacciones++;
+                        porNit.sinNit.neto += parseFloat(d.VrNetoDocto || 0);
+                    }
+                    (esG || esSinNIT ? porNit.generico : porNit.real).transacciones++;
+                    (esG || esSinNIT ? porNit.generico : porNit.real).neto += parseFloat(d.VrNetoDocto || 0);
                 });
 
                 posData = { total_pos: totalPos, neto_total: netoTotal, por_caja: porCaja, por_nit: porNit };
@@ -324,6 +331,7 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                         const porCaja = {};
                         const porNit = {
                             generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
+                            sinNit: { transacciones: 0, neto: 0, etiqueta: 'Sin NIT' },
                             real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
                         };
                         delDia.forEach(d => {
@@ -331,9 +339,15 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                             if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
                             porCaja[c].transacciones++;
                             porCaja[c].neto += parseFloat(d.VrNetoDocto || 0);
-                            const esG = (d.NitTercero || '').trim() === '222222222222';
-                            (esG ? porNit.generico : porNit.real).transacciones++;
-                            (esG ? porNit.generico : porNit.real).neto += parseFloat(d.VrNetoDocto || 0);
+                            const nit = (d.NitTercero || '').trim();
+                            const esG = nit === '222222222222';
+                            const esSinNIT = !d.NitTercero;
+                            if (esSinNIT) {
+                                porNit.sinNit.transacciones++;
+                                porNit.sinNit.neto += parseFloat(d.VrNetoDocto || 0);
+                            }
+                            (esG || esSinNIT ? porNit.generico : porNit.real).transacciones++;
+                            (esG || esSinNIT ? porNit.generico : porNit.real).neto += parseFloat(d.VrNetoDocto || 0);
                         });
 
                         posData = { total_pos: totalPos, neto_total: netoTotal, por_caja: porCaja, por_nit: porNit };
@@ -372,6 +386,7 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                             por_caja: {},
                             por_nit: {
                                 generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
+                                sinNit: { transacciones: 0, neto: 0, etiqueta: 'Sin NIT' },
                                 real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
                             }
                         };
@@ -389,6 +404,10 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                                 agregado.por_nit.generico.transacciones += nit.generico.transacciones || 0;
                                 agregado.por_nit.generico.neto += nit.generico.neto || 0;
                             }
+                            if (nit.sinNit) {
+                                agregado.por_nit.sinNit.transacciones += nit.sinNit.transacciones || 0;
+                                agregado.por_nit.sinNit.neto += nit.sinNit.neto || 0;
+                            }
                             if (nit.real) {
                                 agregado.por_nit.real.transacciones += nit.real.transacciones || 0;
                                 agregado.por_nit.real.neto += nit.real.neto || 0;
@@ -405,6 +424,8 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                             });
                             agregado.por_nit.generico.transacciones += posData.por_nit.generico.transacciones || 0;
                             agregado.por_nit.generico.neto += posData.por_nit.generico.neto || 0;
+                            agregado.por_nit.sinNit.transacciones += posData.por_nit.sinNit?.transacciones || 0;
+                            agregado.por_nit.sinNit.neto += posData.por_nit.sinNit?.neto || 0;
                             agregado.por_nit.real.transacciones += posData.por_nit.real.transacciones || 0;
                             agregado.por_nit.real.neto += posData.por_nit.real.neto || 0;
                         }
@@ -502,12 +523,19 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
         const netoSync = transaccionesSync.reduce((s, f) => s + (parseFloat(f.neto) || 0), 0);
         const porNitSync = {
             generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
+            sinNit: { transacciones: 0, neto: 0, etiqueta: 'Sin NIT' },
             real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
         };
         transaccionesSync.forEach(f => {
-            const esG = (f.cliente_nit || '').trim() === '222222222222';
-            (esG ? porNitSync.generico : porNitSync.real).transacciones++;
-            (esG ? porNitSync.generico : porNitSync.real).neto += parseFloat(f.neto) || 0;
+            const nit = (f.cliente_nit || '').trim();
+            const esG = nit === '222222222222';
+            const esSinNIT = !f.cliente_nit;
+            if (esSinNIT) {
+                porNitSync.sinNit.transacciones++;
+                porNitSync.sinNit.neto += parseFloat(f.neto) || 0;
+            }
+            (esG || esSinNIT ? porNitSync.generico : porNitSync.real).transacciones++;
+            (esG || esSinNIT ? porNitSync.generico : porNitSync.real).neto += parseFloat(f.neto) || 0;
         });
 
         // 3) Fallback: si no hay datos POS, calcular desde sps_facturas
@@ -536,8 +564,11 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                 const netoReal = porNitSync.real?.neto || 0;
                 const totalGen = porNitSync.generico?.transacciones || 0;
                 const netoGen = porNitSync.generico?.neto || 0;
+                const totalSinNIT = porNitSync.sinNit?.transacciones || 0;
+                const netoSinNIT = porNitSync.sinNit?.neto || 0;
                 posData.por_nit = {
                     generico: { transacciones: totalGen, neto: netoGen, etiqueta: '2222222222' },
+                    sinNit: { transacciones: totalSinNIT, neto: netoSinNIT, etiqueta: 'Sin NIT' },
                     real: { transacciones: totalReal, neto: netoReal, etiqueta: 'Clientes reales' }
                 };
             } else {
@@ -547,6 +578,7 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                 posData.por_caja = {};
                 posData.por_nit = {
                     generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
+                    sinNit: { transacciones: 0, neto: 0, etiqueta: 'Sin NIT' },
                     real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
                 };
             }

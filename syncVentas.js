@@ -1337,11 +1337,18 @@ async function guardarEstadisticasDiarias(totalSync) {
     );
 
     const generico = { transacciones: 0, neto: 0, etiqueta: '2222222222' };
+    const sinNit = { transacciones: 0, neto: 0, etiqueta: 'Sin NIT' };
     const real = { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' };
     const porCaja = {};
     delDia.forEach(d => {
-        const esG = (d.NitTercero || '').trim() === '222222222222';
-        const g = esG ? generico : real;
+        const nit = (d.NitTercero || '').trim();
+        const esG = nit === '222222222222';
+        const esSinNIT = !d.NitTercero;
+        if (esSinNIT) {
+            sinNit.transacciones++;
+            sinNit.neto += parseFloat(d.VrNetoDocto || 0);
+        }
+        const g = esG || esSinNIT ? generico : real;
         g.transacciones++;
         g.neto += parseFloat(d.VrNetoDocto || 0);
         const c = d.ID_TIPO_DOCTO || 'SIN_CAJA';
@@ -1356,11 +1363,11 @@ async function guardarEstadisticasDiarias(totalSync) {
         total_sync: totalSync,
         neto_total: delDia.reduce((s, d) => s + parseFloat(d.VrNetoDocto || 0), 0),
         por_caja: porCaja,
-        por_nit: { generico, real },
+        por_nit: { generico, sinNit, real },
         actualizado_en: new Date().toISOString()
     }, { onConflict: 'fecha' });
 
-    console.log(`📊 Estadísticas diarias guardadas: ${delDia.length} POS, ${totalSync} sync, ${generico.transacciones} genéricas`);
+    console.log(`📊 Estadísticas diarias guardadas: ${delDia.length} POS, ${totalSync} sync, ${generico.transacciones} genéricas (${sinNit.transacciones} Sin NIT)`);
 }
 
 module.exports = { syncVentas: async (opciones = {}) => {
