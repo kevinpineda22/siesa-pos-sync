@@ -205,7 +205,84 @@ async function sendCpeNotification({ tipo, consecutivo, items, co, caja, fecha }
     }
 }
 
+// ──────────────────────────────────────────────────────────
+// Notificación de CONVERSIÓN de medio de pago (DOM→EFE)
+// ──────────────────────────────────────────────────────────
+async function sendConversionNotification({ tipo, consecutivo, conversiones, co, caja, fecha, neto }) {
+    const emails = getNotifyErrorEmails();
+    if (emails.length === 0) {
+        console.log('📧 NOTIFY_ERROR_EMAILS no configurado — se omite notificación de conversión.');
+        return;
+    }
+    if (!conversiones || conversiones.length === 0) {
+        console.log('📧 Sin conversiones que notificar.');
+        return;
+    }
+
+    const fechaStr = fecha || '(sin fecha)';
+    const filasConv = conversiones.map(cv => `
+        <tr>
+            <td style="padding: 6px 8px;">• ${cv.replace(/</g, '&lt;')}</td>
+        </tr>
+    `).join('');
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px;">
+  <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <div style="background: #f39c12; color: white; padding: 20px; text-align: center;">
+      <h2 style="margin: 0;">🔄 Conversión de medio de pago</h2>
+      <p style="margin: 5px 0 0; opacity: 0.9;">Factura con pago DOM convertido automáticamente a EFE</p>
+    </div>
+    <div style="padding: 20px;">
+      <table style="width: 100%; border-collapse: collapse;">
+        <tr>
+          <td style="padding: 8px; font-weight: bold; color: #555; width: 120px;">Documento</td>
+          <td style="padding: 8px;">${tipo || 'CNZ'} <strong>${consecutivo}</strong></td>
+        </tr>
+        <tr style="background: #f9f9f9;">
+          <td style="padding: 8px; font-weight: bold; color: #555;">Caja / CO</td>
+          <td style="padding: 8px;">${caja || '—'} · ${co || '—'}</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px; font-weight: bold; color: #555;">Fecha</td>
+          <td style="padding: 8px;">${fechaStr}</td>
+        </tr>
+        ${neto ? `<tr style="background: #f9f9f9;"><td style="padding: 8px; font-weight: bold; color: #555;">Valor</td><td style="padding: 8px;">$${Number(neto).toLocaleString('es-CO')}</td></tr>` : ''}
+      </table>
+
+      <h3 style="margin: 20px 0 10px; color: #333;">Conversiones aplicadas</h3>
+      <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+        <tbody>
+          ${filasConv}
+        </tbody>
+      </table>
+
+      <p style="margin-top: 20px; font-size: 13px; color: #999; text-align: center;">
+        Conversión automática realizada por SiesaPOS Sync — ${conversiones.length} conversión(es).
+      </p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+    try {
+        const info = await transporter.sendMail({
+            from: SMTP_FROM,
+            to: emails.join(', '),
+            subject: `🔄 [SiesaPOS] Conversión pago en ${tipo || 'factura'} ${consecutivo} (${conversiones.length})`,
+            html,
+        });
+        console.log(`📧 Notificación de conversión enviada a ${emails.join(', ')}: ${info.messageId}`);
+    } catch (err) {
+        console.error(`⚠️ Error enviando notificación de conversión: ${err.message}`);
+    }
+}
+
 module.exports = {
     sendErrorNotification,
     sendCpeNotification,
+    sendConversionNotification,
 };

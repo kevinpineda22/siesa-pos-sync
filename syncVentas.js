@@ -743,7 +743,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     }
 
     // Genera el payload completo para UNA SOLA factura (devuelve objeto listo para POST a Siesa).
-    const generarPayloadDocumento = (fac, enc, tipoDocumentoSimulado, co = '', caja = '') => {
+    const generarPayloadDocumento = (fac, enc, tipoDocumentoSimulado, co = '', caja = '', conversiones = []) => {
         // Arrays LOCALES a esta factura - cada factura genera su propio payload independiente.
         const Docto_ventas_comercial = [];
         const Movimientos = [];
@@ -949,6 +949,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         const pagosPositivos = Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0);
         if (pagosPositivos.length === 0 && totalSiesa > 0) {
             console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Sin pagos POS detectados (DOM/domicilio). Creando EFE sintético por $${totalSiesa.toLocaleString('es-CO')}.`);
+            conversiones.push(`pago_efe_sintetico:${totalSiesa}`);
             Caja.push({
                 "ID_CO": enc.CoDoc,
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
@@ -968,6 +969,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             const idMedioEfectivo = MEDIOS_FORZAR_EFE.has(idMedioOriginal) ? "EFE" : idMedioOriginal;
             if (idMedioOriginal !== idMedioEfectivo) {
                 console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Medio de pago ${idMedioOriginal} → forzado a EFE (evita validación CxC).`);
+                conversiones.push(`pago_${idMedioOriginal}_a_EFE`);
             }
             Caja.push({
                 "ID_CO": enc.CoDoc,
@@ -1018,8 +1020,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     };
 
     // Función que envía 1 factura a Siesa con reintento automático ante cliente/inventario faltante.
-    const enviarFacturaASiesa = async (consecutivo, payload, detallesFactura, tipoDoctoSiesa, meta) => {
-        const automatizaciones = [];
+    const enviarFacturaASiesa = async (consecutivo, payload, detallesFactura, tipoDoctoSiesa, meta, conversiones = []) => {
+        const automatizaciones = [...conversiones];
         const registrar = async (resultado) => {
             await logger.registrarResultado(resultado, { ...meta, automatizaciones });
             // Notificar por correo si es un error final
@@ -1057,6 +1059,17 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     }
                 });
                 const sufijo = automatizaciones.length > 0 ? ' (tras automatización)' : '';
+                if (conversiones.length > 0) {
+                    notifier.sendConversionNotification({
+                        tipo: tipoDoctoSiesa,
+                        consecutivo,
+                        conversiones,
+                        co: meta.co,
+                        caja: meta.caja,
+                        fecha: meta.fecha_factura,
+                        neto: meta.neto,
+                    }).catch(err => console.error(`⚠️ Error en notificación de conversión: ${err.message}`));
+                }
                 return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: true, mensaje: (responseSiesa.data.mensaje || 'OK') + sufijo });
             } catch (error) {
                 // Error sin detalle estructurado de Siesa (red, timeout, 500, etc.) -> no automatizable.
@@ -1237,7 +1250,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 omitidas.push(`${tipoDocto} ${consecutivo}`);
                 return;
             }
-            const payload = generarPayloadDocumento(fac, enc, 'CNZ', co, caja);
+            const conversiones = [];
+            const payload = generarPayloadDocumento(fac, enc, 'CNZ', co, caja, conversiones);
             meta.impuestos = (payload.Impuestos || []).map(i => {
                 const pm = (payload.Movimientos || []).find(
                     x => x.nro_registro === i.NRO_REGISTRO && x.consec_docto === i.CONSEC_DOCTO && x.id_tipo_docto === i.TIPO_DOCTO
@@ -1257,7 +1271,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     BASE_GRAVABLE: String(Math.round(baseGravable))
                 };
             });
-            tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDocto, meta });
+            tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDocto, meta, conversiones });
         } else if (pasoActual === 3) {
             const tipoDoc = 'CFZ';
             const keyCFZ = `${tipoDoc}:${co}:${caja}:${consecutivo}`;
@@ -1265,7 +1279,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 omitidas.push(`${tipoDoc} ${consecutivo}`);
                 return;
             }
-            const payload = generarPayloadDocumento(fac, enc, 'CFZ', co, caja);
+            const conversiones = [];
+            const payload = generarPayloadDocumento(fac, enc, 'CFZ', co, caja, conversiones);
             meta.impuestos = (payload.Impuestos || []).map(i => {
                 const pm = (payload.Movimientos || []).find(
                     x => x.nro_registro === i.NRO_REGISTRO && x.consec_docto === i.CONSEC_DOCTO && x.id_tipo_docto === i.TIPO_DOCTO
@@ -1285,7 +1300,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     BASE_GRAVABLE: String(Math.round(baseGravable))
                 };
             });
-            tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDoc, meta });
+            tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDoc, meta, conversiones });
         }
     });
 
@@ -1308,7 +1323,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     for (let i = 0; i < tareas.length; i += CONCURRENCIA) {
         const lote = tareas.slice(i, i + CONCURRENCIA);
         const resLote = await Promise.allSettled(
-            lote.map(t => enviarFacturaASiesa(t.consecutivo, t.payload, t.detalles, t.tipo, t.meta))
+            lote.map(t => enviarFacturaASiesa(t.consecutivo, t.payload, t.detalles, t.tipo, t.meta, t.conversiones))
         );
         for (let idx = 0; idx < resLote.length; idx++) {
             const r = resLote[idx];
