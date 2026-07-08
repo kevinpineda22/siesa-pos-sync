@@ -942,9 +942,27 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             console.log(`✅ Cuadre exacto [${tipoDoctoSiesa}] consec ${consecDoc}: Total ${totalSiesa} = Caja ${posCaja}.`);
         }
 
-        // Algunos medios de pago (DOM = domicilio) activan validación de CxC en Siesa que no
-        // manejamos. Los forzamos a EFE (efectivo) para que el documento pase sin CxC.
+        // Si el documento tiene total > 0 pero no hay pagos positivos (DOM/domicilio no genera
+        // entrada en la tabla de pagos de Connekta), creamos una línea EFE sintética para que
+        // Siesa no rechace con "cartera != CxC". También forzamos DOM → EFE por la misma razón.
         const MEDIOS_FORZAR_EFE = new Set(["DOM"]);
+        const pagosPositivos = Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0);
+        if (pagosPositivos.length === 0 && totalSiesa > 0) {
+            console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Sin pagos POS detectados (DOM/domicilio). Creando EFE sintético por $${totalSiesa.toLocaleString('es-CO')}.`);
+            Caja.push({
+                "ID_CO": enc.CoDoc,
+                "ID_TIPO_DOCTO": tipoDoctoSiesa,
+                "CONSEC_DOCTO": consecDoc,
+                "ID_MEDIOS_PAGO": "EFE",
+                "VLR_MEDIO_PAGO": formatDecimal(totalSiesa),
+                "NRO_CUENTA": "1",
+                "NRO_CHEQUE": "1",
+                "REFERENCIA": "1",
+                "COD_SEGURIDAD": 1,
+                "NRO_AUTORIZACION": "1",
+                "FECHA_VCTO": enc.FECHA ? formatDate(enc.FECHA) : formatDate(new Date().toISOString())
+            });
+        }
         Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0).forEach(pago => {
             const idMedioOriginal = pago.ID_MEDIOS_PAGO;
             const idMedioEfectivo = MEDIOS_FORZAR_EFE.has(idMedioOriginal) ? "EFE" : idMedioOriginal;
