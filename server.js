@@ -873,7 +873,6 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
 
         res.status(200).json({
             success: true,
-            totalBaseGravable: Math.round(totalBaseGravable),
             totalImpuestos: Math.round(totalImpuestos),
             totalFacturas,
             totalDocumentos,
