@@ -770,9 +770,6 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
         const fechaInicio = req.query.fechaInicio || req.query.fecha || hoy;
         const fechaFin = req.query.fechaFin || req.query.fecha || hoy;
 
-        // Junio 2026 se sirve EXCLUSIVAMENTE desde sps_impuestos_offline
-        const esSoloJunio = fechaInicio >= '2026-06-01' && fechaFin <= '2026-06-30';
-
         const DESCRIPCIONES = {
             'IV02': 'IVA 5% BIENES',
             'IV03': 'IVA 19% BIENES',
@@ -788,18 +785,18 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
         let totalBase = 0;
         let totalFacturas = 0;
         let totalDocumentos = 0;
+        const fechasConOffline = new Set();
 
-        if (esSoloJunio) {
-            // --- MODO JUNIO: solo sps_impuestos_offline ---
-            const { data: offline, error } = await logger.supabase
-                .from('sps_impuestos_offline')
-                .select('total_base, total_impuestos, total_facturas, por_llave')
-                .gte('fecha', fechaInicio)
-                .lte('fecha', fechaFin);
+        // 1) Cargar sps_impuestos_offline (datos cargados manualmente, ej. junio)
+        const { data: offline, error: errOff } = await logger.supabase
+            .from('sps_impuestos_offline')
+            .select('fecha, total_base, total_impuestos, total_facturas, por_llave')
+            .gte('fecha', fechaInicio)
+            .lte('fecha', fechaFin);
 
-            if (error) throw error;
-
+        if (!errOff && offline?.length > 0) {
             (offline || []).forEach(o => {
+                fechasConOffline.add(o.fecha);
                 totalBase += parseFloat(o.total_base) || 0;
                 totalFacturas += o.total_facturas || 0;
 
@@ -820,53 +817,56 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
                     });
                 }
             });
-
-            totalDocumentos = totalFacturas;
-        } else {
-            // --- MODO NORMAL: solo sps_facturas ---
-            const { data, error } = await logger.supabase
-                .from('sps_facturas')
-                .select('co, caja, consec, estado, neto, impuestos, fecha_factura')
-                .not('impuestos', 'is', null)
-                .gte('fecha_factura', fechaInicio)
-                .lte('fecha_factura', fechaFin);
-
-            if (error) throw error;
-
-            // Deduplicar
-            const PRIORIDAD = { 'FALLO': 3, 'SIN_RECAUDO': 2, 'OK': 1 };
-            const unicos = new Map();
-            (data || []).forEach(f => {
-                const key = `${f.co || ''}:${f.caja || ''}:${f.consec}`;
-                const prev = unicos.get(key);
-                if (!prev || (PRIORIDAD[f.estado] || 0) > (PRIORIDAD[prev.estado] || 0)) {
-                    unicos.set(key, f);
-                }
-            });
-            const facturas = [...unicos.values()];
-
-            facturas.forEach(f => {
-                totalBase += parseFloat(f.neto) || 0;
-                (f.impuestos || []).forEach(imp => {
-                    const llave = imp.ID_LLAVE_IMPUESTO || 'OTROS';
-                    if (!porLlave[llave]) {
-                        porLlave[llave] = {
-                            llave,
-                            descripcion: DESCRIPCIONES[llave] || llave,
-                            valorTotal: 0,
-                            baseGravable: 0,
-                            count: 0
-                        };
-                    }
-                    porLlave[llave].valorTotal += parseFloat(imp.VALOR_TOTAL) || 0;
-                    porLlave[llave].baseGravable += parseFloat(imp.BASE_GRAVABLE) || 0;
-                    porLlave[llave].count++;
-                });
-            });
-
-            totalFacturas = facturas.length;
-            totalDocumentos = (data || []).length;
         }
+
+        totalDocumentos = totalFacturas;
+
+        // 2) Cargar sps_facturas para fechas NO cubiertas por offline
+        const { data, error } = await logger.supabase
+            .from('sps_facturas')
+            .select('co, caja, consec, estado, neto, impuestos, fecha_factura')
+            .not('impuestos', 'is', null)
+            .gte('fecha_factura', fechaInicio)
+            .lte('fecha_factura', fechaFin);
+
+        if (error) throw error;
+
+        // Deduplicar y filtrar fechas ya cubiertas por offline
+        const PRIORIDAD = { 'FALLO': 3, 'SIN_RECAUDO': 2, 'OK': 1 };
+        const unicos = new Map();
+        (data || []).forEach(f => {
+            if (fechasConOffline.has(f.fecha_factura)) return; // ya cubierto por offline
+            const key = `${f.co || ''}:${f.caja || ''}:${f.consec}`;
+            const prev = unicos.get(key);
+            if (!prev || (PRIORIDAD[f.estado] || 0) > (PRIORIDAD[prev.estado] || 0)) {
+                unicos.set(key, f);
+            }
+        });
+        const facturas = [...unicos.values()];
+
+        let docsFromFacturas = 0;
+        facturas.forEach(f => {
+            totalBase += parseFloat(f.neto) || 0;
+            docsFromFacturas++;
+            (f.impuestos || []).forEach(imp => {
+                const llave = imp.ID_LLAVE_IMPUESTO || 'OTROS';
+                if (!porLlave[llave]) {
+                    porLlave[llave] = {
+                        llave,
+                        descripcion: DESCRIPCIONES[llave] || llave,
+                        valorTotal: 0,
+                        baseGravable: 0,
+                        count: 0
+                    };
+                }
+                porLlave[llave].valorTotal += parseFloat(imp.VALOR_TOTAL) || 0;
+                porLlave[llave].baseGravable += parseFloat(imp.BASE_GRAVABLE) || 0;
+                porLlave[llave].count++;
+            });
+        });
+
+        totalFacturas += facturas.length;
+        totalDocumentos += docsFromFacturas;
 
         const totalImpuestos = Object.values(porLlave).reduce((s, v) => s + v.valorTotal, 0);
         const totalBaseGravable = Object.values(porLlave).reduce((s, v) => s + v.baseGravable, 0);
