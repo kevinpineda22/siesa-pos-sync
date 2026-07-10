@@ -869,13 +869,16 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
         }
 
         const totalImpuestos = Object.values(porLlave).reduce((s, v) => s + v.valorTotal, 0);
+        const totalBaseGravable = Object.values(porLlave).reduce((s, v) => s + v.baseGravable, 0);
 
         res.status(200).json({
             success: true,
+            totalBase: Math.round(totalBase),
+            totalBaseGravable: Math.round(totalBaseGravable),
             totalImpuestos: Math.round(totalImpuestos),
             totalFacturas,
             totalDocumentos,
-            porLlave: Object.values(porLlave).sort((a, b) => b.valorTotal - a.valorTotal).map(e => ({ ...e, baseGravable: 0 }))
+            porLlave: Object.values(porLlave).sort((a, b) => b.valorTotal - a.valorTotal)
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
