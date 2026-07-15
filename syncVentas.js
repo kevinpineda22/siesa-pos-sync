@@ -946,6 +946,9 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         // entrada en la tabla de pagos de Connekta), creamos una línea EFE sintética para que
         // Siesa no rechace con "cartera != CxC". También forzamos DOM → EFE por la misma razón.
         const MEDIOS_FORZAR_EFE = new Set(["DOM"]);
+        // CO 011: las transferencias (TR) se envían como efectivo (EFE)
+        const coActual = (enc.CoDoc ?? '').toString().trim().padStart(3, '0');
+        if (coActual === '011') MEDIOS_FORZAR_EFE.add("TR");
         const pagosPositivos = Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0);
         if (pagosPositivos.length === 0 && totalSiesa > 0) {
             console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Sin pagos POS detectados (DOM/domicilio). Creando EFE sintético por $${totalSiesa.toLocaleString('es-CO')}.`);
