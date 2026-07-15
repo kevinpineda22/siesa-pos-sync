@@ -1372,17 +1372,21 @@ async function guardarEstadisticasDiarias(totalSync) {
         porCaja[c].neto += parseFloat(d.VrNetoDocto || 0);
     });
 
-    await logger.supabase.from('sps_estadisticas_diarias').upsert({
-        fecha: hoy,
-        total_pos: delDia.length,
-        total_sync: totalSync,
-        neto_total: delDia.reduce((s, d) => s + parseFloat(d.VrNetoDocto || 0), 0),
-        por_caja: porCaja,
-        por_nit: { generico, sinNit, real },
-        actualizado_en: new Date().toISOString()
-    }, { onConflict: 'fecha' });
+    if (delDia.length === 0) {
+        console.log(`⚠️ Estadísticas diarias: Connekta devolvió 0 registros para ${hoy}. Se omite el upsert para no sobrescribir datos previos con ceros.`);
+    } else {
+        await logger.supabase.from('sps_estadisticas_diarias').upsert({
+            fecha: hoy,
+            total_pos: delDia.length,
+            total_sync: totalSync,
+            neto_total: delDia.reduce((s, d) => s + parseFloat(d.VrNetoDocto || 0), 0),
+            por_caja: porCaja,
+            por_nit: { generico, sinNit, real },
+            actualizado_en: new Date().toISOString()
+        }, { onConflict: 'fecha' });
 
-    console.log(`📊 Estadísticas diarias guardadas: ${delDia.length} POS, ${totalSync} sync, ${generico.transacciones} genéricas (${sinNit.transacciones} Sin NIT)`);
+        console.log(`📊 Estadísticas diarias guardadas: ${delDia.length} POS, ${totalSync} sync, ${generico.transacciones} genéricas (${sinNit.transacciones} Sin NIT)`);
+    }
 }
 
 module.exports = { syncVentas: async (opciones = {}) => {
