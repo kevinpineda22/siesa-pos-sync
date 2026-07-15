@@ -72,12 +72,14 @@ app.post('/api/sync-ventas', async (req, res) => {
             : null;
         const co = req.body?.co ? String(req.body.co).trim() : null;
         const caja = req.body?.caja ? String(req.body.caja).trim() : null;
+        const soloCNZ = req.body?.soloCNZ === true;
 
         const opciones = {};
         if (consecs && consecs.length > 0) opciones.consecs = consecs;
         if (limite && !opciones.consecs) opciones.limite = limite; // consecs tiene prioridad
         if (co) opciones.co = co;
         if (caja) opciones.caja = caja;
+        if (soloCNZ) opciones.soloCNZ = true;
 
         if (opciones.consecs) {
             console.log(`--- 🔄 Recibida petición HTTP para reprocesar consecs: ${opciones.consecs.join(', ')} ---`);
