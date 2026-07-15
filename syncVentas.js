@@ -1442,7 +1442,12 @@ module.exports = { syncVentas: async (opciones = {}) => {
     console.log(`   Ejecutando primero Notas Crédito (CNZ) y luego Facturas (CFZ)...`);
     let resCFZ = [];
     let resCNZ = [];
-    const soloCNZ = opciones.soloCNZ === true;
+    // soloCNZ solo se activa para CO 011 (pruebas). Con cualquier otro CO se ignora.
+    const coFilter = (opciones.co ?? '').toString().trim();
+    const soloCNZ = opciones.soloCNZ === true && coFilter === '011';
+    if (opciones.soloCNZ === true && !soloCNZ) {
+        console.log(`ℹ️ soloCNZ ignorado: solo aplica para CO 011 (recibido: "${coFilter || '(vacío)'}").`);
+    }
     resCNZ = (await ejecutarPaso(1, consecsOverride, filtrosCOCaja)) || []; // CNZ - Notas crédito
     if (!soloCNZ) {
         resCFZ = (await ejecutarPaso(3, consecsOverride, filtrosCOCaja)) || []; // CFZ - Facturas de venta
