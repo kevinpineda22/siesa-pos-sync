@@ -120,6 +120,18 @@ app.post('/api/sync-ventas', async (req, res) => {
  *   errores_maestras: "texto plano del reporte para contabilidad"
  * }
  */
+/**
+ * Helper: filtra una consulta de Supabase por centro(s) de operación.
+ * @param {object} q - Consulta Supabase
+ * @param {string} coStr - CO simple ("001") o múltiple CSV ("001,011")
+ */
+function buildCoFilter(q, coStr) {
+    if (!coStr) return q;
+    const cos = coStr.split(',').map(c => c.trim()).filter(Boolean);
+    if (cos.length === 1) return q.eq('co', cos[0]);
+    return q.in('co', cos);
+}
+
 app.get('/api/logs', async (req, res) => {
     try {
         const { estado, tipo, categoria, consec, limit, solo_pendientes, fecha_desde, fecha_hasta, co } = req.query;
@@ -135,13 +147,6 @@ app.get('/api/logs', async (req, res) => {
         if (fecha_desde) query = query.gte('fecha_factura', fecha_desde);
         if (fecha_hasta) query = query.lte('fecha_factura', fecha_hasta);
 
-        // Filtro por CO
-        const buildCoFilter = (q, coStr) => {
-            if (!coStr) return q;
-            const cos = coStr.split(',').map(c => c.trim()).filter(Boolean);
-            if (cos.length === 1) return q.eq('co', cos[0]);
-            return q.in('co', cos);
-        };
         query = buildCoFilter(query, co);
 
         // Orden y limite
@@ -462,10 +467,12 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                     }
                     if (diasFaltantes.length > 0) {
                         try {
-                            const { data: faltantes } = await logger.supabase
+                            let faltQuery = logger.supabase
                                 .from('sps_facturas')
                                 .select('estado, co, caja, consec, neto, fecha_factura, cliente_nit')
                                 .in('fecha_factura', diasFaltantes);
+                            faltQuery = buildCoFilter(faltQuery, co);
+                            const { data: faltantes } = await faltQuery;
                             if (faltantes && faltantes.length > 0) {
                                 const unicos = new Map();
                                 faltantes.forEach(f => {
@@ -516,12 +523,14 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
         }
 
         // 2) sps_facturas: estado de sincronización + fallback POS
+        const { co } = req.query;
         let query = logger.supabase
             .from('sps_facturas')
             .select('estado, co, caja, consec, neto, fecha_factura, cliente_nit')
             .gte('fecha_factura', fechaInicio)
             .lte('fecha_factura', fechaFin);
         if (filtroCaja) query = query.eq('caja', filtroCaja);
+        query = buildCoFilter(query, co);
         const { data: facturas, error } = await query;
         if (error) throw error;
 
@@ -732,12 +741,15 @@ app.get('/api/logs/estadisticas', async (req, res) => {
  */
 app.get('/api/logs/ajustes', async (req, res) => {
     try {
-        const { data, error } = await logger.supabase
+        const { co } = req.query;
+        let query = logger.supabase
             .from('sps_facturas')
             .select('consec, tipo, co, caja, fecha_factura, cpe_items')
             .not('cpe_items', 'is', null)
             .order('ultima_corrida', { ascending: false })
             .limit(500);
+        query = buildCoFilter(query, co);
+        const { data, error } = await query;
         if (error) throw error;
 
         const filas = (data || []).flatMap(f =>
@@ -838,12 +850,15 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
         totalDocumentos = totalFacturas;
 
         // 2) Cargar sps_facturas para fechas NO cubiertas por offline
-        const { data, error } = await logger.supabase
+        const { co } = req.query;
+        let facturasQuery = logger.supabase
             .from('sps_facturas')
             .select('co, caja, consec, estado, neto, impuestos, fecha_factura')
             .not('impuestos', 'is', null)
             .gte('fecha_factura', fechaInicio)
             .lte('fecha_factura', fechaFin);
+        facturasQuery = buildCoFilter(facturasQuery, co);
+        const { data, error } = await facturasQuery;
 
         if (error) throw error;
 
@@ -922,14 +937,17 @@ app.get('/api/logs/resumen-ajustes', async (req, res) => {
         const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
         const fechaInicio = req.query.fechaInicio || req.query.fecha || hoy;
         const fechaFin = req.query.fechaFin || req.query.fecha || hoy;
+        const { co } = req.query;
 
-        const { data, error } = await logger.supabase
+        let ajustesQuery = logger.supabase
             .from('sps_facturas')
             .select('consec, tipo, co, caja, fecha_factura, cpe_items')
             .not('cpe_items', 'is', null)
             .gte('fecha_factura', fechaInicio)
             .lte('fecha_factura', fechaFin)
             .order('ultima_corrida', { ascending: false });
+        ajustesQuery = buildCoFilter(ajustesQuery, co);
+        const { data, error } = await ajustesQuery;
 
         if (error) throw error;
 
