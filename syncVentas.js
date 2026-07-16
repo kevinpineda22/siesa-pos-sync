@@ -763,7 +763,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         };
 
         Docto_ventas_comercial.push({
-            "ID_CO": enc.CoDoc,
+            "ID_CO": "001",
             "ID_TIPO_DOCTO": tipoDoctoSiesa,
             "CONSEC_DOCTO": consecDoc,
             "FECHA_DOCTO": formatDate(enc.FECHA_DOCTO),
@@ -774,7 +774,10 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             "TERCERO_REM": enc.NitTercero,
             "F_CONSEC_AUTO_REG": "1",
             "id_cond_pago": enc.id_cond_pago ? enc.id_cond_pago.toString().trim().padStart(3, '0') : "000",
-            "id_caja": (cajaPorCo[enc.CoDoc.trim()] || (enc.CoDoc.trim() === "003" ? "03 " : enc.CoDoc.trim().padStart(3, '0'))).padEnd(3, ' ')
+            "id_caja": (cajaPorCo[enc.CoDoc.trim()] || ({
+                "003": "03 ",
+                "011": "Z01",
+            }[enc.CoDoc.trim()] || enc.CoDoc.trim().padStart(3, '0'))).padEnd(3, ' ')
         });
 
         fac.items.forEach((det, index) => {
@@ -784,7 +787,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             const precioUnit = Number(cant) > 0 ? vrBruto / cant : 0;
 
             Movimientos.push({
-                "id_co": enc.CoDoc,
+                "id_co": "001",
                 "id_tipo_docto": tipoDoctoSiesa,
                 "consec_docto": consecDoc,
                 "nro_registro": lineaItem,
@@ -821,7 +824,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 const tasaNum = parseFloat(imp.TASA || 0);
                 const vlrUniFinal = tasaNum > 0 ? 0 : unitarioImp;
                 Impuestos.push({
-                    "ID_CO": enc.CoDoc,
+                    "ID_CO": "001",
                     "TIPO_DOCTO": tipoDoctoSiesa,
                     "CONSEC_DOCTO": consecDoc,
                     "NRO_REGISTRO": lineaItem,
@@ -839,7 +842,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 const vlrUniDscto = (det.vlr_uni_dscto && Math.abs(parseFloat(det.vlr_uni_dscto)) > 0) ? parseFloat(det.vlr_uni_dscto) : (totalDescuentoItem / parseFloat(det.CANTIDAD || det.cant_1 || 1));
                 
                 Descuentos.push({
-                    "id_co": enc.CoDoc,
+                    "id_co": "001",
                     "id_tipo_docto": tipoDoctoSiesa,
                     "consec_docto": consecDoc,
                     "nro_registro": lineaItem,
@@ -951,7 +954,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Sin pagos POS detectados (DOM/domicilio). Creando EFE sintético por $${totalSiesa.toLocaleString('es-CO')}.`);
             conversiones.push(`pago_efe_sintetico:${totalSiesa}`);
             Caja.push({
-                "ID_CO": enc.CoDoc,
+                "ID_CO": "001",
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
                 "CONSEC_DOCTO": consecDoc,
                 "ID_MEDIOS_PAGO": "EFE",
@@ -972,7 +975,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 conversiones.push(`pago_${idMedioOriginal}_a_EFE`);
             }
             Caja.push({
-                "ID_CO": enc.CoDoc,
+                "ID_CO": "001",
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
                 "CONSEC_DOCTO": consecDoc,
                 "ID_MEDIOS_PAGO": esSimulacionCNZ ? "EFE" : idMedioEfectivo,
@@ -994,7 +997,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             const plantillaEfe = cajaConsolidada["EFE"];
             const fechaVcto = plantillaEfe ? formatDate(plantillaEfe.FECHA_VCTO) : formatDate(enc.FECHA);
             Caja.push({
-                "ID_CO": enc.CoDoc,
+                "ID_CO": "001",
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
                 "CONSEC_DOCTO": consecDoc,
                 "ID_MEDIOS_PAGO": "EFE",

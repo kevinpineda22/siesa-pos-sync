@@ -68,7 +68,7 @@ jobs:
           PAGINACION_CONCURRENCIA: ${{ secrets.PAGINACION_CONCURRENCIA }}
           MAX_RONDAS_AJUSTE: ${{ secrets.MAX_RONDAS_AJUSTE }}
           # --- Filtros CO/Caja: input manual del dispatch tiene prioridad; si no, default ---
-          CO_FILTER: ${{ github.event.inputs.co || '001,011' }}
+          CO_FILTER: ${{ github.event.inputs.co || '001' }}
           CAJA_FILTER: ${{ github.event.inputs.caja || 'Z01,Z02' }}
           # --- Modo prueba (solo aplica en "Run workflow"; el cron los deja vacíos = producción) ---
           CRON_LIMITE: ${{ github.event.inputs.limite || '' }}
