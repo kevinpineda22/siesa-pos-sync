@@ -132,6 +132,64 @@ function buildCoFilter(q, coStr) {
     return q.in('co', cos);
 }
 
+/**
+ * Agrupa documentos de Connekta por centro de operación (CoDoc) y devuelve
+ * un array de { co, total_pos, neto_total, por_caja, por_nit } listo para
+ * upsert en sps_estadisticas_diarias.
+ */
+function computePerCoStats(docs) {
+    const grupos = {};
+    docs.forEach(d => {
+        const co = (d.CoDoc || '001').toString().padStart(3, '0');
+        if (!grupos[co]) grupos[co] = [];
+        grupos[co].push(d);
+    });
+    return Object.entries(grupos).map(([co, docsCo]) => {
+        const totalPos = docsCo.length;
+        const netoTotal = docsCo.reduce((s, d) => s + (parseFloat(d.VrNetoDocto) || 0), 0);
+        const porCaja = {};
+        const porNit = {
+            generico: { transacciones: 0, neto: 0 },
+            sinNit: { transacciones: 0, neto: 0 },
+            real: { transacciones: 0, neto: 0 },
+        };
+        docsCo.forEach(d => {
+            const c = d.ID_TIPO_DOCTO || 'SIN_CAJA';
+            if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
+            porCaja[c].transacciones++;
+            porCaja[c].neto += parseFloat(d.VrNetoDocto) || 0;
+            const nit = (d.NitTercero || '').trim();
+            const esG = nit === '222222222222';
+            const esSinNIT = !d.NitTercero;
+            if (esSinNIT) {
+                porNit.sinNit.transacciones++;
+                porNit.sinNit.neto += parseFloat(d.VrNetoDocto) || 0;
+            }
+            (esG || esSinNIT ? porNit.generico : porNit.real).transacciones++;
+            (esG || esSinNIT ? porNit.generico : porNit.real).neto += parseFloat(d.VrNetoDocto) || 0;
+        });
+        return { co, total_pos: totalPos, neto_total: netoTotal, por_caja: porCaja, por_nit: porNit };
+    });
+}
+
+/**
+  * Mergea un per-CO stat en un acumulador posData (total global).
+  */
+ function mergeCoStats(acc, stat) {
+     acc.total_pos += stat.total_pos;
+     acc.neto_total += stat.neto_total;
+     Object.entries(stat.por_caja || {}).forEach(([c, v]) => {
+         if (!acc.por_caja[c]) acc.por_caja[c] = { transacciones: 0, neto: 0 };
+         acc.por_caja[c].transacciones += v.transacciones;
+         acc.por_caja[c].neto += v.neto;
+     });
+     Object.entries(stat.por_nit || {}).forEach(([tipo, v]) => {
+         if (!acc.por_nit[tipo]) acc.por_nit[tipo] = { transacciones: 0, neto: 0 };
+         acc.por_nit[tipo].transacciones += v.transacciones;
+         acc.por_nit[tipo].neto += v.neto;
+     });
+ }
+
 app.get('/api/logs', async (req, res) => {
     try {
         const { estado, tipo, categoria, consec, limit, solo_pendientes, fecha_desde, fecha_hasta, co } = req.query;
@@ -258,6 +316,7 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
         const fechaInicio = req.query.fechaInicio || req.query.fecha || hoy;
         const fechaFin = req.query.fechaFin || req.query.fecha || hoy;
         const filtroCaja = req.query.caja ? req.query.caja.toUpperCase().trim() : null;
+        const co = req.query.co || null;
         const esRango = fechaInicio !== fechaFin;
         const CIA = process.env.CIA || '7375';
         const queryStats = process.env.QUERY_STATS || 'merkahorro_venta_pos_stats_dev';
@@ -286,40 +345,28 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                     return (d.FECHA_DOCTO || '').split('T')[0] === fechaInicio;
                 });
 
-                const totalPos = delDia.length;
-                const netoTotal = delDia.reduce((s, d) => s + parseFloat(d.VrNetoDocto || 0), 0);
-                const porCaja = {};
-                const porNit = {
-                    generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
-                    sinNit: { transacciones: 0, neto: 0, etiqueta: 'Sin NIT' },
-                    real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
-                };
-                delDia.forEach(d => {
-                    const c = d.ID_TIPO_DOCTO || 'SIN_CAJA';
-                    if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
-                    porCaja[c].transacciones++;
-                    porCaja[c].neto += parseFloat(d.VrNetoDocto || 0);
-                    const nit = (d.NitTercero || '').trim();
-                    const esG = nit === '222222222222';
-                    const esSinNIT = !d.NitTercero;
-                    if (esSinNIT) {
-                        porNit.sinNit.transacciones++;
-                        porNit.sinNit.neto += parseFloat(d.VrNetoDocto || 0);
-                    }
-                    (esG || esSinNIT ? porNit.generico : porNit.real).transacciones++;
-                    (esG || esSinNIT ? porNit.generico : porNit.real).neto += parseFloat(d.VrNetoDocto || 0);
-                });
-
-                posData = { total_pos: totalPos, neto_total: netoTotal, por_caja: porCaja, por_nit: porNit };
-
-                await logger.supabase.from('sps_estadisticas_diarias').upsert({
-                    fecha: fechaInicio,
-                    total_pos: totalPos,
-                    neto_total: netoTotal,
-                    por_caja: porCaja,
-                    por_nit: porNit,
-                    actualizado_en: new Date().toISOString()
-                }, { onConflict: 'fecha' });
+                // Per-CO: agrupar docs por centro de operación y upsert individual
+                const coStats = computePerCoStats(delDia);
+                // 1) Upsert TODOS los COs a la base (independiente del filtro)
+                for (const stat of coStats) {
+                    await logger.supabase.from('sps_estadisticas_diarias').upsert({
+                        fecha: fechaInicio,
+                        co: stat.co,
+                        total_pos: stat.total_pos,
+                        neto_total: stat.neto_total,
+                        por_caja: stat.por_caja,
+                        por_nit: stat.por_nit,
+                        actualizado_en: new Date().toISOString()
+                    }, { onConflict: 'fecha,co' });
+                }
+                // 2) posData para respuesta: si hay filtro co, SOLO ese CO; si no, agregar todos
+                const displayStats = co
+                    ? coStats.filter(s => co.split(',').map(c => c.trim()).includes(s.co))
+                    : coStats;
+                posData = { total_pos: 0, neto_total: 0, por_caja: {}, por_nit: { generico: { transacciones: 0, neto: 0 }, sinNit: { transacciones: 0, neto: 0 }, real: { transacciones: 0, neto: 0 } } };
+                for (const stat of displayStats) {
+                    mergeCoStats(posData, stat);
+                }
             } catch (e) {
                 console.error('⚠️ Error consultando Connekta stats:', e.message);
             }
@@ -347,40 +394,28 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                             return (d.FECHA_DOCTO || '').split('T')[0] === hoy;
                         });
 
-                        const totalPos = delDia.length;
-                        const netoTotal = delDia.reduce((s, d) => s + parseFloat(d.VrNetoDocto || 0), 0);
-                        const porCaja = {};
-                        const porNit = {
-                            generico: { transacciones: 0, neto: 0, etiqueta: '2222222222' },
-                            sinNit: { transacciones: 0, neto: 0, etiqueta: 'Sin NIT' },
-                            real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
-                        };
-                        delDia.forEach(d => {
-                            const c = d.ID_TIPO_DOCTO || 'SIN_CAJA';
-                            if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
-                            porCaja[c].transacciones++;
-                            porCaja[c].neto += parseFloat(d.VrNetoDocto || 0);
-                            const nit = (d.NitTercero || '').trim();
-                            const esG = nit === '222222222222';
-                            const esSinNIT = !d.NitTercero;
-                            if (esSinNIT) {
-                                porNit.sinNit.transacciones++;
-                                porNit.sinNit.neto += parseFloat(d.VrNetoDocto || 0);
-                            }
-                            (esG || esSinNIT ? porNit.generico : porNit.real).transacciones++;
-                            (esG || esSinNIT ? porNit.generico : porNit.real).neto += parseFloat(d.VrNetoDocto || 0);
-                        });
-
-                        posData = { total_pos: totalPos, neto_total: netoTotal, por_caja: porCaja, por_nit: porNit };
-
-                        await logger.supabase.from('sps_estadisticas_diarias').upsert({
-                            fecha: hoy,
-                            total_pos: totalPos,
-                            neto_total: netoTotal,
-                            por_caja: porCaja,
-                            por_nit: porNit,
-                            actualizado_en: new Date().toISOString()
-                        }, { onConflict: 'fecha' });
+                        // Per-CO: agrupar docs por centro de operación y upsert individual
+                        const coStats = computePerCoStats(delDia);
+                        // 1) Upsert TODOS los COs a la base
+                        for (const stat of coStats) {
+                            await logger.supabase.from('sps_estadisticas_diarias').upsert({
+                                fecha: hoy,
+                                co: stat.co,
+                                total_pos: stat.total_pos,
+                                neto_total: stat.neto_total,
+                                por_caja: stat.por_caja,
+                                por_nit: stat.por_nit,
+                                actualizado_en: new Date().toISOString()
+                            }, { onConflict: 'fecha,co' });
+                        }
+                        // 2) posData para respuesta: si hay filtro co, SOLO ese CO; si no, agregar todos
+                        const displayStats = co
+                            ? coStats.filter(s => co.split(',').map(c => c.trim()).includes(s.co))
+                            : coStats;
+                        posData = { total_pos: 0, neto_total: 0, por_caja: {}, por_nit: { generico: { transacciones: 0, neto: 0 }, sinNit: { transacciones: 0, neto: 0 }, real: { transacciones: 0, neto: 0 } } };
+                        for (const stat of displayStats) {
+                            mergeCoStats(posData, stat);
+                        }
                     } catch (e) {
                         console.error('⚠️ Error consultando Connekta stats para hoy:', e.message);
                     }
@@ -398,6 +433,7 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                     } else {
                         query = query.lte('fecha', fechaFin);
                     }
+                    if (co) query = buildCoFilter(query, co);
                     const { data: snapData } = await query;
                     historicos = snapData || [];
                     if (historicos.length > 0) {
@@ -503,27 +539,37 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                     }
                 }
             } else {
-                // Día único pasado
+                // Día único pasado — puede tener varias filas (una por CO)
                 try {
-                    const { data: historico } = await logger.supabase
+                    let hisQuery = logger.supabase
                         .from('sps_estadisticas_diarias')
                         .select('*')
-                        .eq('fecha', fechaInicio)
-                        .single();
-                    if (historico) {
-                        posData = {
-                            total_pos: historico.total_pos,
-                            neto_total: historico.neto_total,
-                            por_caja: historico.por_caja || {},
-                            por_nit: historico.por_nit || {}
-                        };
+                        .eq('fecha', fechaInicio);
+                    if (co) hisQuery = buildCoFilter(hisQuery, co);
+                    const { data: historicos } = await hisQuery;
+                    if (historicos && historicos.length > 0) {
+                        const acc = { total_pos: 0, neto_total: 0, por_caja: {}, por_nit: { generico: { transacciones: 0, neto: 0 }, sinNit: { transacciones: 0, neto: 0 }, real: { transacciones: 0, neto: 0 } } };
+                        historicos.forEach(h => {
+                            acc.total_pos += h.total_pos || 0;
+                            acc.neto_total += h.neto_total || 0;
+                            Object.entries(h.por_caja || {}).forEach(([c, v]) => {
+                                if (!acc.por_caja[c]) acc.por_caja[c] = { transacciones: 0, neto: 0 };
+                                acc.por_caja[c].transacciones += v.transacciones || 0;
+                                acc.por_caja[c].neto += v.neto || 0;
+                            });
+                            Object.entries(h.por_nit || {}).forEach(([tipo, v]) => {
+                                if (!acc.por_nit[tipo]) acc.por_nit[tipo] = { transacciones: 0, neto: 0 };
+                                acc.por_nit[tipo].transacciones += v.transacciones || 0;
+                                acc.por_nit[tipo].neto += v.neto || 0;
+                            });
+                        });
+                        posData = acc;
                     }
                 } catch (_) { /* no encontrado → fallback */ }
             }
         }
 
         // 2) sps_facturas: estado de sincronización + fallback POS
-        const { co } = req.query;
         let query = logger.supabase
             .from('sps_facturas')
             .select('estado, co, caja, consec, neto, fecha_factura, cliente_nit')
@@ -563,8 +609,10 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
             (esG || esSinNIT ? porNitSync.generico : porNitSync.real).neto += parseFloat(f.neto) || 0;
         });
 
-        // 3) Fallback: si no hay datos POS, calcular desde sps_facturas
-        if (!posData) {
+        // 3) Fallback: si no hay datos POS (y sin filtro CO), calcular desde sps_facturas
+        //    Con filtro CO activo, si no hay datos en sps_estadisticas_diarias es porque
+        //    no existían antes de la migración — se muestra 0, no se inventa.
+        if (!posData && !co) {
             const totalPos = transaccionesSync.length;
             const porCaja = {};
             transaccionesSync.forEach(f => {
@@ -577,7 +625,7 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
         }
 
         // 3b) Si hay filtro de caja activo, recalcular POS data para reflejar SOLO esa caja
-        if (filtroCaja) {
+        if (filtroCaja && posData) {
             const cajaSel = posData.por_caja?.[filtroCaja];
             if (cajaSel) {
                 // Recalcular total_pos y neto_total desde la caja seleccionada
@@ -607,6 +655,11 @@ app.get('/api/logs/resumen-diario', async (req, res) => {
                     real: { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' }
                 };
             }
+        }
+
+        // Si no hay datos POS (CO filtrado sin estadísticas), devolver ceros
+        if (!posData) {
+            posData = { total_pos: 0, neto_total: 0, por_caja: {}, por_nit: { generico: { transacciones: 0, neto: 0 }, sinNit: { transacciones: 0, neto: 0 }, real: { transacciones: 0, neto: 0 } } };
         }
 
         res.status(200).json({
@@ -712,23 +765,57 @@ app.get('/api/reportes/historial', async (req, res) => {
 
 /**
  * GET /api/logs/estadisticas
- * Devuelve el detalle día por día de sps_estadisticas_diarias para un rango.
- * Query params: fechaInicio (YYYY-MM-DD), fechaFin (YYYY-MM-DD)
+ * Devuelve el detalle día por día.
+ *
+ * Sin ?co: desde sps_estadisticas_diarias (stats POS globales).
+ * Con ?co:  desde sps_facturas filtrada por CO, agrupada por día con
+ *           desglose genérico/real por cliente_nit.
+ *
+ * Query params: fechaInicio (YYYY-MM-DD), fechaFin (YYYY-MM-DD), co (opcional)
  */
 app.get('/api/logs/estadisticas', async (req, res) => {
     try {
         const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
         const fechaInicio = req.query.fechaInicio || hoy;
         const fechaFin = req.query.fechaFin || hoy;
+        const co = req.query.co;
+
         let query = logger.supabase
             .from('sps_estadisticas_diarias')
             .select('*')
             .gte('fecha', fechaInicio)
-            .lte('fecha', fechaFin)
-            .order('fecha', { ascending: true });
-        const { data, error } = await query;
+            .lte('fecha', fechaFin);
+        if (co) query = buildCoFilter(query, co);
+        const { data: snapData, error } = await query;
         if (error) throw error;
-        res.status(200).json({ success: true, data: data || [] });
+
+        // Si hay filtro CO pero sps_estadisticas_diarias no tiene datos (días anteriores a la migración), retornar vacío
+        if (co && (!snapData || snapData.length === 0)) {
+            return res.status(200).json({ success: true, data: [] });
+        }
+
+        // Agregar múltiples filas por fecha (una por CO) en un registro por día
+        const map = {};
+        (snapData || []).forEach(row => {
+            if (!map[row.fecha]) {
+                map[row.fecha] = { fecha: row.fecha, total_pos: 0, neto_total: 0, por_caja: {}, por_nit: { generico: { transacciones: 0, neto: 0 }, sinNit: { transacciones: 0, neto: 0 }, real: { transacciones: 0, neto: 0 } } };
+            }
+            const d = map[row.fecha];
+            d.total_pos += row.total_pos || 0;
+            d.neto_total += row.neto_total || 0;
+            Object.entries(row.por_caja || {}).forEach(([c, v]) => {
+                if (!d.por_caja[c]) d.por_caja[c] = { transacciones: 0, neto: 0 };
+                d.por_caja[c].transacciones += v.transacciones || 0;
+                d.por_caja[c].neto += v.neto || 0;
+            });
+            Object.entries(row.por_nit || {}).forEach(([tipo, v]) => {
+                if (!d.por_nit[tipo]) d.por_nit[tipo] = { transacciones: 0, neto: 0 };
+                d.por_nit[tipo].transacciones += v.transacciones || 0;
+                d.por_nit[tipo].neto += v.neto || 0;
+            });
+        });
+        const dataAgg = Object.values(map).sort((a, b) => a.fecha.localeCompare(b.fecha));
+        res.status(200).json({ success: true, data: dataAgg });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }

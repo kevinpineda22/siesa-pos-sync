@@ -1355,6 +1355,45 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     return resultados;
 }
 
+/**
+ * Agrupa documentos de Connekta por centro de operación (CoDoc).
+ * Duplicado local de computePerCoStats en server.js.
+ */
+function groupDocsByCo(docs) {
+    const grupos = {};
+    docs.forEach(d => {
+        const co = (d.CoDoc || '001').toString().padStart(3, '0');
+        if (!grupos[co]) grupos[co] = [];
+        grupos[co].push(d);
+    });
+    return Object.entries(grupos).map(([co, docsCo]) => {
+        const totalPos = docsCo.length;
+        const netoTotal = docsCo.reduce((s, d) => s + (parseFloat(d.VrNetoDocto) || 0), 0);
+        const porCaja = {};
+        const porNit = {
+            generico: { transacciones: 0, neto: 0 },
+            sinNit: { transacciones: 0, neto: 0 },
+            real: { transacciones: 0, neto: 0 },
+        };
+        docsCo.forEach(d => {
+            const c = d.ID_TIPO_DOCTO || 'SIN_CAJA';
+            if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
+            porCaja[c].transacciones++;
+            porCaja[c].neto += parseFloat(d.VrNetoDocto) || 0;
+            const nit = (d.NitTercero || '').trim();
+            const esG = nit === '222222222222';
+            const esSinNIT = !d.NitTercero;
+            if (esSinNIT) {
+                porNit.sinNit.transacciones++;
+                porNit.sinNit.neto += parseFloat(d.VrNetoDocto) || 0;
+            }
+            (esG || esSinNIT ? porNit.generico : porNit.real).transacciones++;
+            (esG || esSinNIT ? porNit.generico : porNit.real).neto += parseFloat(d.VrNetoDocto) || 0;
+        });
+        return { co, total_pos: totalPos, neto_total: netoTotal, por_caja: porCaja, por_nit: porNit };
+    });
+}
+
 async function guardarEstadisticasDiarias(totalSync) {
     const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
     const datos = await fetchFromConnekta(URL_VENTAS_STATS);
@@ -1362,42 +1401,31 @@ async function guardarEstadisticasDiarias(totalSync) {
         (d.FECHA_DOCTO || '').split('T')[0] === hoy
     );
 
-    const generico = { transacciones: 0, neto: 0, etiqueta: '2222222222' };
-    const sinNit = { transacciones: 0, neto: 0, etiqueta: 'Sin NIT' };
-    const real = { transacciones: 0, neto: 0, etiqueta: 'Clientes reales' };
-    const porCaja = {};
-    delDia.forEach(d => {
-        const nit = (d.NitTercero || '').trim();
-        const esG = nit === '222222222222';
-        const esSinNIT = !d.NitTercero;
-        if (esSinNIT) {
-            sinNit.transacciones++;
-            sinNit.neto += parseFloat(d.VrNetoDocto || 0);
-        }
-        const g = esG || esSinNIT ? generico : real;
-        g.transacciones++;
-        g.neto += parseFloat(d.VrNetoDocto || 0);
-        const c = d.ID_TIPO_DOCTO || 'SIN_CAJA';
-        if (!porCaja[c]) porCaja[c] = { transacciones: 0, neto: 0 };
-        porCaja[c].transacciones++;
-        porCaja[c].neto += parseFloat(d.VrNetoDocto || 0);
-    });
-
     if (delDia.length === 0) {
         console.log(`⚠️ Estadísticas diarias: Connekta devolvió 0 registros para ${hoy}. Se omite el upsert para no sobrescribir datos previos con ceros.`);
-    } else {
+        return;
+    }
+
+    // Per-CO: upsert individual por centro de operación
+    const coStats = groupDocsByCo(delDia);
+    let totalPosGlobal = 0;
+    let totalGen = 0;
+    for (const stat of coStats) {
+        totalPosGlobal += stat.total_pos;
+        totalGen += (stat.por_nit.generico?.transacciones || 0) + (stat.por_nit.sinNit?.transacciones || 0);
         await logger.supabase.from('sps_estadisticas_diarias').upsert({
             fecha: hoy,
-            total_pos: delDia.length,
+            co: stat.co,
+            total_pos: stat.total_pos,
             total_sync: totalSync,
-            neto_total: delDia.reduce((s, d) => s + parseFloat(d.VrNetoDocto || 0), 0),
-            por_caja: porCaja,
-            por_nit: { generico, sinNit, real },
+            neto_total: stat.neto_total,
+            por_caja: stat.por_caja,
+            por_nit: stat.por_nit,
             actualizado_en: new Date().toISOString()
-        }, { onConflict: 'fecha' });
-
-        console.log(`📊 Estadísticas diarias guardadas: ${delDia.length} POS, ${totalSync} sync, ${generico.transacciones} genéricas (${sinNit.transacciones} Sin NIT)`);
+        }, { onConflict: 'fecha,co' });
     }
+
+    console.log(`📊 Estadísticas diarias guardadas: ${totalPosGlobal} POS (${coStats.length} COs), ${totalSync} sync, ${totalGen} genéricas`);
 }
 
 module.exports = { syncVentas: async (opciones = {}) => {
