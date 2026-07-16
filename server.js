@@ -122,7 +122,7 @@ app.post('/api/sync-ventas', async (req, res) => {
  */
 app.get('/api/logs', async (req, res) => {
     try {
-        const { estado, tipo, categoria, consec, limit, solo_pendientes, fecha_desde, fecha_hasta } = req.query;
+        const { estado, tipo, categoria, consec, limit, solo_pendientes, fecha_desde, fecha_hasta, co } = req.query;
 
         let query = logger.supabase.from('sps_facturas').select('*');
 
@@ -135,6 +135,15 @@ app.get('/api/logs', async (req, res) => {
         if (fecha_desde) query = query.gte('fecha_factura', fecha_desde);
         if (fecha_hasta) query = query.lte('fecha_factura', fecha_hasta);
 
+        // Filtro por CO
+        const buildCoFilter = (q, coStr) => {
+            if (!coStr) return q;
+            const cos = coStr.split(',').map(c => c.trim()).filter(Boolean);
+            if (cos.length === 1) return q.eq('co', cos[0]);
+            return q.in('co', cos);
+        };
+        query = buildCoFilter(query, co);
+
         // Orden y limite
         const max = limit ? parseInt(limit, 10) : 200;
         query = query.order('ultima_corrida', { ascending: false }).limit(isNaN(max) || max <= 0 ? 200 : max);
@@ -143,12 +152,17 @@ app.get('/api/logs', async (req, res) => {
         if (error) throw error;
 
         // Resumen rápido
-        const { count: total } = await logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true });
-        const { count: ok } = await logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'OK');
-        const { count: fallo } = await logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'FALLO');
-        const { count: sinRecaudo } = await logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'SIN_RECAUDO');
+        let summaryBase = logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true });
+        summaryBase = buildCoFilter(summaryBase, co);
+
+        const { count: total } = await summaryBase;
+        const { count: ok } = await buildCoFilter(logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'OK'), co);
+        const { count: fallo } = await buildCoFilter(logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'FALLO'), co);
+        const { count: sinRecaudo } = await buildCoFilter(logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'SIN_RECAUDO'), co);
         
-        const { data: ultima } = await logger.supabase.from('sps_facturas').select('ultima_corrida').order('ultima_corrida', { ascending: false }).limit(1).single();
+        let ultimaQuery = logger.supabase.from('sps_facturas').select('ultima_corrida').order('ultima_corrida', { ascending: false }).limit(1).single();
+        ultimaQuery = buildCoFilter(ultimaQuery, co);
+        const { data: ultima } = await ultimaQuery;
 
         const resumen = {
             total: total || 0,
