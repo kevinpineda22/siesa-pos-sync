@@ -1086,6 +1086,17 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 ));
                 const faltaInventario = Array.isArray(errores) && errores.some(e => e.f_detalle && e.f_detalle.includes('Item sin cantidad disponible'));
 
+                // Deadlock en Siesa: error transitorio de concurrencia, no de datos.
+                // Reintentar con pausa para dar tiempo a que se libere el lock.
+                const esDeadlock = Array.isArray(errores) && errores.some(e =>
+                    e.f_detalle && e.f_detalle.toLowerCase().includes('deadlocked')
+                );
+                if (esDeadlock) {
+                    console.log(`🔁 [${tipoDoctoSiesa} ${consecutivo}] Deadlock en Siesa — pausa y reintento (ronda ${ronda + 1}/${MAX_RONDAS + 1})...`);
+                    await new Promise(r => setTimeout(r, 2000));
+                    continue;
+                }
+
                 let accionTomada = false;
 
                 // Error no automatizable (maestras, valor inválido, etc.) -> fallo definitivo,
