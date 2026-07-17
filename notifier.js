@@ -281,8 +281,105 @@ async function sendConversionNotification({ tipo, consecutivo, conversiones, co,
     }
 }
 
+// ──────────────────────────────────────────────────────────
+// Notificación de ALERTA DE SILENCIO (sin facturas registradas)
+// ──────────────────────────────────────────────────────────
+async function sendSilentMiddayNotification({ co, totalFacturasHoy, reales, genericas, checkTime, ultimaFactura }) {
+    const emails = getNotifyErrorEmails();
+    if (emails.length === 0) {
+        console.log('📧 NOTIFY_ERROR_EMAILS no configurado — se omite alerta de mediodía.');
+        return;
+    }
+
+    const hora = checkTime || '12:00 M';
+    const fechaHoy = new Date().toLocaleDateString('es-CO', { timeZone: 'America/Bogota', year: 'numeric', month: 'long', day: 'numeric' });
+
+    // Determinar el mensaje según qué está en 0
+    let tituloAlerta, descripcionAlerta;
+    if (reales === 0 && genericas === 0) {
+        tituloAlerta = 'No hay facturas registradas';
+        descripcionAlerta = `A las ${hora} no se ha registrado ninguna factura en el sistema (reales = 0 y genéricas = 0).`;
+    } else if (reales === 0) {
+        tituloAlerta = 'No hay facturas con cliente real';
+        descripcionAlerta = `A las ${hora} solo hay facturas genéricas (NIT 222222222222), ninguna con cliente real.`;
+    } else {
+        tituloAlerta = 'No hay facturas genéricas';
+        descripcionAlerta = `A las ${hora} solo hay facturas con cliente real, ninguna genérica (NIT 222222222222).`;
+    }
+
+    const realesIcono = reales === 0 ? '❌' : '✅';
+    const genericasIcono = genericas === 0 ? '❌' : '✅';
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px;">
+  <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <div style="background: #e67e22; color: white; padding: 20px; text-align: center;">
+      <h2 style="margin: 0;">⚠️ ${tituloAlerta}</h2>
+      <p style="margin: 5px 0 0; opacity: 0.9;">${descripcionAlerta}</p>
+    </div>
+    <div style="padding: 20px;">
+      <hr style="border: none; border-top: 1px solid #eee; margin: 0 0 16px;">
+      <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+        <tr>
+          <td style="padding: 8px; font-weight: bold; color: #555; width: 160px;">CO(s) activos</td>
+          <td style="padding: 8px;">${co || '(todos)'}</td>
+        </tr>
+        <tr style="background: #f9f9f9;">
+          <td style="padding: 8px; font-weight: bold; color: #555;">Facturas reales</td>
+          <td style="padding: 8px; font-weight: bold;">${realesIcono} ${reales}</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px; font-weight: bold; color: #555;">Facturas genéricas</td>
+          <td style="padding: 8px; font-weight: bold;">${genericasIcono} ${genericas}</td>
+        </tr>
+        <tr style="background: #f9f9f9;">
+          <td style="padding: 8px; font-weight: bold; color: #555;">Total hoy</td>
+          <td style="padding: 8px; font-weight: bold; color: ${totalFacturasHoy === 0 ? '#e74c3c' : '#27ae60'};">${totalFacturasHoy}</td>
+        </tr>
+      </table>
+      <p style="margin-top: 16px; font-size: 14px; color: #555; line-height: 1.6;">
+        <strong>Posibles causas:</strong><br>
+        ${reales === 0 ? '• El POS puede no estar enviando datos de clientes reales (solo genéricas).<br>' : ''}
+        ${genericas === 0 ? '• Puede que no se estén facturando clientes sin identificación (solo reales).<br>' : ''}
+        ${totalFacturasHoy === 0 ? '• El POS podría estar caído o el sync automático fallando.<br>• Problemas de conexión con Connekta.<br>• El local pudo haber estado cerrado.' : ''}
+      </p>
+      <p style="margin-top: 20px; font-size: 13px; color: #999; text-align: center;">
+        Revisar en el dashboard de SiesaPOS Sync o directamente en Connekta/Siesa.
+      </p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+    // Asunto según qué falta
+    let asunto;
+    if (reales === 0 && genericas === 0) {
+        asunto = `⚠️ [SiesaPOS] Sin facturas a las ${hora} — ${fechaHoy}`;
+    } else if (reales === 0) {
+        asunto = `⚠️ [SiesaPOS] Sin reales a las ${hora} (solo genéricas) — ${fechaHoy}`;
+    } else {
+        asunto = `⚠️ [SiesaPOS] Sin genéricas a las ${hora} (solo reales) — ${fechaHoy}`;
+    }
+
+    try {
+        const info = await transporter.sendMail({
+            from: SMTP_FROM,
+            to: emails.join(', '),
+            subject: asunto,
+            html,
+        });
+        console.log(`📧 Alerta enviada a ${emails.join(', ')}: ${info.messageId}`);
+    } catch (err) {
+        console.error(`⚠️ Error enviando alerta: ${err.message}`);
+    }
+}
+
 module.exports = {
     sendErrorNotification,
     sendCpeNotification,
     sendConversionNotification,
+    sendSilentMiddayNotification,
 };

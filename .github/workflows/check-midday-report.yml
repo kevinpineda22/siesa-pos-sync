@@ -1,0 +1,55 @@
+name: Check facturas (12M y 5PM)
+
+# Verifica a las 12M y 5PM (hora Colombia) si hay facturas registradas hoy.
+# Si no hay NINGUNA (reales + genéricas = 0), envía una alerta por correo.
+
+on:
+  schedule:
+    # 17:00 UTC = 12:00 M Colombia (UTC-5, sin horario de verano)
+    - cron: '0 17 * * *'
+    # 22:00 UTC = 5:00 PM Colombia (UTC-5, sin horario de verano)
+    - cron: '0 22 * * *'
+  workflow_dispatch:
+    inputs:
+      co:
+        description: 'CO(s) a verificar (ej. 001 o 001,003). Vacío = todos.'
+        required: false
+        default: ''
+
+concurrency:
+  group: check-midday-report
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Verificar facturas del mediodía
+        run: node scripts/checkMiddayReport.js
+        env:
+          # --- Credenciales / conexión (GitHub Secrets, mismas que el sync) ---
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # --- Filtro CO (opcional: si se pasa por dispatch, sino el default) ---
+          CO_FILTER: ${{ github.event.inputs.co || '001' }}
+          # --- Hora del check: el cron de GH Actions no nos dice cuál disparó ---
+          # Se detecta por la hora actual en Colombia
+          # --- Notificaciones por correo (mismos secrets del sync) ---
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          NOTIFY_ERROR_EMAILS: ${{ secrets.NOTIFY_ERROR_EMAILS }}

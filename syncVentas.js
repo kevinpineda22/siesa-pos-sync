@@ -776,7 +776,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             "id_cond_pago": enc.id_cond_pago ? enc.id_cond_pago.toString().trim().padStart(3, '0') : "000",
             "id_caja": (cajaPorCo[enc.CoDoc.trim()] || ({
                 "003": "03 ",
-                "011": "Z01",
+                "011": "001",
             }[enc.CoDoc.trim()] || enc.CoDoc.trim().padStart(3, '0'))).padEnd(3, ' ')
         });
 
