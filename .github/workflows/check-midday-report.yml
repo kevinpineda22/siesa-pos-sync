@@ -40,11 +40,16 @@ jobs:
       - name: Verificar facturas del mediodía
         run: node scripts/checkMiddayReport.js
         env:
-          # --- Credenciales / conexión (GitHub Secrets, mismas que el sync) ---
+          # --- Credenciales Connekta (para consultar stats POS reales + genéricas) ---
+          CONNI_KEY: ${{ secrets.CONNI_KEY }}
+          CONNI_TOKEN: ${{ secrets.CONNI_TOKEN }}
+          CIA: ${{ secrets.CIA }}
+          QUERY_STATS: merkahorro_venta_pos_stats_dev
+          # --- Credenciales Supabase (fallback a sps_estadisticas_diarias) ---
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           # --- Filtro CO (opcional: si se pasa por dispatch, sino el default) ---
-          CO_FILTER: ${{ github.event.inputs.co || '001' }}
+          CO_FILTER: ${{ github.event.inputs.co || '001,011' }}
           # --- Hora del check: el cron de GH Actions no nos dice cuál disparó ---
           # Se detecta por la hora actual en Colombia
           # --- Notificaciones por correo (mismos secrets del sync) ---
