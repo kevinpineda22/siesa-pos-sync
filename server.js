@@ -884,124 +884,281 @@ app.get('/api/logs/resumen-impuestos', async (req, res) => {
         const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
         const fechaInicio = req.query.fechaInicio || req.query.fecha || hoy;
         const fechaFin = req.query.fechaFin || req.query.fecha || hoy;
+        const co = req.query.co || null;
 
-        const DESCRIPCIONES = {
-            'IV02': 'IVA 5% BIENES',
-            'IV03': 'IVA 19% BIENES',
-            'IV04': 'IVA 19% SERVICIOS',
-            'IV05': 'IVA 19% HONORARIOS',
-            'IV06': 'IVA 19% ARRENDAMIENTOS',
-            'IV07': 'IVA 19% CERVEZA',
-            'IV08': 'IVA DEL 19% EN GASEOSAS',
-            'ICO': 'IMPUESTO AL CONSUMO'
-        };
+        const coList = co ? co.split(',').map(c => c.trim().padStart(3, '0')) : null;
 
-        const porLlave = {};
-        let totalBase = 0;
-        let totalFacturas = 0;
-        let totalDocumentos = 0;
-        const fechasConOffline = new Set();
+        // ══════════════════════════════════════════════════
+        // 1) Consultar tabla siesa_pos_ventas_lineas en Supabase
+        // ══════════════════════════════════════════════════
+        let query = logger.supabase
+            .from('siesa_pos_ventas_lineas')
+            .select('*')
+            .gte('fecha_docto', fechaInicio + 'T00:00:00')
+            .lte('fecha_docto', fechaFin + 'T23:59:59');
 
-        // 1) Cargar sps_impuestos_offline (datos cargados manualmente, ej. junio)
-        const { data: offline, error: errOff } = await logger.supabase
-            .from('sps_impuestos_offline')
-            .select('fecha, total_base, total_impuestos, total_facturas, por_llave')
-            .gte('fecha', fechaInicio)
-            .lte('fecha', fechaFin);
+        if (coList && coList.length === 1) {
+            query = query.eq('co_doc', coList[0]);
+        } else if (coList && coList.length > 1) {
+            query = query.in('co_doc', coList);
+        }
 
-        if (!errOff && offline?.length > 0) {
-            (offline || []).forEach(o => {
-                fechasConOffline.add(o.fecha);
-                totalBase += parseFloat(o.total_base) || 0;
-                totalFacturas += o.total_facturas || 0;
+        const { data: dbLines, error: dbError } = await query;
+        if (dbError) {
+            console.error('⚠️ Error leyendo siesa_pos_ventas_lineas:', dbError.message);
+            return res.status(500).json({ success: false, error: `DB error: ${dbError.message}` });
+        }
 
-                if (o.por_llave && typeof o.por_llave === 'object') {
-                    Object.entries(o.por_llave).forEach(([llave, datos]) => {
-                        if (!porLlave[llave]) {
-                            porLlave[llave] = {
-                                llave,
-                                descripcion: DESCRIPCIONES[llave] || llave,
-                                valorTotal: 0,
-                                baseGravable: 0,
-                                count: 0
-                            };
-                        }
-                        porLlave[llave].valorTotal += parseFloat(datos.valorTotal) || 0;
-                        porLlave[llave].baseGravable += parseFloat(datos.baseGravable) || 0;
-                        porLlave[llave].count += datos.count || 0;
-                    });
+        // ══════════════════════════════════════════════════
+        // 2) LIVE: fetch de Connekta solo para HOY si no hay datos suficientes
+        // ══════════════════════════════════════════════════
+        let lines = dbLines || [];
+        
+        // Si piden hoy y la DB no tiene datos (el cron no ha corrido), fetcheamos live
+        const pideHoy = hoy >= fechaInicio && hoy <= fechaFin;
+        const lineasHoyDb = lines.filter(d => (d.fecha_docto || '').startsWith(hoy)).length;
+
+        let source = 'database';
+        let liveRecords = 0;
+
+        if (pideHoy && lineasHoyDb === 0) {
+            try {
+                const CIA = process.env.CIA || '7375';
+                const CONNEKTA_DOMAIN = process.env.CONNEKTA_DOMAIN || 'servicios.siesacloud.com';
+                const queryName = process.env.QUERY_ACUMULADOS || 'merkahorro_informe_acumulados';
+                const URL_ACUMULADOS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=${queryName}`;
+
+                const TAM_PAGINA = parseInt(process.env.INVENTARIO_TAM_PAGINA || '1000');
+                const CONCURRENCIA = parseInt(process.env.PAGINACION_CONCURRENCIA || '4');
+
+                let liveLines = [];
+                // Página 1
+                const urlPag1 = `${URL_ACUMULADOS}&paginacion=numPag=1|tamPag=${TAM_PAGINA}`;
+                const resp1 = await axios.get(urlPag1, {
+                    headers: { ConniKey: process.env.CONNI_KEY, ConniToken: process.env.CONNI_TOKEN },
+                    timeout: 120000
+                });
+                let data1 = resp1.data;
+                if (data1.detalle && data1.detalle.Datos) liveLines = data1.detalle.Datos;
+                else if (data1.detalle && data1.detalle.Table) liveLines = data1.detalle.Table;
+                else if (data1.Table) liveLines = data1.Table;
+                liveLines = Array.isArray(liveLines) ? liveLines : [];
+
+                let totalPaginas = 1;
+                if (data1.detalle) {
+                    const keys = Object.keys(data1.detalle);
+                    const keyTotal = keys.find(k => k.toLowerCase().includes('total_p') || k.toLowerCase().includes('pagina'));
+                    if (keyTotal && data1.detalle[keyTotal]) totalPaginas = parseInt(data1.detalle[keyTotal]);
                 }
+                totalPaginas = Math.min(totalPaginas, parseInt(process.env.INVENTARIO_MAX_PAGINAS || '200'));
+
+                if (liveLines.length >= TAM_PAGINA && totalPaginas > 1) {
+                    console.log(`📦 Impuestos live: ${totalPaginas} páginas...`);
+                    let cursor = 2;
+                    while (cursor <= totalPaginas) {
+                        const lote = [];
+                        for (let k = 0; k < CONCURRENCIA && cursor <= totalPaginas; k++, cursor++) lote.push(cursor);
+                        const resultados = await Promise.all(lote.map(async (pag) => {
+                            const url = `${URL_ACUMULADOS}&paginacion=numPag=${pag}|tamPag=${TAM_PAGINA}`;
+                            try {
+                                const r = await axios.get(url, {
+                                    headers: { ConniKey: process.env.CONNI_KEY, ConniToken: process.env.CONNI_TOKEN },
+                                    timeout: 120000
+                                });
+                                let d = r.data;
+                                if (d.detalle && d.detalle.Datos) return d.detalle.Datos;
+                                if (d.detalle && d.detalle.Table) return d.detalle.Table;
+                                if (d.Table) return d.Table;
+                                return [];
+                            } catch (e) { return []; }
+                        }));
+                        for (const reg of resultados) {
+                            if (Array.isArray(reg) && reg.length > 0) liveLines.push(...reg);
+                        }
+                    }
+                }
+
+                // Filtrar solo las de hoy y mapearlas al formato de la DB
+                liveLines = liveLines.filter(d => (d.FECHA_DOCTO || '').startsWith(hoy)).map(row => ({
+                    co_doc: row.CoDoc,
+                    id_tipo_docto: row.ID_TIPO_DOCTO,
+                    consec_docto: row.CONSEC_DOCTO,
+                    valor_bruto: row.VALOR_BRUTO,
+                    vlr_tot_dscto: row.vlr_tot_dscto,
+                    nit_tercero: row.NitTercero,
+                    iv03_porcentaje_base: row.IV03_Porcentaje_Base, iv03_vlr_tot: row.IV03_Vlr_Tot,
+                    iv02_porcentaje_base: row.IV02_Porcentaje_Base, iv02_vlr_tot: row.IV02_Vlr_Tot,
+                    ico_porcentaje_base: row.ICO_Porcentaje_Base, ico_vlr_tot: row.ICO_Vlr_Tot,
+                    iv08_porcentaje_base: row.IV08_Porcentaje_Base, iv08_vlr_tot: row.IV08_Vlr_Tot,
+                    iv07_porcentaje_base: row.IV07_Porcentaje_Base, iv07_vlr_tot: row.IV07_Vlr_Tot,
+                    iv01_porcentaje_base: row.IV01_Porcentaje_Base, iv01_vlr_tot: row.IV01_Vlr_Tot,
+                    otros_impuestos_vlr_tot: row.Otros_Impuestos_Vlr_Tot
+                }));
+
+                liveRecords = liveLines.length;
+                console.log(`✅ Impuestos live: ${liveRecords} registros de hoy obtenidos.`);
+                lines = lines.concat(liveLines);
+                source = 'database+live';
+            } catch (e) {
+                console.error('⚠️ Error fetch live desde Connekta:', e.message);
+            }
+        }
+
+        // ══════════════════════════════════════════════════
+        // 3) AGREGAR DATOS
+        // ══════════════════════════════════════════════════
+        if (lines.length === 0) {
+            return res.status(200).json({
+                success: true,
+                totalBase: 0, totalBaseGravable: 0, totalImpuestos: 0,
+                totalFacturas: 0, totalDocumentos: 0,
+                porLlave: [], porTipo: { reales: emptyDay(), genericos: emptyDay() },
+                porCaja: {}, cajas: [],
+                _source: source, _liveRecords: liveRecords
             });
         }
 
-        totalDocumentos = totalFacturas;
+        const aggregated = aggregateDayLines(lines);
 
-        // 2) Cargar sps_facturas para fechas NO cubiertas por offline
-        const { co } = req.query;
-        let facturasQuery = logger.supabase
-            .from('sps_facturas')
-            .select('co, caja, consec, estado, neto, impuestos, fecha_factura')
-            .not('impuestos', 'is', null)
-            .gte('fecha_factura', fechaInicio)
-            .lte('fecha_factura', fechaFin);
-        facturasQuery = buildCoFilter(facturasQuery, co);
-        const { data, error } = await facturasQuery;
-
-        if (error) throw error;
-
-        // Deduplicar y filtrar fechas ya cubiertas por offline
-        const PRIORIDAD = { 'FALLO': 3, 'SIN_RECAUDO': 2, 'OK': 1 };
-        const unicos = new Map();
-        (data || []).forEach(f => {
-            if (fechasConOffline.has(f.fecha_factura)) return; // ya cubierto por offline
-            const key = `${f.co || ''}:${f.caja || ''}:${f.consec}`;
-            const prev = unicos.get(key);
-            if (!prev || (PRIORIDAD[f.estado] || 0) > (PRIORIDAD[prev.estado] || 0)) {
-                unicos.set(key, f);
-            }
-        });
-        const facturas = [...unicos.values()];
-
-        let docsFromFacturas = 0;
-        facturas.forEach(f => {
-            totalBase += parseFloat(f.neto) || 0;
-            docsFromFacturas++;
-            (f.impuestos || []).forEach(imp => {
-                const llave = imp.ID_LLAVE_IMPUESTO || 'OTROS';
-                if (!porLlave[llave]) {
-                    porLlave[llave] = {
-                        llave,
-                        descripcion: DESCRIPCIONES[llave] || llave,
-                        valorTotal: 0,
-                        baseGravable: 0,
-                        count: 0
-                    };
+        // ── Filtrar porCaja por CAJA_FILTER ──
+        const cajaFilterEnv = (process.env.CAJA_FILTER || '').trim();
+        if (cajaFilterEnv) {
+            const permitidas = cajaFilterEnv.split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
+            const filtered = {};
+            const filteredCajas = [];
+            for (const caja of aggregated.cajas) {
+                if (permitidas.includes(caja)) {
+                    filtered[caja] = aggregated.porCaja[caja];
+                    filteredCajas.push(caja);
                 }
-                porLlave[llave].valorTotal += parseFloat(imp.VALOR_TOTAL) || 0;
-                porLlave[llave].baseGravable += parseFloat(imp.BASE_GRAVABLE) || 0;
-                porLlave[llave].count++;
-            });
-        });
-
-        totalFacturas += facturas.length;
-        totalDocumentos += docsFromFacturas;
-
-        const totalImpuestos = Object.values(porLlave).reduce((s, v) => s + v.valorTotal, 0);
-        const totalBaseGravable = Object.values(porLlave).reduce((s, v) => s + v.baseGravable, 0);
+            }
+            aggregated.porCaja = filtered;
+            aggregated.cajas = filteredCajas;
+        }
 
         res.status(200).json({
             success: true,
-            totalBase: Math.round(totalBase),
-            totalBaseGravable: Math.round(totalBaseGravable),
-            totalImpuestos: Math.round(totalImpuestos),
-            totalFacturas,
-            totalDocumentos,
-            porLlave: Object.values(porLlave).sort((a, b) => b.valorTotal - a.valorTotal)
+            ...aggregated,
+            _source: source,
+            _liveRecords: liveRecords,
+            _fechaInicio: fechaInicio,
+            _fechaFin: fechaFin
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+
+// ── Helpers para agregación directa de líneas de DB ──
+function emptyDay() {
+    return { porLlave: [], totalImpuestos: 0, totalBaseGravable: 0, totalBase: 0, totalLineas: 0, totalDocumentos: 0 };
+}
+
+function aggregateDayLines(lines) {
+    const DESCRripciones = {
+        'IV02': 'IVA 5% BIENES', 'IV03': 'IVA 19% BIENES', 'IV04': 'IVA 19% SERVICIOS',
+        'IV05': 'IVA 19% HONORARIOS', 'IV06': 'IVA 19% ARRENDAMIENTOS', 'IV07': 'IVA 19% CERVEZA',
+        'IV08': 'IVA DEL 19% EN GASEOSAS', 'ICO': 'IMPUESTO AL CONSUMO', 'OTROS': 'OTROS IMPUESTOS'
+    };
+    const TAX_MAP = [
+        { llave: 'IV03', base: 'iv03_porcentaje_base', valorTot: 'iv03_vlr_tot' },
+        { llave: 'IV02', base: 'iv02_porcentaje_base', valorTot: 'iv02_vlr_tot' },
+        { llave: 'ICO',  base: 'ico_porcentaje_base',  valorTot: 'ico_vlr_tot' },
+        { llave: 'IV08', base: 'iv08_porcentaje_base', valorTot: 'iv08_vlr_tot' },
+        { llave: 'IV07', base: 'iv07_porcentaje_base', valorTot: 'iv07_vlr_tot' },
+        { llave: 'IV01', base: 'iv01_porcentaje_base', valorTot: 'iv01_vlr_tot' },
+    ];
+    const GENERIC_NIT = '222222222222';
+
+    function aggSubset(subset) {
+        const porLlave = {};
+        const docsPorLlave = {};
+        let totalBase = 0, totalLineas = 0;
+        const docsUnicos = new Set();
+
+        subset.forEach(d => {
+            const bruto = parseFloat(d.valor_bruto) || 0;
+            const dscto = parseFloat(d.vlr_tot_dscto) || 0;
+            const baseNeta = bruto - dscto;
+            totalBase += bruto;
+            totalLineas++;
+            
+            const docKey = `${d.co_doc}|${d.id_tipo_docto}|${d.consec_docto}`;
+            docsUnicos.add(docKey);
+
+            TAX_MAP.forEach(col => {
+                const valorTot = parseFloat(d[col.valorTot]) || 0;
+                if (Math.abs(valorTot) < 0.01) return;
+                const porcentajeBase = parseFloat(d[col.base]) || 100;
+                const baseGravableLinea = baseNeta * (porcentajeBase / 100);
+                
+                if (!porLlave[col.llave]) {
+                    porLlave[col.llave] = { llave: col.llave, descripcion: DESCRripciones[col.llave] || col.llave, valorTotal: 0, baseGravable: 0, count: 0 };
+                    docsPorLlave[col.llave] = new Set();
+                }
+                porLlave[col.llave].valorTotal += valorTot;
+                porLlave[col.llave].baseGravable += baseGravableLinea;
+                porLlave[col.llave].count++;
+                docsPorLlave[col.llave].add(docKey);
+            });
+
+            const otrosTot = parseFloat(d.otros_impuestos_vlr_tot) || 0;
+            if (Math.abs(otrosTot) >= 0.01) {
+                if (!porLlave['OTROS']) {
+                    porLlave['OTROS'] = { llave: 'OTROS', descripcion: DESCRripciones['OTROS'], valorTotal: 0, baseGravable: 0, count: 0 };
+                    docsPorLlave['OTROS'] = new Set();
+                }
+                porLlave['OTROS'].valorTotal += otrosTot;
+                porLlave['OTROS'].baseGravable += baseNeta;
+                porLlave['OTROS'].count++;
+                docsPorLlave['OTROS'].add(docKey);
+            }
+        });
+
+        const arr = Object.values(porLlave)
+            .map(item => ({ ...item, count: docsPorLlave[item.llave] ? docsPorLlave[item.llave].size : item.count }))
+            .sort((a, b) => b.valorTotal - a.valorTotal);
+
+        return {
+            porLlave: arr,
+            totalImpuestos: Math.round(arr.reduce((s, v) => s + v.valorTotal, 0)),
+            totalBaseGravable: Math.round(arr.reduce((s, v) => s + v.baseGravable, 0)),
+            totalBase: Math.round(totalBase),
+            totalLineas,
+            totalDocumentos: docsUnicos.size
+        };
+    }
+
+    const total = aggSubset(lines);
+    const reales = lines.filter(d => (d.nit_tercero || '').trim() !== GENERIC_NIT);
+    const genericos = lines.filter(d => (d.nit_tercero || '').trim() === GENERIC_NIT);
+
+    const cajaGroups = {};
+    lines.forEach(d => {
+        const caja = (d.id_tipo_docto || '').trim().toUpperCase() || 'SIN_CAJA';
+        if (!cajaGroups[caja]) cajaGroups[caja] = [];
+        cajaGroups[caja].push(d);
+    });
+    const cajasOrdenadas = Object.keys(cajaGroups).sort((a, b) => {
+        const sumA = cajaGroups[a].reduce((s, d) => s + (parseFloat(d.valor_bruto) || 0), 0);
+        const sumB = cajaGroups[b].reduce((s, d) => s + (parseFloat(d.valor_bruto) || 0), 0);
+        return sumB - sumA;
+    });
+    const porCaja = {};
+    cajasOrdenadas.forEach(caja => { porCaja[caja] = aggSubset(cajaGroups[caja]); });
+
+    return {
+        totalBase: total.totalBase,
+        totalBaseGravable: total.totalBaseGravable,
+        totalImpuestos: total.totalImpuestos,
+        totalFacturas: total.totalLineas,
+        totalDocumentos: total.totalDocumentos,
+        porLlave: total.porLlave,
+        porTipo: { reales: aggSubset(reales), genericos: aggSubset(genericos) },
+        porCaja,
+        cajas: cajasOrdenadas
+    };
+}
 
 /**
  * GET /api/logs/resumen-ajustes
@@ -1073,6 +1230,38 @@ app.get('/api/logs/resumen-ajustes', async (req, res) => {
 });
 
 /**
+ * GET /api/connekta/stats-pos
+ * Proxy para la consulta POS stats de Connekta. El frontend usa este endpoint
+ * en vez de llamar directo a Connekta para evitar CORS y exponer API keys.
+ */
+app.get('/api/connekta/stats-pos', async (req, res) => {
+    try {
+        const CIA = process.env.CIA || '7375';
+        const queryStats = process.env.QUERY_STATS || 'merkahorro_venta_pos_stats_dev';
+        const URL_STATS = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=${queryStats}`;
+
+        const resp = await axios.get(URL_STATS, {
+            headers: {
+                'ConniKey': process.env.CONNI_KEY,
+                'ConniToken': process.env.CONNI_TOKEN
+            },
+            timeout: 30000
+        });
+
+        let raw = resp.data;
+        if (raw.detalle && raw.detalle.Datos) raw = raw.detalle.Datos;
+        else if (raw.detalle && raw.detalle.Table) raw = raw.detalle.Table;
+        else if (raw.Table) raw = raw.Table;
+        const docs = Array.isArray(raw) ? raw : [];
+
+        res.json({ success: true, data: docs, count: docs.length });
+    } catch (error) {
+        console.error('❌ Error proxy Connekta stats-pos:', error.message);
+        res.status(502).json({ success: false, error: error.message });
+    }
+});
+
+/**
  * GET /api/diagnostico/env
  * Diagnóstico: muestra estado de variables de entorno para notificaciones
  */
@@ -1102,6 +1291,7 @@ if (!process.env.VERCEL) {
         console.log(`- GET  http://localhost:${PORT}/api/logs/ajustes`);
         console.log(`- GET  http://localhost:${PORT}/api/logs/resumen-impuestos`);
         console.log(`- GET  http://localhost:${PORT}/api/logs/resumen-ajustes`);
+        console.log(`- GET  http://localhost:${PORT}/api/connekta/stats-pos`);
             console.log(`- POST http://localhost:${PORT}/api/reportes/generar`);
         console.log(`- GET  http://localhost:${PORT}/api/reportes/config`);
         console.log(`- POST http://localhost:${PORT}/api/reportes/config`);
