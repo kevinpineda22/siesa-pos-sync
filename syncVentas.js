@@ -625,6 +625,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             if (!cajaPorCo[co]) cajaPorCo[co] = idCaja;
         });
     }
+    // Override: CO 011 comparte la misma caja física 001 en Siesa
+    cajaPorCo["011"] = "001";
 
     // AGRUPAR POR CO | CAJA | CONSEC (cada grupo solo tiene items y pagos de una caja)
     const buildKey = (co, caja, consec) => `${(co || '').trim() || '001'}|${(caja || '').trim() || '000'}|${consec}`;
