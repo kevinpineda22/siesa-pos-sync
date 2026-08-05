@@ -50,3 +50,17 @@ jobs:
           # --- Configuracion (con fallback a los defaults del script) ---
           SIESA_POS_COMPANY: ${{ secrets.CIA || '7375' }}
           SIESA_POS_QUERY_DESCRIPTION: ${{ secrets.SIESA_POS_QUERY_DESCRIPTION || 'merkahorro_informe_acumulados' }}
+
+      - name: Notificar fallo por correo
+        if: failure()
+        run: node scripts/notifyAnalyticsFailure.js
+        env:
+          # --- Envio de correo (SMTP, GitHub Secrets) ---
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_SECURE: ${{ secrets.SMTP_SECURE }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          # --- Destinatarios: los mismos de error del flujo de sincronizacion ---
+          NOTIFY_ERROR_EMAILS: ${{ secrets.NOTIFY_ERROR_EMAILS }}
