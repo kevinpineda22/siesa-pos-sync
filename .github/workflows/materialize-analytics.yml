@@ -1,0 +1,52 @@
+name: Materializar analitica POS (diario 3:00 a.m.)
+
+# Descarga las lineas POS del query merkahorro_informe_acumulados (ventana movil de
+# 3 dias configurada en Siesa Connekta) y materializa las tablas analiticas en Supabase
+# (siesa_pos_facturas, siesa_pos_estadisticas_diarias, siesa_pos_items_diarios).
+# Al correr de madrugada, 'ayer' siempre queda dentro de la ventana de 3 dias.
+
+on:
+  schedule:
+    # 08:00 UTC = 3:00 a.m. en Bogota (UTC-5). El cron de GitHub puede retrasarse algunos minutos.
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    inputs:
+      nota:
+        description: 'Nota opcional (p. ej. "reconciliacion manual con query de rango completo").'
+        required: false
+        default: ''
+
+# Evita que dos corridas se solapen (no cancela la que esta en curso).
+concurrency:
+  group: materialize-analytics
+  cancel-in-progress: false
+
+jobs:
+  materializar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Node >= 22 es REQUERIDO: @supabase/supabase-js necesita WebSocket nativo.
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Descargar y materializar analitica
+        run: node scripts/sync_siesa_pos_ventas.js
+        env:
+          # --- Credenciales / conexion (GitHub Secrets) ---
+          CONNI_KEY: ${{ secrets.CONNI_KEY }}
+          CONNI_TOKEN: ${{ secrets.CONNI_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # --- Configuracion (con fallback a los defaults del script) ---
+          SIESA_POS_COMPANY: ${{ secrets.CIA || '7375' }}
+          SIESA_POS_QUERY_DESCRIPTION: ${{ secrets.SIESA_POS_QUERY_DESCRIPTION || 'merkahorro_informe_acumulados' }}
