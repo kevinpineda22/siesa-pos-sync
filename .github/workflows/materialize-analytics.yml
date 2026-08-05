@@ -1,14 +1,14 @@
-name: Materializar analitica POS (diario 3:00 a.m.)
+name: Materializar analitica POS (diario 10:00 a.m.)
 
 # Descarga las lineas POS del query merkahorro_informe_acumulados (ventana movil de
 # 3 dias configurada en Siesa Connekta) y materializa las tablas analiticas en Supabase
 # (siesa_pos_facturas, siesa_pos_estadisticas_diarias, siesa_pos_items_diarios).
-# Al correr de madrugada, 'ayer' siempre queda dentro de la ventana de 3 dias.
+# Al correr a las 10 a.m., 'ayer' ya cerro en Siesa y siempre queda dentro de la ventana de 3 dias.
 
 on:
   schedule:
-    # 08:00 UTC = 3:00 a.m. en Bogota (UTC-5). El cron de GitHub puede retrasarse algunos minutos.
-    - cron: '0 8 * * *'
+    # 15:00 UTC = 10:00 a.m. en Bogota (UTC-5). El cron de GitHub puede retrasarse algunos minutos.
+    - cron: '0 15 * * *'
   workflow_dispatch:
     inputs:
       nota:
