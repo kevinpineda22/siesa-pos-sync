@@ -1,0 +1,93 @@
+name: Sync 011 Genericos -> Siesa (diario 9pm)
+
+# Flujo EXCLUSIVO del CO 011 / caja Z01 / clientes genericos (222222222222).
+# Toma las genericas del dia, muestrea el 10% (determinista distribuido) y las procesa
+# con la mecanica CNZ->CFZ (igual que el flujo normal). NO toca el flujo normal ni las
+# estadisticas. Corre DENTRO del runner de GitHub Actions (node directo), no via Vercel.
+
+on:
+  schedule:
+    # 9:00 pm hora Colombia (COT, UTC-5, sin horario de verano) = 02:00 UTC del dia siguiente.
+    # OJO: el cron de GitHub es en UTC y puede retrasarse minutos bajo carga.
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      porcentaje:
+        description: 'PRUEBA: porcentaje del muestreo (vacio = 10).'
+        required: false
+        default: ''
+      fecha:
+        description: 'PRUEBA: dia a procesar YYYY-MM-DD (vacio = hoy Bogota).'
+        required: false
+        default: ''
+      solo_cnz:
+        description: 'PRUEBA: cortar en CNZ (no envia CFZ).'
+        required: false
+        type: choice
+        options: ['false', 'true']
+        default: 'false'
+      dry_run:
+        description: 'PRUEBA: solo mostrar la muestra, NO enviar nada a Siesa.'
+        required: false
+        type: choice
+        options: ['false', 'true']
+        default: 'false'
+      entorno:
+        description: 'Entorno de ESCRITURA de este flujo (default QA). PROD solo al salir a produccion.'
+        required: false
+        type: choice
+        options: ['QA', 'PROD']
+        default: 'QA'
+
+# Evita que dos corridas se solapen (no cancela la que esta en curso).
+concurrency:
+  group: sync-011-gen
+  cancel-in-progress: false
+
+jobs:
+  sync-011-gen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Node >= 22 es REQUERIDO: @supabase/supabase-js necesita WebSocket nativo.
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Ejecutar sincronizacion 011-genericos
+        run: node scripts/runSync011GenCron.js
+        env:
+          # --- Credenciales / conexion (GitHub Secrets) ---
+          CONNI_KEY: ${{ secrets.CONNI_KEY }}
+          CONNI_TOKEN: ${{ secrets.CONNI_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # --- Configuracion del flujo ---
+          CIA: ${{ secrets.CIA }}
+          # Entorno de ESCRITURA de ESTE flujo, INDEPENDIENTE del flujo normal. Default QA:
+          # el cron diario escribe a Siesa QA. NO se usa el secret compartido ENTORNO_SIESA,
+          # asi que el flujo normal (PROD) queda intacto.
+          ENTORNO_SIESA_011: ${{ github.event.inputs.entorno || 'QA' }}
+          CONCURRENCIA: ${{ secrets.CONCURRENCIA }}
+          PAGINACION_CONCURRENCIA: ${{ secrets.PAGINACION_CONCURRENCIA }}
+          MAX_RONDAS_AJUSTE: ${{ secrets.MAX_RONDAS_AJUSTE }}
+          # --- Parametros del muestreo (el cron los deja vacios = produccion: 10% de hoy) ---
+          MUESTRA_PORCENTAJE_011: ${{ github.event.inputs.porcentaje || '' }}
+          MUESTRA_FECHA_011: ${{ github.event.inputs.fecha || '' }}
+          MUESTRA_SOLO_CNZ: ${{ github.event.inputs.solo_cnz || 'false' }}
+          MUESTRA_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          # --- Notificaciones por correo (GitHub Secrets) ---
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          NOTIFY_ERROR_EMAILS: ${{ secrets.NOTIFY_ERROR_EMAILS }}
+          NOTIFY_CPE_EMAILS: ${{ secrets.NOTIFY_CPE_EMAILS }}

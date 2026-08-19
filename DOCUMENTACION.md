@@ -38,6 +38,7 @@ Backend Node.js + Frontend React que sincroniza ventas de un sistema POS hacia e
 22. [Deploy](#22-deploy)
 23. [Resolución de problemas comunes](#23-resolución-de-problemas-comunes)
 24. [Historial de cambios](#24-historial-de-cambios)
+25. [Flujo 011 Genéricos (muestreo diario 9pm)](#25-flujo-011-genéricos-muestreo-diario-9pm)
 
 ---
 
@@ -1352,6 +1353,13 @@ Verificar con `GET /api/diagnostico/env` que las variables SMTP y NOTIFY estén 
 
 ## 24. Historial de cambios
 
+### Agosto 2026 — Flujo 011 Genéricos
+- **Nuevo flujo `sync011Gen.js`** (fork de `syncVentas.js`): exclusivo CO 011 / caja Z01 / clientes genéricos (222222222222), muestreo del 10% diario, cron 9pm COT. Ver [sección 25](#25-flujo-011-genéricos-muestreo-diario-9pm).
+- **3 queries Connekta nuevas** `_011_gen` (ventas/impuestos/pagos): invierten el filtro de NIT (solo `= 222222222222`), acotan `CO=011` y `Z01`, y usan `LEFT OUTER JOIN` de clientes.
+- **Muestreo determinista distribuido**: toma el 10% de las genéricas del día repartido de punta a punta (reproducible).
+- **Escritura aislada a QA** vía switch propio `ENTORNO_SIESA_011` (default QA), independiente del flujo normal (que sigue en PROD).
+- **Workflow `sync-011-gen.yml`** + orquestador `scripts/runSync011GenCron.js`.
+
 ### Julio 2026 (semana 2) — último
 - **ICO ya no se salta:** se envía a Siesa con VLR_UNI corregido (VLR_UNI=0 cuando TASA>0, ICO con TASA=0 se respeta). Migración de registros legacy `'ICO'`.
 - **Notificación de conversión DOM→EFE:** nueva función `sendConversionNotification()` en notifier.js con template naranja
@@ -1413,6 +1421,95 @@ Verificar con `GET /api/diagnostico/env` que las variables SMTP y NOTIFY estén 
 - Costo promedio por instalación
 - Filtros CO/Caja dinámicos
 - GitHub Actions implementado
+
+---
+
+## 25. Flujo 011 Genéricos (muestreo diario 9pm)
+
+Flujo **independiente y adicional** al normal. Procesa las facturas de **clientes genéricos** (`222222222222`) del **CO 011 / caja Z01**, tomando una **muestra del 10%** de las del día, una vez al día a las **9:00 pm (COT)**. Reutiliza la MISMA mecánica del flujo normal (CNZ→CFZ, auto-corrección, DOM→EFE, CPE, idempotencia).
+
+### ¿Por qué un flujo aparte?
+
+El flujo normal (`syncVentas.js`) **excluye** los genéricos (`<> '222222222222'`) y procesa solo NIT reales. Este flujo hace lo **inverso**: solo genéricos del 011/Z01. Como la lógica de armado del documento debía ser idéntica y no se podía tocar `syncVentas.js`, se hizo un **fork** (`sync011Gen.js`).
+
+> ⚠️ **`sync011Gen.js` es una copia de `syncVentas.js`.** Si se arregla un bug en la lógica de payload/cuadre/CxC/CPE del flujo normal, hay que **replicarlo en el fork** o los dos flujos divergen.
+
+### Diferencias vs. flujo normal
+
+| Aspecto | Flujo normal | Flujo 011 genéricos |
+|---------|--------------|----------------------|
+| Archivo | `syncVentas.js` | `sync011Gen.js` (fork) |
+| CO / Caja | 001 (Z01,Z02) + 011 (Z01) | **011 / Z01 exclusivo** |
+| Clientes | NIT reales (excluye 222222222222) | **Solo 222222222222** |
+| Cadencia | Cada 1 h | **Diaria, 9pm COT** |
+| Alcance | Todas las nuevas del día | **Muestra del 10%** de las genéricas del día |
+| Entorno escritura | `ENTORNO_SIESA` (PROD) | **`ENTORNO_SIESA_011` (default QA)** |
+| Estadísticas diarias | Las guarda | **No las toca** |
+
+### Queries Connekta (`_011_gen`)
+
+Espejo de las normales, con 3 cambios: (1) `f9820_id_cliente_pdv = '222222222222'` (invertido), (2) `f9820_id_co = '011'` y `f9820_id_tipo_docto = 'Z01'`, (3) cliente en `LEFT OUTER JOIN`. Ventana de fecha `>= DATEADD(day, -2, GETDATE())` (el corte del día se hace en Node con hora Bogotá, **nunca** con la fecha del server SQL, que está en otra zona horaria).
+
+| Query | Base | Uso |
+|-------|------|-----|
+| `merkahorro_venta_pos_011_gen` | `merkahorro_venta_pos_dev` | Detalle de ventas |
+| `merkahorro_imptos_pos_011_gen` | `merkahorro_imptos_pos_dev` | Impuestos por línea |
+| `merkahorro_pagos_pos_011_gen` | `merkahorro_pagos_pos_dev` | Medios de pago (EFE/TR) |
+
+Inventario y costo (`merkahorro_consulta_inventario`, `merkahorro_costo_promedio_dev`) se **reutilizan** tal cual. El fork usa **paginación completa** (`tamPag=1000`), no solo la primera página de 100.
+
+### Muestreo del 10% (determinista distribuido)
+
+Se calcula UNA sola vez y se comparte entre CNZ y CFZ (ambos pasos procesan exactamente las mismas facturas). Sobre los consecutivos genéricos del día **ordenados**, toma el 10% repartido de punta a punta:
+
+```
+target = max(1, round(total * 10 / 100))     // redondeo al más cercano, mínimo 1
+índice_i = round(i * total / target)          // i = 0..target-1  (espaciado uniforme)
+```
+
+Ejemplos: 60 → 6 (índices 0,10,20,30,40,50) · 43 → 4 · 7 → 1 · 0 → 0. Es **reproducible**: un reintento del job elige exactamente las mismas → seguro con la idempotencia.
+
+### Escritura aislada a QA
+
+El fork usa su **propio** switch `ENTORNO_SIESA_011` (default `QA`), distinto del `ENTORNO_SIESA` del flujo normal. Así, mientras se prueba, escribe **siempre a Siesa QA** sin afectar la producción del flujo normal. La **lectura** de Connekta siempre es PROD (solo SELECT, no inserta). Para pasar el flujo a producción: `ENTORNO_SIESA_011=PROD`.
+
+### Variables de entorno del flujo
+
+| Variable | Default | Descripción |
+|----------|---------|-------------|
+| `ENTORNO_SIESA_011` | `QA` | Entorno de ESCRITURA de este flujo (QA/PROD) |
+| `MUESTRA_PORCENTAJE_011` | `10` | Porcentaje del muestreo |
+| `MUESTRA_FECHA_011` | hoy Bogotá | Fecha a procesar (YYYY-MM-DD), para reprocesar un día en pruebas |
+| `MUESTRA_SOLO_CNZ` | `false` | Corta en CNZ (no envía CFZ) |
+| `MUESTRA_DRY_RUN` | `false` | Solo muestra la muestra y sale SIN escribir a Siesa |
+
+### Archivos
+
+| Archivo | Rol |
+|---------|-----|
+| `sync011Gen.js` | Motor (fork). Exporta `sync011Gen(opciones)` |
+| `scripts/runSync011GenCron.js` | Orquestador del job (para GitHub Actions) |
+| `.github/workflows/sync-011-gen.yml` | Cron `0 2 * * *` (= 9pm COT). Inputs de dispatch: porcentaje, fecha, solo_cnz, dry_run, entorno |
+
+### Cómo probar
+
+```bash
+# 1) Ver la muestra del día SIN escribir nada (read-only)
+MUESTRA_DRY_RUN=true node scripts/runSync011GenCron.js
+
+# 2) Enviar UNA sola CNZ a QA (porcentaje 1 → mínimo 1 factura), sin correos
+MUESTRA_PORCENTAJE_011=1 MUESTRA_SOLO_CNZ=true \
+  NOTIFY_ERROR_EMAILS='' NOTIFY_CPE_EMAILS='' NOTIFY_EMAILS='' \
+  node scripts/runSync011GenCron.js
+
+# 3) Ciclo CNZ→CFZ del 10% real a QA
+NOTIFY_ERROR_EMAILS='' NOTIFY_CPE_EMAILS='' NOTIFY_EMAILS='' \
+  node scripts/runSync011GenCron.js
+```
+
+### Trazabilidad
+
+Los documentos de este flujo quedan en `sps_facturas` con id `{tipo}:011:Z01:{consec}`. Se identifican de forma **inequívoca** por **`cliente_nit = '222222222222'`** (el flujo normal nunca envía genéricos). El frontend usa ese marcador para mostrar la actividad exclusiva del flujo 011-genéricos.
 
 ---
 
