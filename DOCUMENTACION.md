@@ -1354,7 +1354,7 @@ Verificar con `GET /api/diagnostico/env` que las variables SMTP y NOTIFY estén 
 ## 24. Historial de cambios
 
 ### Agosto 2026 — Flujo 011 Genéricos
-- **Nuevo flujo `sync011Gen.js`** (fork de `syncVentas.js`): exclusivo CO 011 / caja Z01 / clientes genéricos (222222222222), muestreo del 10% diario, cron 9pm COT. Ver [sección 25](#25-flujo-011-genéricos-muestreo-diario-9pm).
+- **Nuevo flujo `sync011Gen.js`** (fork de `syncVentas.js`): exclusivo CO 011 / caja Z01 / clientes genéricos (222222222222), muestreo del 10% diario, cron 10pm COT. Ver [sección 25](#25-flujo-011-genéricos-muestreo-diario-9pm).
 - **3 queries Connekta nuevas** `_011_gen` (ventas/impuestos/pagos): invierten el filtro de NIT (solo `= 222222222222`), acotan `CO=011` y `Z01`, y usan `LEFT OUTER JOIN` de clientes.
 - **Muestreo determinista distribuido**: toma el 10% de las genéricas del día repartido de punta a punta (reproducible).
 - **Escritura aislada a QA** vía switch propio `ENTORNO_SIESA_011` (default QA), independiente del flujo normal (que sigue en PROD).
@@ -1426,7 +1426,7 @@ Verificar con `GET /api/diagnostico/env` que las variables SMTP y NOTIFY estén 
 
 ## 25. Flujo 011 Genéricos (muestreo diario 9pm)
 
-Flujo **independiente y adicional** al normal. Procesa las facturas de **clientes genéricos** (`222222222222`) del **CO 011 / caja Z01**, tomando una **muestra del 10%** de las del día, una vez al día a las **9:00 pm (COT)**. Reutiliza la MISMA mecánica del flujo normal (CNZ→CFZ, auto-corrección, DOM→EFE, CPE, idempotencia).
+Flujo **independiente y adicional** al normal. Procesa las facturas de **clientes genéricos** (`222222222222`) del **CO 011 / caja Z01**, tomando una **muestra del 10%** de las del día, una vez al día a las **10:00 pm (COT)**. Reutiliza la MISMA mecánica del flujo normal (CNZ→CFZ, auto-corrección, DOM→EFE, CPE, idempotencia).
 
 ### ¿Por qué un flujo aparte?
 
@@ -1441,7 +1441,7 @@ El flujo normal (`syncVentas.js`) **excluye** los genéricos (`<> '222222222222'
 | Archivo | `syncVentas.js` | `sync011Gen.js` (fork) |
 | CO / Caja | 001 (Z01,Z02) + 011 (Z01) | **011 / Z01 exclusivo** |
 | Clientes | NIT reales (excluye 222222222222) | **Solo 222222222222** |
-| Cadencia | Cada 1 h | **Diaria, 9pm COT** |
+| Cadencia | Cada 1 h | **Diaria, 10pm COT** |
 | Alcance | Todas las nuevas del día | **Muestra del 10%** de las genéricas del día |
 | Entorno escritura | `ENTORNO_SIESA` (PROD) | **`ENTORNO_SIESA_011` (default QA)** |
 | Estadísticas diarias | Las guarda | **No las toca** |
@@ -1477,7 +1477,7 @@ El fork usa su **propio** switch `ENTORNO_SIESA_011` (default `QA`), distinto de
 
 | Variable | Default | Descripción |
 |----------|---------|-------------|
-| `ENTORNO_SIESA_011` | `QA` | Entorno de ESCRITURA de este flujo (QA/PROD) |
+| `ENTORNO_SIESA_011` | `QA` (código) / `PROD` (cron) | Entorno de ESCRITURA de este flujo. Default `QA` en el código (seguro para correr local); el cron del workflow lo setea a `PROD` |
 | `MUESTRA_PORCENTAJE_011` | `10` | Porcentaje del muestreo |
 | `MUESTRA_FECHA_011` | hoy Bogotá | Fecha a procesar (YYYY-MM-DD), para reprocesar un día en pruebas |
 | `MUESTRA_SOLO_CNZ` | `false` | Corta en CNZ (no envía CFZ) |
@@ -1489,7 +1489,7 @@ El fork usa su **propio** switch `ENTORNO_SIESA_011` (default `QA`), distinto de
 |---------|-----|
 | `sync011Gen.js` | Motor (fork). Exporta `sync011Gen(opciones)` |
 | `scripts/runSync011GenCron.js` | Orquestador del job (para GitHub Actions) |
-| `.github/workflows/sync-011-gen.yml` | Cron `0 2 * * *` (= 9pm COT). Inputs de dispatch: porcentaje, fecha, solo_cnz, dry_run, entorno |
+| `.github/workflows/sync-011-gen.yml` | Cron `0 3 * * *` (= 10pm COT). El cron escribe a **PROD**; el dispatch manual usa el input `entorno` (default QA). Inputs: porcentaje, fecha, solo_cnz, dry_run, entorno |
 
 ### Cómo probar
 

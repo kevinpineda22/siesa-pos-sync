@@ -1,4 +1,4 @@
-name: Sync 011 Genericos -> Siesa (diario 9pm)
+name: Sync 011 Genericos -> Siesa (diario 10pm)
 
 # Flujo EXCLUSIVO del CO 011 / caja Z01 / clientes genericos (222222222222).
 # Toma las genericas del dia, muestrea el 10% (determinista distribuido) y las procesa
@@ -7,9 +7,9 @@ name: Sync 011 Genericos -> Siesa (diario 9pm)
 
 on:
   schedule:
-    # 9:00 pm hora Colombia (COT, UTC-5, sin horario de verano) = 02:00 UTC del dia siguiente.
+    # 10:00 pm hora Colombia (COT, UTC-5, sin horario de verano) = 03:00 UTC del dia siguiente.
     # OJO: el cron de GitHub es en UTC y puede retrasarse minutos bajo carga.
-    - cron: '0 2 * * *'
+    - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
       porcentaje:
@@ -72,10 +72,11 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           # --- Configuracion del flujo ---
           CIA: ${{ secrets.CIA }}
-          # Entorno de ESCRITURA de ESTE flujo, INDEPENDIENTE del flujo normal. Default QA:
-          # el cron diario escribe a Siesa QA. NO se usa el secret compartido ENTORNO_SIESA,
-          # asi que el flujo normal (PROD) queda intacto.
-          ENTORNO_SIESA_011: ${{ github.event.inputs.entorno || 'QA' }}
+          # Entorno de ESCRITURA de ESTE flujo, INDEPENDIENTE del flujo normal.
+          # El cron diario escribe a Siesa PROD. El dispatch manual usa el input 'entorno'
+          # (default QA) para poder correr pruebas sin tocar produccion. NO usa el secret
+          # compartido ENTORNO_SIESA, asi que el flujo normal queda independiente.
+          ENTORNO_SIESA_011: ${{ github.event.inputs.entorno || 'PROD' }}
           CONCURRENCIA: ${{ secrets.CONCURRENCIA }}
           PAGINACION_CONCURRENCIA: ${{ secrets.PAGINACION_CONCURRENCIA }}
           MAX_RONDAS_AJUSTE: ${{ secrets.MAX_RONDAS_AJUSTE }}
