@@ -627,6 +627,10 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     }
     // Override: CO 011 comparte la misma caja física 001 en Siesa
     cajaPorCo["011"] = "001";
+    // Override: CO 003 usa la MISMA caja contable "001" que el 011 en Siesa (auxiliar 001-001-COP,
+    // ID_CO forzado a 001). El "03 " que se probó antes NO tenía auxiliar (001-03 -COP no existe).
+    // Se fija acá para no depender de lo que devuelva merkahorro_cajas_pos_dev.
+    cajaPorCo["003"] = "001";
 
     // AGRUPAR POR CO | CAJA | CONSEC (cada grupo solo tiene items y pagos de una caja)
     const buildKey = (co, caja, consec) => `${(co || '').trim() || '001'}|${(caja || '').trim() || '000'}|${consec}`;
@@ -777,7 +781,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             "F_CONSEC_AUTO_REG": "1",
             "id_cond_pago": enc.id_cond_pago ? enc.id_cond_pago.toString().trim().padStart(3, '0') : "000",
             "id_caja": (cajaPorCo[enc.CoDoc.trim()] || ({
-                "003": "03 ",
+                "003": "001",
                 "011": "001",
             }[enc.CoDoc.trim()] || enc.CoDoc.trim().padStart(3, '0'))).padEnd(3, ' ')
         });
