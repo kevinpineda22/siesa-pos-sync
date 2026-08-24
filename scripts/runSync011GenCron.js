@@ -1,10 +1,13 @@
 /**
  * runSync011GenCron.js
  *
- * Punto de entrada del job diario del FLUJO 011-GENÉRICOS (GitHub Actions, 9pm COT).
+ * Punto de entrada del job diario del FLUJO 011-GENÉRICOS (GitHub Actions, 8:30pm COT).
  * Toma las facturas GENÉRICAS (222222222222) del día del CO 011 / caja Z01, muestrea el
  * 10% (determinista distribuido) y las procesa con la mecánica CNZ→CFZ (misma que el flujo
  * normal). NO toca estadísticas ni el flujo normal.
+ *
+ * ⚠️ Corre a las 8:30pm porque las queries leen las tablas VIVAS del POS, que solo conservan
+ *    el día en curso: si el POS ya cerró el día, la tabla está vacía y el job procesa 0 facturas.
  *
  * Corre directamente en el runner de GitHub Actions (no vía Vercel) para no chocar con el
  * límite serverless. El runner tiene hasta 60 min.
@@ -33,7 +36,7 @@ const CAT_NO_CRITICAS = new Set([
 
 (async () => {
     console.log('==================================================');
-    console.log('🌙 JOB 011 GENÉRICOS → Siesa (diario 9pm COT)');
+    console.log('🌙 JOB 011 GENÉRICOS → Siesa (diario 8:30pm COT)');
     console.log(`   Entorno escritura=${process.env.ENTORNO_SIESA_011 || 'QA'} (default QA) | Muestreo=${process.env.MUESTRA_PORCENTAJE_011 || '10'}%`);
     if (process.env.MUESTRA_FECHA_011) console.log(`   Fecha forzada=${process.env.MUESTRA_FECHA_011}`);
     console.log('==================================================');

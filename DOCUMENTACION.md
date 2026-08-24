@@ -1341,6 +1341,16 @@ Si ves una factura con estado `'ICO'` legacy, el sistema la reintentará automá
 
 El query `merkahorro_venta_pos_dev` (usado para construir el payload de Siesa) excluye clientes `222222222222`. Las genéricas se capturan con `merkahorro_venta_pos_stats_dev` (configurable via `QUERY_STATS`) para el resumen diario. Si un día específico no se ven genéricas, verificar que el query stats esté configurado y que Connekta haya devuelto datos.
 
+### Flujo 011 genéricos procesa 0 facturas ("página 1 vacía")
+
+**Causa más común: el job corrió DESPUÉS del cierre del POS.** Las queries del flujo leen las **tablas vivas** (`t9820_pdv_d_*`), que **solo conservan el día en curso**; al cerrar el día, el POS mueve los documentos a los **acumulados** (`t9920_pdv_a_*`) y la tabla viva queda vacía.
+
+Ocurrió el 21 y 22-ago-2026 con el job a las 10pm (el 22 hubo 104 genéricas y procesó 0). El 19-ago a las 10:17pm sí funcionó porque ese día el cierre fue más tarde — **la hora de cierre varía**, por eso el síntoma es intermitente. **Solución aplicada:** bajar el cron a las **8:30pm**. Si vuelve a ocurrir, adelantar más la hora.
+
+**Cómo verificar:** el flujo avisa qué días SÍ devolvió la query (`⚠️ La query SÍ devolvió datos, pero de otros días: ...`). Si no devolvió ninguno, el log indica explícitamente que lo más probable es que el POS ya haya cerrado el día.
+
+**Ojo con los falsos "0":** si Connekta responde 500/429/timeout en la página 1, antes se reportaba como "página 1 vacía" y el job terminaba en verde. Ahora esa condición **lanza error** y el job queda en rojo (`Connekta falló en la página 1`).
+
 ### Notificaciones no llegan
 
 Verificar con `GET /api/diagnostico/env` que las variables SMTP y NOTIFY estén configuradas. En GitHub Actions, verificar que los Secrets estén creados.
@@ -1426,7 +1436,11 @@ Verificar con `GET /api/diagnostico/env` que las variables SMTP y NOTIFY estén 
 
 ## 25. Flujo 011 Genéricos (muestreo diario 9pm)
 
-Flujo **independiente y adicional** al normal. Procesa las facturas de **clientes genéricos** (`222222222222`) del **CO 011 / caja Z01**, tomando una **muestra del 10%** de las del día, una vez al día a las **10:00 pm (COT)**. Reutiliza la MISMA mecánica del flujo normal (CNZ→CFZ, auto-corrección, DOM→EFE, CPE, idempotencia).
+Flujo **independiente y adicional** al normal. Procesa las facturas de **clientes genéricos** (`222222222222`) del **CO 011 / caja Z01**, tomando una **muestra del 10%** de las del día, una vez al día a las **8:30 pm (COT)**.
+
+> ⚠️ **El horario es crítico: el job DEBE correr ANTES del cierre del POS.** Las queries leen las tablas **vivas** (`t9820_pdv_d_*`, prefijo **"d"**), que **solo conservan el día en curso**: cuando el POS cierra el día, mueve los documentos a las tablas de **acumulados** (`t9920_pdv_a_*`) y la tabla viva queda vacía. El 21 y 22-ago-2026 el flujo corría a las 10pm y procesó **0 facturas** por esa razón (el 19-ago a las 10:17pm sí funcionó: ese día el cierre fue más tarde). Se bajó a las 8:30pm para tener margen. Ver [sección 23](#23-resolución-de-problemas-comunes).
+
+Reutiliza la MISMA mecánica del flujo normal (CNZ→CFZ, auto-corrección, DOM→EFE, CPE, idempotencia).
 
 ### ¿Por qué un flujo aparte?
 
@@ -1441,20 +1455,24 @@ El flujo normal (`syncVentas.js`) **excluye** los genéricos (`<> '222222222222'
 | Archivo | `syncVentas.js` | `sync011Gen.js` (fork) |
 | CO / Caja | 001 (Z01,Z02) + 011 (Z01) | **011 / Z01 exclusivo** |
 | Clientes | NIT reales (excluye 222222222222) | **Solo 222222222222** |
-| Cadencia | Cada 1 h | **Diaria, 10pm COT** |
+| Cadencia | Cada 1 h | **Diaria, 8:30pm COT (antes del cierre)** |
 | Alcance | Todas las nuevas del día | **Muestra del 10%** de las genéricas del día |
 | Entorno escritura | `ENTORNO_SIESA` (PROD) | **`ENTORNO_SIESA_011` (default QA)** |
 | Estadísticas diarias | Las guarda | **No las toca** |
 
 ### Queries Connekta (`_011_gen`)
 
-Espejo de las normales, con 3 cambios: (1) `f9820_id_cliente_pdv = '222222222222'` (invertido), (2) `f9820_id_co = '011'` y `f9820_id_tipo_docto = 'Z01'`, (3) cliente en `LEFT OUTER JOIN`. Ventana de fecha `>= DATEADD(day, -2, GETDATE())` (el corte del día se hace en Node con hora Bogotá, **nunca** con la fecha del server SQL, que está en otra zona horaria).
+Espejo de las normales, con 3 cambios: (1) `f9820_id_cliente_pdv = '222222222222'` (filtro invertido), (2) `f9820_id_co = '011'` y `f9820_id_tipo_docto = 'Z01'`, (3) cliente en `LEFT OUTER JOIN`. El corte del día se hace en Node con hora Bogotá, **nunca** con la fecha del server SQL.
 
 | Query | Base | Uso |
 |-------|------|-----|
 | `merkahorro_venta_pos_011_gen` | `merkahorro_venta_pos_dev` | Detalle de ventas |
 | `merkahorro_imptos_pos_011_gen` | `merkahorro_imptos_pos_dev` | Impuestos por línea |
 | `merkahorro_pagos_pos_011_gen` | `merkahorro_pagos_pos_dev` | Medios de pago (EFE/TR) |
+
+**Nota sobre la ventana de fechas:** el `WHERE` usa `CAST(f9820_id_fecha_docto AS VARCHAR(8)) >= CONVERT(varchar(8), DATEADD(day,-2,GETDATE()), 112)`, pero ese `CAST` sobre un campo de fecha no produce `20260821` sino texto (`Aug 21 2`), así que **la comparación no filtra realmente**. No importa en la práctica: la tabla viva solo tiene el día en curso, y el día objetivo se recorta en Node.
+
+**Si alguna vez se necesita el día ya cerrado**, hay que leer las tablas de acumulados: `t9820_pdv_d_doctos`→`t9920_pdv_a_doctos` (`f9820_`→`f9920_`), `t9830`→`t9930`, `t9831`→`t9931`, `t9832`→`t9932`, `t9821_pdv_d_movto_mp`→`t9921_pdv_a_movto_mp`. Las maestras (`t9740_pdv_clientes`, `t150_mc_bodegas`, `v121`) no cambian.
 
 Inventario y costo (`merkahorro_consulta_inventario`, `merkahorro_costo_promedio_dev`) se **reutilizan** tal cual. El fork usa **paginación completa** (`tamPag=1000`), no solo la primera página de 100.
 
@@ -1479,7 +1497,7 @@ El fork usa su **propio** switch `ENTORNO_SIESA_011` (default `QA`), distinto de
 |----------|---------|-------------|
 | `ENTORNO_SIESA_011` | `QA` (código) / `PROD` (cron) | Entorno de ESCRITURA de este flujo. Default `QA` en el código (seguro para correr local); el cron del workflow lo setea a `PROD` |
 | `MUESTRA_PORCENTAJE_011` | `10` | Porcentaje del muestreo |
-| `MUESTRA_FECHA_011` | hoy Bogotá | Fecha a procesar (YYYY-MM-DD), para reprocesar un día en pruebas |
+| `MUESTRA_FECHA_011` | hoy Bogotá | Fecha a procesar (YYYY-MM-DD). **Solo sirve para días que sigan en la tabla viva** (el día en curso) |
 | `MUESTRA_SOLO_CNZ` | `false` | Corta en CNZ (no envía CFZ) |
 | `MUESTRA_DRY_RUN` | `false` | Solo muestra la muestra y sale SIN escribir a Siesa |
 
@@ -1489,7 +1507,7 @@ El fork usa su **propio** switch `ENTORNO_SIESA_011` (default `QA`), distinto de
 |---------|-----|
 | `sync011Gen.js` | Motor (fork). Exporta `sync011Gen(opciones)` |
 | `scripts/runSync011GenCron.js` | Orquestador del job (para GitHub Actions) |
-| `.github/workflows/sync-011-gen.yml` | Cron `0 3 * * *` (= 10pm COT). El cron escribe a **PROD**; el dispatch manual usa el input `entorno` (default QA). Inputs: porcentaje, fecha, solo_cnz, dry_run, entorno |
+| `.github/workflows/sync-011-gen.yml` | Cron `30 1 * * *` (= **8:30pm COT**, antes del cierre del POS). El cron escribe a **PROD**; el dispatch manual usa el input `entorno` (default QA). Inputs: porcentaje, fecha, solo_cnz, dry_run, entorno |
 
 ### Cómo probar
 

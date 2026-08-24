@@ -48,6 +48,14 @@ console.log(`🌍 [011-gen] ENTORNO_SIESA_011=${ENTORNO} | Connekta=${CONNEKTA_D
 
 // URLs de Connekta (lectura — siempre PROD)
 // Queries EXCLUSIVAS del flujo 011-genérico (solo cliente 222222222222, CO 011, caja Z01).
+//
+// ⚠️ IMPORTANTE — HORARIO: estas queries leen las tablas VIVAS del POS (t9820/t9830...),
+//    que SOLO conservan el DÍA EN CURSO: cuando el POS cierra el día, los documentos se mueven
+//    a las tablas de acumulados (t9920/t9930...) y la tabla viva queda vacía.
+//    Por eso este flujo DEBE correr ANTES del cierre de la tienda. El 21 y 22-ago-2026 corría
+//    a las 10pm y procesó 0 facturas porque el cierre ya había ocurrido (el 19-ago a las
+//    10:17pm sí funcionó: ese día el cierre fue más tarde). Se bajó a las 8:30pm para tener margen.
+//    Si algún día vuelve a dar 0, revisar a qué hora está cerrando el POS.
 const URL_VENTAS_DETALLE = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_venta_pos_011_gen`;
 const URL_VENTAS_PAGOS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_pagos_pos_011_gen`;
 const URL_VENTAS_IMPUESTOS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_imptos_pos_011_gen`;
@@ -123,19 +131,23 @@ async function fetchPagina(baseUrl, pagina) {
 // devuelve registros vacíos (para no tumbar toda la descarga por una página).
 async function fetchPaginaConReintento(baseUrl, pagina, etiqueta) {
     const MAX_REINTENTOS = 3;
+    let ultimoError = null;
     for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
         try {
             return await fetchPagina(baseUrl, pagina);
         } catch (error) {
+            ultimoError = error;
             console.warn(`⚠️ ${etiqueta} pág ${pagina} (intento ${intento}/${MAX_REINTENTOS}): ${error.message}`);
             if (intento === MAX_REINTENTOS) {
                 console.error(`❌ ${etiqueta} pág ${pagina} falló ${MAX_REINTENTOS} veces. Se omite esa página.`);
-                return { registros: [], totalPaginas: null };
+                // Se devuelve el error para que quien llama pueda distinguir "Connekta falló"
+                // de "no hay datos". Sin esto, un 500/429 se ve igual que un día sin ventas.
+                return { registros: [], totalPaginas: null, error: ultimoError };
             }
             await new Promise(r => setTimeout(r, 1000 * intento)); // backoff incremental
         }
     }
-    return { registros: [], totalPaginas: null };
+    return { registros: [], totalPaginas: null, error: ultimoError };
 }
 
 // Descarga TODO un query paginado de Connekta.
@@ -151,6 +163,13 @@ async function fetchPaginadoCompleto(baseUrl, etiqueta) {
     // 1) Página 1 (secuencial) -> nos dice el total de páginas.
     const primera = await fetchPaginaConReintento(baseUrl, 1, etiqueta);
     const todas = [...primera.registros];
+
+    // Si la página 1 falló por error de Connekta (500/429/timeout), NO lo tratamos como
+    // "no hay datos": se lanza para que el job falle de forma visible. Antes esto se
+    // reportaba como "página 1 vacía" y el flujo terminaba en verde procesando 0 facturas.
+    if (primera.error) {
+        throw new Error(`${etiqueta}: Connekta falló en la página 1 (${primera.error.message}). No se puede confirmar si hay datos.`);
+    }
 
     if (primera.registros.length === 0) {
         console.log(`   📦 ${etiqueta}: página 1 vacía, fin.`);
@@ -1361,9 +1380,10 @@ module.exports = { sync011Gen: async (opciones = {}) => {
     _costoData = null;
     _costoTimestamp = 0;
 
-    // Día objetivo: HOY en America/Bogota (NUNCA la fecha del server SQL de Connekta, que está
-    // en otra zona horaria). Se puede forzar otra fecha para pruebas con MUESTRA_FECHA_011=YYYY-MM-DD
-    // o opciones.fecha.
+    // Día objetivo: HOY en America/Bogota (NUNCA la fecha del server SQL de Connekta, que no
+    // coincide). El job corre al cierre de la jornada pero ANTES de que el POS cierre el día,
+    // porque las tablas vivas solo conservan el día en curso (ver nota en las URLs de arriba).
+    // Se puede forzar otra fecha con MUESTRA_FECHA_011=YYYY-MM-DD u opciones.fecha.
     const fechaObjetivo = (opciones.fecha || process.env.MUESTRA_FECHA_011
         || new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })).toString().trim();
 
@@ -1396,7 +1416,23 @@ module.exports = { sync011Gen: async (opciones = {}) => {
     console.log(`🎯 Muestra (${porcentaje}% distribuido, mín 1): ${muestra.length} → [${muestra.join(', ')}]`);
 
     if (muestra.length === 0) {
-        console.log("ℹ️ No hay facturas genéricas para el día objetivo. Nada que procesar.");
+        // Diagnóstico: si la query trajo datos pero NINGUNO del día objetivo, mostramos qué días
+        // sí vinieron. Así se distingue "la tienda no vendió" de "estamos mirando el día equivocado
+        // / la fuente no tiene ese día todavía".
+        const fechasDisponibles = [...new Set(
+            (Array.isArray(detalleRaw) ? detalleRaw : [])
+                .map(d => (d.FECHA_DOCTO || '').toString().split('T')[0])
+                .filter(Boolean)
+        )].sort();
+        console.log(`ℹ️ No hay facturas genéricas para el día objetivo ${fechaObjetivo}. Nada que procesar.`);
+        if (fechasDisponibles.length > 0) {
+            console.warn(`⚠️ La query SÍ devolvió datos, pero de otros días: ${fechasDisponibles.join(', ')}. Revisá el día objetivo.`);
+        } else {
+            console.warn('⚠️ La query no devolvió NINGÚN registro.');
+            console.warn('   Causa más probable: el POS YA CERRÓ EL DÍA y vació las tablas vivas (t9820/t9830),');
+            console.warn('   que son las que lee este flujo. Los documentos ya están en los acumulados (t9920/t9930).');
+            console.warn('   👉 Hay que correr el job MÁS TEMPRANO (antes del cierre de la tienda).');
+        }
         return { total: 0, ok: 0, fail: 0, detalle: [], muestra: 0, genericasDia: consecsDelDia.length };
     }
 

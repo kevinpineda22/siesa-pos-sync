@@ -1,4 +1,4 @@
-name: Sync 011 Genericos -> Siesa (diario 10pm)
+name: Sync 011 Genericos -> Siesa (diario 8:30pm)
 
 # Flujo EXCLUSIVO del CO 011 / caja Z01 / clientes genericos (222222222222).
 # Toma las genericas del dia, muestrea el 10% (determinista distribuido) y las procesa
@@ -7,9 +7,17 @@ name: Sync 011 Genericos -> Siesa (diario 10pm)
 
 on:
   schedule:
-    # 10:00 pm hora Colombia (COT, UTC-5, sin horario de verano) = 03:00 UTC del dia siguiente.
-    # OJO: el cron de GitHub es en UTC y puede retrasarse minutos bajo carga.
-    - cron: '0 3 * * *'
+    # 8:30 pm hora Colombia (COT, UTC-5, sin horario de verano) = 01:30 UTC del dia siguiente.
+    #
+    # ⚠️ DEBE correr ANTES del cierre del POS. Las queries leen las tablas VIVAS, que solo
+    #    conservan el dia en curso: al cerrar el dia, el POS mueve todo a los acumulados y la
+    #    tabla viva queda vacia. A las 10pm el flujo daba 0 facturas el 21 y 22-ago-2026
+    #    (el 19-ago a las 10:17pm si funciono, ese dia el cierre fue mas tarde).
+    #    Si vuelve a dar 0, hay que adelantar aun mas esta hora.
+    # OJO: el cron de GitHub es en UTC y puede retrasarse varios minutos bajo carga, asi que
+    #      la corrida real puede caer despues de las 8:30pm. Tenerlo en cuenta si el cierre
+    #      del POS es cerca de las 9pm.
+    - cron: '30 1 * * *'
   workflow_dispatch:
     inputs:
       porcentaje:
@@ -17,7 +25,7 @@ on:
         required: false
         default: ''
       fecha:
-        description: 'PRUEBA: dia a procesar YYYY-MM-DD (vacio = hoy Bogota).'
+        description: 'PRUEBA: dia a procesar YYYY-MM-DD (vacio = hoy en Bogota).'
         required: false
         default: ''
       solo_cnz:
