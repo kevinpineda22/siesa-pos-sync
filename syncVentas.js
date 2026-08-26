@@ -25,7 +25,6 @@ console.log(`🌍 ENTORNO_SIESA=${ENTORNO} | Connekta=${CONNEKTA_DOMAIN} | Siesa
 const URL_VENTAS_DETALLE = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_venta_pos_dev`;
 const URL_VENTAS_PAGOS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_pagos_pos_dev`;
 const URL_VENTAS_IMPUESTOS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_imptos_pos_dev`;
-const URL_CAJAS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_cajas_pos_dev`;
 const URL_CONSULTA_INVENTARIO_BASE = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_consulta_inventario`;
 // OJO: el costo promedio se lee de PRODUCCIÓN (servicios, no serviciosqa) a propósito: solo se
 // CONSULTA (GET, no escribe nada) para tener el costo real.
@@ -579,7 +578,6 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     const detallesRaw = await fetchFromConnekta(URL_VENTAS_DETALLE);
     const pagosRaw = await fetchFromConnekta(URL_VENTAS_PAGOS);
     const impuestosRaw = await fetchFromConnekta(URL_VENTAS_IMPUESTOS);
-    const cajasRaw = await fetchFromConnekta(URL_CAJAS);
 
     // --- FILTROS DINÁMICOS CO / CAJA / HOY ---
     // Si la corrida es por CONSECS específicos, NO se aplican filtros CO/Caja/hoy: el consec debe
@@ -616,25 +614,6 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         console.log("⚠️ No hay facturas para sincronizar. (Filtros CO/Caja sin resultados)");
         return;
     }
-    // MAPEO DE CAJAS POR CO
-    const cajaPorCo = {};
-    if (cajasRaw && cajasRaw.length > 0) {
-        cajasRaw.forEach(c => {
-            const co = c.f291_id_co ? c.f291_id_co.toString().trim() : '001';
-            const idCaja = c.f291_id ? c.f291_id.toString().trim() : '001';
-            if (!cajaPorCo[co]) cajaPorCo[co] = idCaja;
-        });
-    }
-    // Override: CO 011 comparte la misma caja física 001 en Siesa
-    cajaPorCo["011"] = "001";
-    // Override: CO 003 usa la MISMA caja contable "001" que el 011 en Siesa (auxiliar 001-001-COP,
-    // ID_CO forzado a 001). El "03 " que se probó antes NO tenía auxiliar (001-03 -COP no existe).
-    // Se fija acá para no depender de lo que devuelva merkahorro_cajas_pos_dev.
-    cajaPorCo["003"] = "001";
-    // Override: CO 007 (Barbosa) — se asume la misma caja contable "001" que 011 y 003
-    // (auxiliar 001-001-COP). Si Siesa rechaza con "no tiene configurada un auxiliar",
-    // hay que poner acá el código de caja real del 007.
-    cajaPorCo["007"] = "001";
 
     // AGRUPAR POR CO | CAJA | CONSEC (cada grupo solo tiene items y pagos de una caja)
     const buildKey = (co, caja, consec) => `${(co || '').trim() || '001'}|${(caja || '').trim() || '000'}|${consec}`;
@@ -784,11 +763,12 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             "TERCERO_REM": enc.NitTercero,
             "F_CONSEC_AUTO_REG": "1",
             "id_cond_pago": enc.id_cond_pago ? enc.id_cond_pago.toString().trim().padStart(3, '0') : "000",
-            "id_caja": (cajaPorCo[enc.CoDoc.trim()] || ({
-                "003": "001",
-                "007": "001",
-                "011": "001",
-            }[enc.CoDoc.trim()] || enc.CoDoc.trim().padStart(3, '0'))).padEnd(3, ' ')
+            // id_caja: SIEMPRE "001" para TODOS los CO. Es el codigo de la caja contable
+            // en Siesa (auxiliar 001-001-COP), no el codigo del centro de operacion.
+            // OJO: merkahorro_cajas_pos_dev devuelve el codigo del CO (003->"03", 007->"007",
+            // 011->"011"), que NO tiene auxiliar configurado en Siesa; solo el 001 coincidia
+            // por casualidad. Por eso NO se usa esa query para esto.
+            "id_caja": "001"
         });
 
         fac.items.forEach((det, index) => {

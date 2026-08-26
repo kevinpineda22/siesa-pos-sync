@@ -112,27 +112,31 @@ No requiere cambio manual — Connekta envía la bodega correcta para cada CO.
 
 ---
 
-## 8. Tabla de cajas contables por CO (id_caja)
+## 8. id_caja: SIEMPRE "001" (regla definitiva)
 
-Todos los CO agregados hasta ahora comparten el MISMO auxiliar contable en Siesa: `001-001-COP`.
-Es decir, `id_caja = "001"` para todos. Se fija con un override explicito en `syncVentas.js`
-(`cajaPorCo["<co>"] = "001"`) para no depender de lo que devuelva `merkahorro_cajas_pos_dev`.
+**Todos los CO usan la misma caja contable en Siesa: `id_caja = "001"`** (auxiliar
+`001-001-COP`). No depende del centro de operacion y NO hay que tocar codigo al agregar
+un CO nuevo. Esta hardcodeado en `syncVentas.js` y `sync011Gen.js`.
 
-| CO | Sede | Caja POS | id_caja Siesa | Auxiliar | Estado |
-|----|------|----------|---------------|----------|--------|
-| 001 | Principal | Z01, Z02 | (desde query) | — | OK |
-| 003 | — | Z01 | `001` | `001-001-COP` | OK (probado 20-ago-2026) |
-| 007 | Barbosa | Z01 | `001` | `001-001-COP` | configurado, SIN probar (ver nota) |
-| 011 | Lopez de Mesa | Z01 | `001` | `001-001-COP` | OK |
+### Por que NO se usa merkahorro_cajas_pos_dev
 
-**Nota CO 007 (Barbosa):** al 26-ago-2026 el 007 todavia facturaba con las cajas del POS
-anterior (P01, P05, P06) y NO tenia ningun documento Z01, por eso no se pudo probar el envio.
-La sede confirmo que monta Z01 a partir del 27-ago-2026. El `id_caja = "001"` esta ASUMIDO por
-el patron de 011 y 003: queda pendiente verificarlo con la primera factura Z01 real del 007.
+Esa query devuelve **el codigo del CO, no el auxiliar contable**. Verificado el 26-ago-2026:
 
-**Trampa conocida:** para el CO 003 el codigo tenia `"03 "` y Siesa rechazaba con
-`"La caja 001-03 -COP no tiene configurada un auxiliar"`. El valor correcto era `"001"`.
-Al agregar un CO nuevo, si aparece ese error, el id_caja asumido esta mal.
+| CO | Lo que devuelve la query | Auxiliar que buscaria Siesa | Resultado |
+|----|--------------------------|-----------------------------|-----------|
+| 001 | `001` | `001-001-COP` | funciona (por coincidencia) |
+| 003 | `03` | `001-03 -COP` | **NO existe** |
+| 007 | `007` | `001-007-COP` | **NO existe** |
+| 011 | `011` | `001-011-COP` | **NO existe** |
+
+Solo el CO 001 acierta, y de casualidad (su caja tambien se llama 001). Por eso el codigo
+ignora la query y usa la constante. Se elimino `cajaPorCo`, sus overrides por CO y la
+llamada a `merkahorro_cajas_pos_dev` (una consulta menos a Connekta por corrida).
+
+### Sintoma si algun dia esto cambiara
+
+`"La caja 001-XXX-COP no tiene configurada un auxiliar"` -> el id_caja enviado no es el
+correcto para ese CO. Cae en categoria OTRO, asi que el job de GitHub Actions queda en ROJO.
 
 ---
 
