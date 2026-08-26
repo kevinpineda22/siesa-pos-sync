@@ -631,6 +631,10 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     // ID_CO forzado a 001). El "03 " que se probó antes NO tenía auxiliar (001-03 -COP no existe).
     // Se fija acá para no depender de lo que devuelva merkahorro_cajas_pos_dev.
     cajaPorCo["003"] = "001";
+    // Override: CO 007 (Barbosa) — se asume la misma caja contable "001" que 011 y 003
+    // (auxiliar 001-001-COP). Si Siesa rechaza con "no tiene configurada un auxiliar",
+    // hay que poner acá el código de caja real del 007.
+    cajaPorCo["007"] = "001";
 
     // AGRUPAR POR CO | CAJA | CONSEC (cada grupo solo tiene items y pagos de una caja)
     const buildKey = (co, caja, consec) => `${(co || '').trim() || '001'}|${(caja || '').trim() || '000'}|${consec}`;
@@ -782,6 +786,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             "id_cond_pago": enc.id_cond_pago ? enc.id_cond_pago.toString().trim().padStart(3, '0') : "000",
             "id_caja": (cajaPorCo[enc.CoDoc.trim()] || ({
                 "003": "001",
+                "007": "001",
                 "011": "001",
             }[enc.CoDoc.trim()] || enc.CoDoc.trim().padStart(3, '0'))).padEnd(3, ' ')
         });

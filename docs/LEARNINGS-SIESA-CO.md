@@ -112,6 +112,30 @@ No requiere cambio manual — Connekta envía la bodega correcta para cada CO.
 
 ---
 
+## 8. Tabla de cajas contables por CO (id_caja)
+
+Todos los CO agregados hasta ahora comparten el MISMO auxiliar contable en Siesa: `001-001-COP`.
+Es decir, `id_caja = "001"` para todos. Se fija con un override explicito en `syncVentas.js`
+(`cajaPorCo["<co>"] = "001"`) para no depender de lo que devuelva `merkahorro_cajas_pos_dev`.
+
+| CO | Sede | Caja POS | id_caja Siesa | Auxiliar | Estado |
+|----|------|----------|---------------|----------|--------|
+| 001 | Principal | Z01, Z02 | (desde query) | — | OK |
+| 003 | — | Z01 | `001` | `001-001-COP` | OK (probado 20-ago-2026) |
+| 007 | Barbosa | Z01 | `001` | `001-001-COP` | configurado, SIN probar (ver nota) |
+| 011 | Lopez de Mesa | Z01 | `001` | `001-001-COP` | OK |
+
+**Nota CO 007 (Barbosa):** al 26-ago-2026 el 007 todavia facturaba con las cajas del POS
+anterior (P01, P05, P06) y NO tenia ningun documento Z01, por eso no se pudo probar el envio.
+La sede confirmo que monta Z01 a partir del 27-ago-2026. El `id_caja = "001"` esta ASUMIDO por
+el patron de 011 y 003: queda pendiente verificarlo con la primera factura Z01 real del 007.
+
+**Trampa conocida:** para el CO 003 el codigo tenia `"03 "` y Siesa rechazaba con
+`"La caja 001-03 -COP no tiene configurada un auxiliar"`. El valor correcto era `"001"`.
+Al agregar un CO nuevo, si aparece ese error, el id_caja asumido esta mal.
+
+---
+
 ## Historial de cambios
 
 | Fecha | Archivo | Cambio |
