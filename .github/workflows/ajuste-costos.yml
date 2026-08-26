@@ -1,0 +1,71 @@
+name: Ajuste de Costos / Acumulacion (diario 10:30pm)
+
+# Proyecto INDEPENDIENTE del sincronizador de ventas: vive en costos-acumulacion/ y no
+# comparte codigo con syncVentas.js ni sync011Gen.js.
+#
+# Toma los items vendidos hoy con costo 0 (ajusta 1 unidad) y los Kits (ajusta la cantidad
+# vendida), les asigna el costo hallado en otra instalacion (o $1 si no hay) y los envia a
+# Siesa con el conector 253797 (AJUSTE_INVENTARIO_DEV_ACUMULACION).
+
+on:
+  schedule:
+    # 10:30 pm hora Colombia (COT, UTC-5, sin horario de verano) = 03:30 UTC del dia siguiente.
+    #
+    # ⚠️ La query lee las tablas VIVAS del POS (t9820/t9830), que solo conservan el dia en
+    #    curso: si el POS ya cerro el dia, la consulta viene vacia y no se ajusta nada.
+    #    Si empieza a devolver 0 registros, hay que adelantar esta hora.
+    # OJO: el cron de GitHub es en UTC y puede retrasarse varios minutos bajo carga.
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+    inputs:
+      fecha:
+        description: 'PRUEBA: dia a procesar YYYY-MM-DD (vacio = hoy en Bogota).'
+        required: false
+        default: ''
+      dry_run:
+        description: 'PRUEBA: mostrar el payload sin enviar nada a Siesa.'
+        required: false
+        type: choice
+        options: ['false', 'true']
+        default: 'false'
+      entorno:
+        description: 'Entorno de ESCRITURA (PROD por defecto).'
+        required: false
+        type: choice
+        options: ['PROD', 'QA']
+        default: 'PROD'
+
+# ⚠️ CRITICO: este job NO debe solaparse ni correr dos veces el mismo dia.
+# Los Kits no son idempotentes: un segundo ajuste duplicaria la cantidad.
+concurrency:
+  group: ajuste-costos
+  cancel-in-progress: false
+
+jobs:
+  ajustar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Ejecutar ajuste de costos
+        run: node costos-acumulacion/runCron.js
+        env:
+          # --- Credenciales (GitHub Secrets) ---
+          CONNI_KEY: ${{ secrets.CONNI_KEY }}
+          CONNI_TOKEN: ${{ secrets.CONNI_TOKEN }}
+          CIA: ${{ secrets.CIA }}
+          # --- Configuracion del flujo ---
+          COSTOS_ENTORNO: ${{ github.event.inputs.entorno || 'PROD' }}
+          COSTOS_FECHA: ${{ github.event.inputs.fecha || '' }}
+          COSTOS_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
