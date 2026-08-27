@@ -1,4 +1,4 @@
-name: Ajuste de Costos / Acumulacion (diario 10:30pm)
+name: Ajuste de Costos / Acumulacion (diario 9:13pm)
 
 # Proyecto INDEPENDIENTE del sincronizador de ventas: vive en costos-acumulacion/ y no
 # comparte codigo con syncVentas.js ni sync011Gen.js.
@@ -9,13 +9,17 @@ name: Ajuste de Costos / Acumulacion (diario 10:30pm)
 
 on:
   schedule:
-    # 10:30 pm hora Colombia (COT, UTC-5, sin horario de verano) = 03:30 UTC del dia siguiente.
+    # 9:13 pm hora Colombia (COT, UTC-5, sin horario de verano) = 02:13 UTC del dia siguiente.
+    #
+    # El minuto :13 es a proposito: los cron a :00 y :30 son los mas congestionados en GitHub
+    # y se retrasan mas. Con :30 la corrida del 27-ago salio 1h48m tarde (12:18am), ya pasada
+    # la medianoche, y la query devolvio 0 registros.
     #
     # ⚠️ La query lee las tablas VIVAS del POS (t9820/t9830), que solo conservan el dia en
     #    curso: si el POS ya cerro el dia, la consulta viene vacia y no se ajusta nada.
     #    Si empieza a devolver 0 registros, hay que adelantar esta hora.
     # OJO: el cron de GitHub es en UTC y puede retrasarse varios minutos bajo carga.
-    - cron: '30 3 * * *'
+    - cron: '13 2 * * *'
   workflow_dispatch:
     inputs:
       fecha:

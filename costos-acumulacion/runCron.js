@@ -1,7 +1,7 @@
 /**
  * runCron.js — Punto de entrada del job diario de AJUSTE DE COSTOS / ACUMULACIÓN.
  *
- * Corre una sola vez al día (GitHub Actions, 10:30pm COT) directamente en el runner.
+ * Corre una sola vez al día (GitHub Actions, 9:13pm COT) directamente en el runner.
  *
  * ⚠️ Debe ejecutarse UNA sola vez al día: los Kits no son idempotentes (ver ajusteCostos.js).
  *
