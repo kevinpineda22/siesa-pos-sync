@@ -930,8 +930,26 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     }
                 }
             }
-        } else if (Math.abs(dif) > 5) {
-            console.warn(`⚠️ Descuadre superior a la tolerancia (${dif} pesos) en ${tipoDoctoSiesa} consec ${consecDoc}. Total Siesa ${totalSiesa} vs Caja ${posCaja}. No se aplica ajuste automático.`);
+        } else if (dif > 5) {
+            // FALTA plata en los pagos que devuelve Connekta. Es el caso del DOM (domicilio):
+            // el POS SÍ registra ese medio de pago, pero merkahorro_pagos_pos_dev no lo devuelve.
+            // Ejemplo real (consec 21656, 2026-09-02): en el POS la venta de $354.169 figura como
+            // EFE $300.169 + DOM $54.000, pero a nosotros solo nos llega el EFE. Siesa entonces
+            // rechaza con "El valor de la cartera debe ser igual al valor de las CxC".
+            //
+            // Ya existía el caso "no llegó NINGÚN pago" (más abajo, EFE sintético por el total),
+            // pero no el caso mixto "llegó una parte". Se completa el faltante con una línea EFE,
+            // que es exactamente lo que hace la rama de arriba para el descuadre de redondeo.
+            //
+            // Solo cuando FALTA (dif > 0). Si SOBRA (dif < 0) no es un medio de pago ausente y no
+            // se toca: agregar plata ahí sí falsearía la contabilidad.
+            ajusteEfeExtra = dif;
+            conversiones.push(`pago_faltante_a_EFE:${dif}`);
+            console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Pagos incompletos desde Connekta (probable DOM): Total Siesa ${totalSiesa} vs Caja ${posCaja}. Se agrega línea EFE por $${dif.toLocaleString('es-CO')}.`);
+        } else if (dif < -5) {
+            // La caja reporta MÁS de lo que vale la factura. Eso no es un pago ausente, así que no
+            // se ajusta automáticamente: hay que revisar la venta en el POS.
+            console.warn(`⚠️ Descuadre negativo (${dif} pesos) en ${tipoDoctoSiesa} consec ${consecDoc}: la caja reporta más que el total. Total Siesa ${totalSiesa} vs Caja ${posCaja}. No se aplica ajuste automático.`);
         } else {
             console.log(`✅ Cuadre exacto [${tipoDoctoSiesa}] consec ${consecDoc}: Total ${totalSiesa} = Caja ${posCaja}.`);
         }
@@ -980,8 +998,10 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             });
         });
 
-        // Línea EFE independiente para absorber el redondeo de impuestos de Siesa.
-        // Solo se crea cuando dif > 0 (Siesa espera más que la caja del POS).
+        // Línea EFE independiente que cubre lo que falta para que la caja iguale a la factura.
+        // Cubre dos casos, ambos con dif > 0 (Siesa espera más que la caja del POS):
+        //   - descuadre de redondeo de impuestos (<= 5 pesos)
+        //   - medio de pago que Connekta no devuelve, típicamente DOM (> 5 pesos)
         // CRÍTICO: debe replicar EXACTAMENTE el formato de la línea EFE original (FECHA_VCTO, etc.)
         // para que Siesa la consolide al medio de pago y no la deje "por aplicar".
         if (ajusteEfeExtra !== null && ajusteEfeExtra > 0) {
