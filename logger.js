@@ -70,17 +70,46 @@ function parsearError(mensajeRaw) {
     }
 }
 
+/**
+ * Devuelve el set de claves `{tipo}:{co}:{caja}:{consec}` de los documentos que YA existen en
+ * Siesa. Es la ÚNICA barrera contra documentos duplicados, así que tiene dos reglas críticas:
+ *
+ * 1. PAGINAR. PostgREST corta la respuesta en 5000 filas. Sin paginar, todo lo que exceda ese
+ *    tope queda fuera del set y se reenvía. El 2026-09-02 la tabla alcanzó 5004 filas en OK,
+ *    es decir que el techo ya se había cruzado.
+ *
+ * 2. FALLAR CERRADO. Ante un error de lectura se lanza excepción en vez de devolver un set
+ *    vacío. Un set vacío significa "no hay nada procesado" y hace que el flujo reenvíe TODO:
+ *    así se duplicaron 53 notas crédito el 2026-08-29, cuando un fallo transitorio de Supabase
+ *    hizo que esta función devolviera el set vacío. Sin idempotencia confiable es preferible
+ *    abortar la corrida antes que duplicar documentos en Siesa.
+ *
+ * @throws {Error} si Supabase falla en cualquier página; el llamador debe abortar la corrida.
+ */
 async function obtenerConsecsExitosos() {
-    const { data, error } = await supabase
-        .from('sps_facturas')
-        .select('tipo, consec, co, caja')
-        .in('estado', ['OK']);
+    const TAM_PAGINA = 1000;
+    const claves = new Set();
 
-    if (error) {
-        console.error('⚠️ Error leyendo consecs exitosos de Supabase:', error.message);
-        return new Set();
+    for (let desde = 0; ; desde += TAM_PAGINA) {
+        const { data, error } = await supabase
+            .from('sps_facturas')
+            .select('tipo, consec, co, caja')
+            .in('estado', ['OK'])
+            .range(desde, desde + TAM_PAGINA - 1);
+
+        if (error) {
+            throw new Error(
+                `No se pudo leer la idempotencia desde Supabase (página ${desde / TAM_PAGINA + 1}): ${error.message}. ` +
+                'Se aborta la corrida: sin esa lista no se sabe qué documentos ya existen en Siesa y se duplicarían.'
+            );
+        }
+
+        const pagina = data || [];
+        pagina.forEach(r => claves.add(`${r.tipo}:${(r.co || '').trim()}:${(r.caja || '').trim()}:${r.consec}`));
+        if (pagina.length < TAM_PAGINA) break;
     }
-    return new Set(data.map(r => `${r.tipo}:${(r.co || '').trim()}:${(r.caja || '').trim()}:${r.consec}`));
+
+    return claves;
 }
 
 async function registrarResultado(resultado, meta = {}) {
