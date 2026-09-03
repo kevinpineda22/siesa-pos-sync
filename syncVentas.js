@@ -1009,7 +1009,13 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         //   - medio de pago que Connekta no devuelve, típicamente DOM (> 5 pesos)
         // CRÍTICO: debe replicar EXACTAMENTE el formato de la línea EFE original (FECHA_VCTO, etc.)
         // para que Siesa la consolide al medio de pago y no la deje "por aplicar".
-        if (ajusteEfeExtra !== null && ajusteEfeExtra > 0) {
+        //
+        // El `posCaja > 0` hace explícita la exclusión con el EFE sintético de arriba: cuando no
+        // llegó ningún pago, aquel ya cubre el total y este ajuste lo duplicaría. Las ramas que
+        // asignan ajusteEfeExtra ya lo contemplan, pero la guarda se repite acá a propósito: las
+        // dos fuentes suman a la MISMA caja desde bloques distintos, y esa es justo la interacción
+        // que rompió los consec 4184 y 4177 el 2026-09-02.
+        if (ajusteEfeExtra !== null && ajusteEfeExtra > 0 && posCaja > 0) {
             const plantillaEfe = cajaConsolidada["EFE"];
             const fechaVcto = plantillaEfe ? formatDate(plantillaEfe.FECHA_VCTO) : formatDate(enc.FECHA);
             Caja.push({
