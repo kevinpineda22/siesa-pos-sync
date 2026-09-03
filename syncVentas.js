@@ -909,6 +909,15 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         const totalSiesa = siesaBruto - siesaDscto + siesaImp;
         let dif = Math.round(totalSiesa - posCaja);
 
+        // Cuánto FALTA DE PAGOS se mide contra el neto que reporta el POS, NO contra totalSiesa.
+        // Siesa calcula su "cartera" igual al neto del POS (verificado en los consec 21656, 884,
+        // 1070 y 4184), mientras que nuestro totalSiesa puede desviarse unos pesos por el redondeo
+        // de impuestos acumulado: el consec 1070, con 101 ítems, dio 755.733 contra un neto real
+        // de 755.720. Medir el faltante contra totalSiesa hacía leer esos 13 pesos de desviación
+        // propia como si fuera un medio de pago ausente, y se agregaba plata que sobraba.
+        const netoPOS = Math.abs(parseFloat(enc.VrNetoDocto) || 0);
+        const faltantePagos = netoPOS > 0 ? Math.round(netoPOS - posCaja) : 0;
+
         let ajusteEfeExtra = null;
         if (Math.abs(dif) > 0 && Math.abs(dif) <= 5) {
             if (dif > 0) {
@@ -930,7 +939,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     }
                 }
             }
-        } else if (dif > 5 && posCaja > 0) {
+        } else if (faltantePagos > 5 && posCaja > 0) {
             // FALTA plata en los pagos que devuelve Connekta, pero llegó UNA PARTE. Es el caso del
             // DOM (domicilio): el POS SÍ registra ese medio de pago, pero merkahorro_pagos_pos_dev
             // no lo devuelve. Ejemplo real (consec 21656, 2026-09-02): en el POS la venta de
@@ -944,9 +953,14 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             //    EFE sintético por el total (más abajo); sumar acá también duplicaría la CxC. Pasó
             //    en producción el 2026-09-02: los consec 4184 y 4177 (CO 011) salieron con la CxC
             //    al doble (20.711 -> 41.422 y 123.209 -> 246.418) y Siesa los rechazó.
-            ajusteEfeExtra = dif;
-            conversiones.push(`pago_faltante_a_EFE:${dif}`);
-            console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Pagos incompletos desde Connekta (probable DOM): Total Siesa ${totalSiesa} vs Caja ${posCaja}. Se agrega línea EFE por $${dif.toLocaleString('es-CO')}.`);
+            ajusteEfeExtra = faltantePagos;
+            conversiones.push(`pago_faltante_a_EFE:${faltantePagos}`);
+            console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Pagos incompletos desde Connekta (probable DOM): neto POS ${netoPOS} vs Caja ${posCaja}. Se agrega línea EFE por $${faltantePagos.toLocaleString('es-CO')}.`);
+        } else if (dif > 5 && posCaja > 0) {
+            // Los pagos SÍ están completos (netoPOS == posCaja), pero nuestro totalSiesa quedó por
+            // encima: es desviación NUESTRA por el redondeo de impuestos, no un pago ausente. No se
+            // toca la caja; si Siesa reclama, lo resuelve la convergencia cartera/CxC.
+            console.warn(`⚠️ Descuadre de ${dif} pesos en ${tipoDoctoSiesa} consec ${consecDoc} pero los pagos cuadran con el neto POS (${netoPOS}). Es redondeo propio: no se ajusta la caja.`);
         } else if (dif > 5) {
             // posCaja === 0: no llegó ningún pago. Lo cubre íntegro el EFE sintético de más abajo,
             // así que acá NO se agrega nada (ver la advertencia de la rama anterior).
@@ -965,14 +979,20 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         const MEDIOS_FORZAR_EFE = new Set(["DOM", "TR"]);
         const pagosPositivos = Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0);
         if (pagosPositivos.length === 0 && totalSiesa > 0) {
-            console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Sin pagos POS detectados (DOM/domicilio). Creando EFE sintético por $${totalSiesa.toLocaleString('es-CO')}.`);
-            conversiones.push(`pago_efe_sintetico:${totalSiesa}`);
+            // Por el neto del POS, no por totalSiesa: es el valor con el que Siesa arma su cartera.
+            // Nuestro totalSiesa puede desviarse unos pesos por el redondeo de impuestos acumulado
+            // (ver el consec 1070), y si esa desviación supera los 10 pesos la convergencia ya no
+            // la alcanza y el documento queda en FALLO. Solo se usa totalSiesa si el POS no trajo
+            // neto, para no enviar una línea en cero.
+            const montoSintetico = netoPOS > 0 ? netoPOS : totalSiesa;
+            console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Sin pagos POS detectados (DOM/domicilio). Creando EFE sintético por $${montoSintetico.toLocaleString('es-CO')}.`);
+            conversiones.push(`pago_efe_sintetico:${montoSintetico}`);
             Caja.push({
                 "ID_CO": "001",
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
                 "CONSEC_DOCTO": consecDoc,
                 "ID_MEDIOS_PAGO": "EFE",
-                "VLR_MEDIO_PAGO": formatDecimal(totalSiesa),
+                "VLR_MEDIO_PAGO": formatDecimal(montoSintetico),
                 "NRO_CUENTA": "1",
                 "NRO_CHEQUE": "1",
                 "REFERENCIA": "1",
