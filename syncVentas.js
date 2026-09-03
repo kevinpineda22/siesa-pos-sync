@@ -930,22 +930,27 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     }
                 }
             }
-        } else if (dif > 5) {
-            // FALTA plata en los pagos que devuelve Connekta. Es el caso del DOM (domicilio):
-            // el POS SÍ registra ese medio de pago, pero merkahorro_pagos_pos_dev no lo devuelve.
-            // Ejemplo real (consec 21656, 2026-09-02): en el POS la venta de $354.169 figura como
-            // EFE $300.169 + DOM $54.000, pero a nosotros solo nos llega el EFE. Siesa entonces
-            // rechaza con "El valor de la cartera debe ser igual al valor de las CxC".
+        } else if (dif > 5 && posCaja > 0) {
+            // FALTA plata en los pagos que devuelve Connekta, pero llegó UNA PARTE. Es el caso del
+            // DOM (domicilio): el POS SÍ registra ese medio de pago, pero merkahorro_pagos_pos_dev
+            // no lo devuelve. Ejemplo real (consec 21656, 2026-09-02): en el POS la venta de
+            // $354.169 figura como EFE $300.169 + DOM $54.000, pero a nosotros solo nos llega el
+            // EFE, y Siesa rechaza con "El valor de la cartera debe ser igual al valor de las CxC".
             //
-            // Ya existía el caso "no llegó NINGÚN pago" (más abajo, EFE sintético por el total),
-            // pero no el caso mixto "llegó una parte". Se completa el faltante con una línea EFE,
-            // que es exactamente lo que hace la rama de arriba para el descuadre de redondeo.
+            // Se completa el faltante con una línea EFE, igual que hace la rama de arriba para el
+            // descuadre de redondeo.
             //
-            // Solo cuando FALTA (dif > 0). Si SOBRA (dif < 0) no es un medio de pago ausente y no
-            // se toca: agregar plata ahí sí falsearía la contabilidad.
+            // ⚠️ El `posCaja > 0` es OBLIGATORIO. Si no llegó NINGÚN pago, de esto ya se encarga el
+            //    EFE sintético por el total (más abajo); sumar acá también duplicaría la CxC. Pasó
+            //    en producción el 2026-09-02: los consec 4184 y 4177 (CO 011) salieron con la CxC
+            //    al doble (20.711 -> 41.422 y 123.209 -> 246.418) y Siesa los rechazó.
             ajusteEfeExtra = dif;
             conversiones.push(`pago_faltante_a_EFE:${dif}`);
             console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Pagos incompletos desde Connekta (probable DOM): Total Siesa ${totalSiesa} vs Caja ${posCaja}. Se agrega línea EFE por $${dif.toLocaleString('es-CO')}.`);
+        } else if (dif > 5) {
+            // posCaja === 0: no llegó ningún pago. Lo cubre íntegro el EFE sintético de más abajo,
+            // así que acá NO se agrega nada (ver la advertencia de la rama anterior).
+            console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Sin pagos desde Connekta: el total ($${totalSiesa.toLocaleString('es-CO')}) lo cubre el EFE sintético.`);
         } else if (dif < -5) {
             // La caja reporta MÁS de lo que vale la factura. Eso no es un pago ausente, así que no
             // se ajusta automáticamente: hay que revisar la venta en el POS.
