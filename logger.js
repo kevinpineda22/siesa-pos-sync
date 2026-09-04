@@ -121,7 +121,7 @@ async function registrarResultado(resultado, meta = {}) {
     // Primero, obtener el registro actual (para incrementar intentos)
     const { data: existente } = await supabase
         .from('sps_facturas')
-        .select('intentos, automatizaciones_aplicadas')
+        .select('intentos, automatizaciones_aplicadas, cpe_items')
         .eq('id', id)
         .single();
         
@@ -150,8 +150,17 @@ async function registrarResultado(resultado, meta = {}) {
         payload.automatizaciones_aplicadas = [...new Set([...prevAuto, ...meta.automatizaciones])];
     }
 
+    // Se ACUMULA, no se reemplaza. Cada inyección de CPE es stock real que ya entró a Siesa,
+    // así que si una factura se reintenta en varias corridas e inyecta en cada una, todas tienen
+    // que quedar registradas. Reemplazar dejaba invisible todo lo inyectado antes del intento
+    // final: el 18-ago el CNZ 18508 inyectó 21.395 del ítem 15197, falló, y al pasar a OK en otra
+    // corrida ese registro se perdió. Siesa tenía el movimiento y el tablero no lo mostraba.
+    //
+    // No se deduplica a propósito: dos inyecciones iguales del mismo ítem son dos movimientos
+    // reales en Siesa, no un duplicado del registro.
     if (meta.cpeItems && meta.cpeItems.length > 0) {
-        payload.cpe_items = meta.cpeItems;
+        const prevCpe = existente ? (existente.cpe_items || []) : [];
+        payload.cpe_items = [...prevCpe, ...meta.cpeItems];
     }
 
     if (meta.impuestos && meta.impuestos.length > 0) {
