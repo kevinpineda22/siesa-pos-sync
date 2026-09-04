@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const compression = require('compression');
 const cors = require('cors');
 const axios = require('axios');
 const { syncPOS } = require('./syncPOS');
@@ -11,6 +12,10 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 // Middlewares
+// gzip antes que nada: las respuestas de /api/logs son JSON muy repetitivo y comprimen ~95%
+// (el histórico completo pasa de 11,43 MB a 0,57 MB). Sin esto, traer todo el historial al
+// frontend no sería viable y habría que seguir truncándolo.
+app.use(compression());
 app.use(cors());
 app.use(express.json());
 
@@ -192,7 +197,7 @@ function computePerCoStats(docs) {
 
 app.get('/api/logs', async (req, res) => {
     try {
-        const { estado, tipo, categoria, consec, limit, solo_pendientes, fecha_desde, fecha_hasta, co } = req.query;
+        const { estado, tipo, categoria, consec, limit, offset, solo_pendientes, fecha_desde, fecha_hasta, co } = req.query;
 
         let query = logger.supabase.from('sps_facturas').select('*');
 
@@ -207,40 +212,65 @@ app.get('/api/logs', async (req, res) => {
 
         query = buildCoFilter(query, co);
 
-        // Orden y limite
+        // Orden y paginación.
+        // El `offset` permite al frontend recorrer TODO el histórico por páginas. Sin él solo
+        // llegaban las N más recientes y el resto quedaba invisible: con limit=2000 sobre 5232
+        // registros no se veía nada anterior al 19-ago.
+        // OJO: PostgREST corta en 5000 filas por request, así que `limit` NO puede reemplazar a
+        // la paginación por más que se suba.
         const max = limit ? parseInt(limit, 10) : 200;
-        query = query.order('ultima_corrida', { ascending: false }).limit(isNaN(max) || max <= 0 ? 200 : max);
+        const tam = isNaN(max) || max <= 0 ? 200 : Math.min(max, 1000);
+        const desde = Math.max(0, parseInt(offset, 10) || 0);
+        query = query
+            .order('ultima_corrida', { ascending: false })
+            .range(desde, desde + tam - 1);
 
         const { data: truncadas, error } = await query;
         if (error) throw error;
 
-        // Resumen rápido
-        let summaryBase = logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true });
-        summaryBase = buildCoFilter(summaryBase, co);
+        // Resumen rápido.
+        // Solo en la PRIMERA página: es idéntico en todas, y recalcularlo costaba 5 consultas
+        // extra por página. Traer el histórico completo (6 páginas) tardaba 13 s por esto.
+        // Las 5 consultas van en paralelo, que antes eran secuenciales sin necesidad.
+        const esPrimeraPagina = desde === 0;
+        let resumen = null;
 
-        const { count: total } = await summaryBase;
-        const { count: ok } = await buildCoFilter(logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'OK'), co);
-        const { count: fallo } = await buildCoFilter(logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'FALLO'), co);
-        const { count: sinRecaudo } = await buildCoFilter(logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true }).eq('estado', 'SIN_RECAUDO'), co);
-        
-        let ultimaQuery = logger.supabase.from('sps_facturas').select('ultima_corrida').order('ultima_corrida', { ascending: false }).limit(1).single();
-        ultimaQuery = buildCoFilter(ultimaQuery, co);
-        const { data: ultima } = await ultimaQuery;
+        if (esPrimeraPagina) {
+            const contar = (extra) => {
+                let q = logger.supabase.from('sps_facturas').select('*', { count: 'exact', head: true });
+                if (extra) q = q.eq('estado', extra);
+                return buildCoFilter(q, co);
+            };
+            const ultimaQuery = buildCoFilter(
+                logger.supabase.from('sps_facturas').select('ultima_corrida')
+                    .order('ultima_corrida', { ascending: false }).limit(1).single(),
+                co
+            );
 
-        const resumen = {
-            total: total || 0,
-            ok: ok || 0,
-            fallo: fallo || 0,
-            sin_recaudo: sinRecaudo || 0,
-            pendientes_unicos: (fallo || 0) + (sinRecaudo || 0),
-            ultima_corrida: ultima ? ultima.ultima_corrida : ''
-        };
+            const [rTotal, rOk, rFallo, rSinRecaudo, rUltima] = await Promise.all([
+                contar(null), contar('OK'), contar('FALLO'), contar('SIN_RECAUDO'), ultimaQuery
+            ]);
 
-        // Reporte de maestras
-        const { data: maestras } = await logger.supabase.from('sps_errores_maestras').select('*').order('fecha', { ascending: false });
-        let erroresMaestras = 'Reporte de Maestras Faltantes en Siesa\\n===============================\\n';
-        if (maestras && maestras.length > 0) {
-            erroresMaestras += maestras.map(m => `[${new Date(m.fecha).toLocaleDateString()}] ${m.consec ? '('+m.consec+') ' : ''}${m.mensaje}`).join('\\n');
+            const fallo = rFallo.count || 0;
+            const sinRecaudo = rSinRecaudo.count || 0;
+            resumen = {
+                total: rTotal.count || 0,
+                ok: rOk.count || 0,
+                fallo,
+                sin_recaudo: sinRecaudo,
+                pendientes_unicos: fallo + sinRecaudo,
+                ultima_corrida: rUltima.data ? rUltima.data.ultima_corrida : ''
+            };
+        }
+
+        // Reporte de maestras — también solo en la primera página, por lo mismo que el resumen.
+        let erroresMaestras = '';
+        if (esPrimeraPagina) {
+            const { data: maestras } = await logger.supabase.from('sps_errores_maestras').select('*').order('fecha', { ascending: false });
+            erroresMaestras = 'Reporte de Maestras Faltantes en Siesa\\n===============================\\n';
+            if (maestras && maestras.length > 0) {
+                erroresMaestras += maestras.map(m => `[${new Date(m.fecha).toLocaleDateString()}] ${m.consec ? '('+m.consec+') ' : ''}${m.mensaje}`).join('\\n');
+            }
         }
 
         res.status(200).json({
