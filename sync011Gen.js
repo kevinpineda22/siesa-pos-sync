@@ -902,6 +902,14 @@ async function ejecutarPaso(pasoActual, muestraConsecs) {
         const totalSiesa = siesaBruto - siesaDscto + siesaImp;
         let dif = Math.round(totalSiesa - posCaja);
 
+        // Cuánto FALTA DE PAGOS se mide contra el neto que reporta el POS, NO contra totalSiesa.
+        // Siesa calcula su "cartera" igual al neto del POS, mientras que nuestro totalSiesa puede
+        // desviarse unos pesos por el redondeo de impuestos acumulado. Medir el faltante contra
+        // totalSiesa hacía leer esa desviación propia como un medio de pago ausente.
+        // (Portado de syncVentas.js; ver ahí los casos reales que lo motivaron.)
+        const netoPOS = Math.abs(parseFloat(enc.VrNetoDocto) || 0);
+        const faltantePagos = netoPOS > 0 ? Math.round(netoPOS - posCaja) : 0;
+
         let ajusteEfeExtra = null;
         if (Math.abs(dif) > 0 && Math.abs(dif) <= 5) {
             if (dif > 0) {
@@ -923,26 +931,46 @@ async function ejecutarPaso(pasoActual, muestraConsecs) {
                     }
                 }
             }
-        } else if (Math.abs(dif) > 5) {
-            console.warn(`⚠️ Descuadre superior a la tolerancia (${dif} pesos) en ${tipoDoctoSiesa} consec ${consecDoc}. Total Siesa ${totalSiesa} vs Caja ${posCaja}. No se aplica ajuste automático.`);
+        } else if (faltantePagos > 5 && posCaja > 0) {
+            // FALTA plata en los pagos que devuelve Connekta, pero llegó UNA PARTE (caso DOM:
+            // el POS sí lo registra, merkahorro_pagos_pos_dev no lo devuelve). Se completa con
+            // una línea EFE. El `posCaja > 0` es obligatorio: si no llegó ningún pago, de eso se
+            // encarga el EFE sintético de abajo; sumar acá también duplicaría la CxC.
+            ajusteEfeExtra = faltantePagos;
+            conversiones.push(`pago_faltante_a_EFE:${faltantePagos}`);
+            console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Pagos incompletos desde Connekta (probable DOM): neto POS ${netoPOS} vs Caja ${posCaja}. Se agrega línea EFE por $${faltantePagos.toLocaleString('es-CO')}.`);
+        } else if (dif > 5 && posCaja > 0) {
+            // Los pagos cuadran con el neto POS; la desviación es nuestra (redondeo). No se toca.
+            console.warn(`⚠️ Descuadre de ${dif} pesos en ${tipoDoctoSiesa} consec ${consecDoc} pero los pagos cuadran con el neto POS (${netoPOS}). Es redondeo propio: no se ajusta la caja.`);
+        } else if (dif > 5) {
+            // posCaja === 0: lo cubre íntegro el EFE sintético de abajo.
+            console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Sin pagos desde Connekta: el total ($${totalSiesa.toLocaleString('es-CO')}) lo cubre el EFE sintético.`);
+        } else if (dif < -5) {
+            console.warn(`⚠️ Descuadre negativo (${dif} pesos) en ${tipoDoctoSiesa} consec ${consecDoc}: la caja reporta más que el total. Total Siesa ${totalSiesa} vs Caja ${posCaja}. No se aplica ajuste automático.`);
         } else {
             console.log(`✅ Cuadre exacto [${tipoDoctoSiesa}] consec ${consecDoc}: Total ${totalSiesa} = Caja ${posCaja}.`);
         }
 
         // Si el documento tiene total > 0 pero no hay pagos positivos (DOM/domicilio no genera
         // entrada en la tabla de pagos de Connekta), creamos una línea EFE sintética para que
-        // Siesa no rechace con "cartera != CxC". También forzamos DOM → EFE por la misma razón.
-        const MEDIOS_FORZAR_EFE = new Set(["DOM", "TR"]);
+        // Siesa no rechace con "cartera != CxC".
+        //
+        // TODO medio de pago se envía a Siesa como EFE (portado de syncVentas.js): desde septiembre
+        // 2026 las cajas admiten otros medios, y cualquiera que Siesa no tenga configurado rechazaría
+        // el documento. El medio original queda en automatizaciones_aplicadas como pago_<medio>_a_EFE.
         const pagosPositivos = Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0);
         if (pagosPositivos.length === 0 && totalSiesa > 0) {
-            console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Sin pagos POS detectados (DOM/domicilio). Creando EFE sintético por $${totalSiesa.toLocaleString('es-CO')}.`);
-            conversiones.push(`pago_efe_sintetico:${totalSiesa}`);
+            // Por el neto del POS, no por totalSiesa: es el valor con el que Siesa arma su cartera y
+            // totalSiesa puede desviarse por redondeo. Fallback a totalSiesa si el POS no trajo neto.
+            const montoSintetico = netoPOS > 0 ? netoPOS : totalSiesa;
+            console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Sin pagos POS detectados (DOM/domicilio). Creando EFE sintético por $${montoSintetico.toLocaleString('es-CO')}.`);
+            conversiones.push(`pago_efe_sintetico:${montoSintetico}`);
             Caja.push({
                 "ID_CO": "001",
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
                 "CONSEC_DOCTO": consecDoc,
                 "ID_MEDIOS_PAGO": "EFE",
-                "VLR_MEDIO_PAGO": formatDecimal(totalSiesa),
+                "VLR_MEDIO_PAGO": formatDecimal(montoSintetico),
                 "NRO_CUENTA": "1",
                 "NRO_CHEQUE": "1",
                 "REFERENCIA": "1",
@@ -952,11 +980,11 @@ async function ejecutarPaso(pasoActual, muestraConsecs) {
             });
         }
         Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0).forEach(pago => {
-            const idMedioOriginal = pago.ID_MEDIOS_PAGO;
-            const idMedioEfectivo = MEDIOS_FORZAR_EFE.has(idMedioOriginal) ? "EFE" : idMedioOriginal;
+            const idMedioOriginal = String(pago.ID_MEDIOS_PAGO || '').trim();
+            const idMedioEfectivo = "EFE";
             if (idMedioOriginal !== idMedioEfectivo) {
-                console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Medio de pago ${idMedioOriginal} → forzado a EFE (evita validación CxC).`);
-                conversiones.push(`pago_${idMedioOriginal}_a_EFE`);
+                console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Medio de pago ${idMedioOriginal || '(vacío)'} → enviado como EFE.`);
+                conversiones.push(`pago_${idMedioOriginal || 'SIN_MEDIO'}_a_EFE`);
             }
             Caja.push({
                 "ID_CO": "001",
@@ -977,7 +1005,10 @@ async function ejecutarPaso(pasoActual, muestraConsecs) {
         // Solo se crea cuando dif > 0 (Siesa espera más que la caja del POS).
         // CRÍTICO: debe replicar EXACTAMENTE el formato de la línea EFE original (FECHA_VCTO, etc.)
         // para que Siesa la consolide al medio de pago y no la deje "por aplicar".
-        if (ajusteEfeExtra !== null && ajusteEfeExtra > 0) {
+        // El `posCaja > 0` hace explícita la exclusión con el EFE sintético: cuando no llegó ningún
+        // pago, aquel ya cubre el total y este ajuste lo duplicaría. Las dos fuentes suman a la
+        // MISMA caja desde bloques distintos; esa interacción rompió consecs en el flujo principal.
+        if (ajusteEfeExtra !== null && ajusteEfeExtra > 0 && posCaja > 0) {
             const plantillaEfe = cajaConsolidada["EFE"];
             const fechaVcto = plantillaEfe ? formatDate(plantillaEfe.FECHA_VCTO) : formatDate(enc.FECHA);
             Caja.push({
