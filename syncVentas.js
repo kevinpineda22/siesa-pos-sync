@@ -975,8 +975,12 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
 
         // Si el documento tiene total > 0 pero no hay pagos positivos (DOM/domicilio no genera
         // entrada en la tabla de pagos de Connekta), creamos una línea EFE sintética para que
-        // Siesa no rechace con "cartera != CxC". También forzamos DOM → EFE por la misma razón.
-        const MEDIOS_FORZAR_EFE = new Set(["DOM", "TR"]);
+        // Siesa no rechace con "cartera != CxC".
+        //
+        // TODO medio de pago se envía a Siesa como EFE. Antes se convertían solo DOM y TR y el
+        // resto pasaba con su código original; desde septiembre 2026 las cajas admiten otros
+        // medios, y cualquiera que Siesa no tenga configurado rechazaría el documento. El medio
+        // original queda registrado en automatizaciones_aplicadas como `pago_<medio>_a_EFE`.
         const pagosPositivos = Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0);
         if (pagosPositivos.length === 0 && totalSiesa > 0) {
             // Por el neto del POS, no por totalSiesa: es el valor con el que Siesa arma su cartera.
@@ -1002,11 +1006,11 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             });
         }
         Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0).forEach(pago => {
-            const idMedioOriginal = pago.ID_MEDIOS_PAGO;
-            const idMedioEfectivo = MEDIOS_FORZAR_EFE.has(idMedioOriginal) ? "EFE" : idMedioOriginal;
+            const idMedioOriginal = String(pago.ID_MEDIOS_PAGO || '').trim();
+            const idMedioEfectivo = "EFE";
             if (idMedioOriginal !== idMedioEfectivo) {
-                console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Medio de pago ${idMedioOriginal} → forzado a EFE (evita validación CxC).`);
-                conversiones.push(`pago_${idMedioOriginal}_a_EFE`);
+                console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Medio de pago ${idMedioOriginal || '(vacío)'} → enviado como EFE.`);
+                conversiones.push(`pago_${idMedioOriginal || 'SIN_MEDIO'}_a_EFE`);
             }
             Caja.push({
                 "ID_CO": "001",
