@@ -859,17 +859,28 @@ app.get('/api/logs/estadisticas', async (req, res) => {
 app.get('/api/logs/ajustes', async (req, res) => {
     try {
         const { co } = req.query;
-        let query = logger.supabase
-            .from('sps_facturas')
-            .select('consec, tipo, co, caja, fecha_factura, cpe_items')
-            .not('cpe_items', 'is', null)
-            .order('ultima_corrida', { ascending: false })
-            .limit(500);
-        query = buildCoFilter(query, co);
-        const { data, error } = await query;
-        if (error) throw error;
 
-        const filas = (data || []).flatMap(f =>
+        // Se recorre TODO el histórico por páginas. Antes había un .limit(500): con 1.079
+        // documentos con ajuste, la vista solo recibía los 500 más recientes y todo lo anterior
+        // (agosto completo, 340 ajustes) quedaba afuera, así que los filtros de fecha daban 0.
+        // El histórico completo pesa ~200 KB, no hace falta truncarlo.
+        const TAM_PAGINA = 1000;
+        const data = [];
+        for (let desde = 0; ; desde += TAM_PAGINA) {
+            let query = logger.supabase
+                .from('sps_facturas')
+                .select('consec, tipo, co, caja, fecha_factura, cpe_items')
+                .not('cpe_items', 'is', null)
+                .order('ultima_corrida', { ascending: false })
+                .range(desde, desde + TAM_PAGINA - 1);
+            query = buildCoFilter(query, co);
+            const { data: pagina, error } = await query;
+            if (error) throw error;
+            data.push(...(pagina || []));
+            if (!pagina || pagina.length < TAM_PAGINA) break;
+        }
+
+        const filas = data.flatMap(f =>
             (f.cpe_items || []).map(item => ({
                 consec: f.consec,
                 tipo: f.tipo,
