@@ -1,5 +1,6 @@
 require('dotenv').config();
 const axios = require('axios');
+const { normalizarDocumento } = require('./documento');
 
 // ──────────────────────────────────────────────────────────
 // ENTORNO: PROD (default) vs QA
@@ -84,6 +85,7 @@ async function fetchClientesPOS(nitsRequeridos = null) {
             break;
         }
         if (!registros.length) break;
+        registros.forEach(c => { c.NIT = normalizarDocumento(c.NIT); });
         todos.push(...registros);
         // Corte temprano: si ya aparecieron todos los NITs requeridos, no seguimos paginando.
         // Algunos POS guardan el NIT con sufijo ("900200807-1") y otros sin él ("42683051").
@@ -111,6 +113,14 @@ async function fetchClientesPOS(nitsRequeridos = null) {
 }
 
 async function probarSincronizacion(nitsRequeridos = null) {
+    if (Array.isArray(nitsRequeridos) && nitsRequeridos.length > 0) {
+        nitsRequeridos = [...new Set(nitsRequeridos.map(normalizarDocumento).filter(Boolean))];
+        // Si pidieron NITs puntuales y todos quedaron vacíos, NO caer al modo "sin filtro"
+        // (eso enviaría toda la maestra POS a Siesa).
+        if (nitsRequeridos.length === 0) {
+            return { success: true, creados: 0, no_encontrados: [], mensaje: 'NITs requeridos vacíos tras normalizar; no se sincroniza nada' };
+        }
+    }
     let fetchResult = null;
     let clientesDatos = [];
     let paginasTotales = 0;

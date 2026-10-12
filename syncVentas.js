@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { syncPOS } = require('./syncPOS');
+const { normalizarDocumento } = require('./documento');
 const logger = require('./logger');
 const notifier = require('./notifier');
 require('dotenv').config();
@@ -576,6 +577,9 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     console.log("==========================================");
 
     const detallesRaw = await fetchFromConnekta(URL_VENTAS_DETALLE);
+    // El NIT del cliente viaja a Siesa (ID_TERCERO / TERCERO_REM) y debe coincidir con el
+    // tercero que crea syncPOS: ambos se normalizan sin espacios.
+    detallesRaw.forEach(d => { d.NitTercero = normalizarDocumento(d.NitTercero); });
     const pagosRaw = await fetchFromConnekta(URL_VENTAS_PAGOS);
     const impuestosRaw = await fetchFromConnekta(URL_VENTAS_IMPUESTOS);
 
