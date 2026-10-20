@@ -1,0 +1,97 @@
+name: Transformacion tocino -> chicharron (diario 10pm)
+
+# Toma las unidades netas vendidas del item 15207 (CHICHARRON MERKAHORRO) del dia y registra
+# en Siesa la ENTRADA de chicharron (CEI) y la SALIDA de tocino 15202 (CSA) por CO/bodega.
+# Corre DENTRO del runner de GitHub Actions (node directo), no via Vercel.
+
+on:
+  schedule:
+    # 10:00 pm hora Colombia (COT, UTC-5, sin horario de verano) = 03:00 UTC del dia siguiente.
+    # Lee tablas vivas (dia en curso) y de acumulados (ultimos 3 dias), por eso no depende
+    # del cierre del POS. El cron de GitHub puede retrasarse unos minutos bajo carga.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      fecha:
+        description: 'Dia a procesar YYYY-MM-DD (vacio = hoy en Bogota; el dia en curso solo se procesa desde las 21:30 COT).'
+        required: false
+        default: ''
+      dry_run:
+        description: 'PRUEBA: no envia a Siesa ni escribe en Supabase, solo muestra totales y payloads.'
+        required: false
+        type: choice
+        options: ['false', 'true']
+        default: 'false'
+      entorno:
+        description: 'Entorno de ESCRITURA de este flujo (default QA). PROD solo para el cron o para reprocesar un dia real.'
+        required: false
+        type: choice
+        options: ['QA', 'PROD']
+        default: 'QA'
+
+# Evita que dos corridas se solapen (no cancela la que esta en curso).
+concurrency:
+  group: transformacion-carnes
+  cancel-in-progress: false
+
+jobs:
+  transformacion-carnes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Node >= 22 es REQUERIDO: @supabase/supabase-js necesita WebSocket nativo.
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      # Dia objetivo:
+      #  - schedule: fecha de Bogota de hace 4 horas. A las 22:00 COT da el dia en curso; si GitHub
+      #    retrasa la corrida hasta 4h (pasada la medianoche) sigue cayendo en el dia correcto.
+      #  - workflow_dispatch: el input `fecha` tal cual (puede ir vacio = el codigo usa hoy en Bogota).
+      - name: Calcular fecha objetivo
+        id: fecha
+        env:
+          EVENTO: ${{ github.event_name }}
+          FECHA_INPUT: ${{ github.event.inputs.fecha }}
+        run: |
+          if [ "$EVENTO" = "schedule" ]; then
+            FECHA=$(TZ=America/Bogota date -d '4 hours ago' +%F)
+          else
+            FECHA="$FECHA_INPUT"
+          fi
+          echo "Fecha objetivo: '${FECHA}'"
+          echo "fecha=${FECHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Ejecutar transformacion tocino -> chicharron
+        run: node scripts/runTransformacionCron.js
+        env:
+          # --- Credenciales / conexion (GitHub Secrets) ---
+          CONNI_KEY: ${{ secrets.CONNI_KEY }}
+          CONNI_TOKEN: ${{ secrets.CONNI_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          CIA: ${{ secrets.CIA }}
+          # --- Configuracion del flujo ---
+          # Entorno de ESCRITURA de ESTE flujo, independiente de los demas.
+          # El cron escribe a Siesa PROD. El dispatch manual usa el input 'entorno' (default QA)
+          # para poder probar sin tocar produccion.
+          ENTORNO_SIESA_TRANSF: ${{ github.event.inputs.entorno || 'PROD' }}
+          TRANSF_FECHA: ${{ steps.fecha.outputs.fecha }}
+          TRANSF_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          # Opcional: JSON con el mapa de transformaciones (vacio = default en codigo).
+          TRANSF_MAPA: ${{ vars.TRANSF_MAPA || '' }}
+          # --- Notificaciones por correo (GitHub Secrets) ---
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          NOTIFY_TRANSF_EMAILS: ${{ secrets.NOTIFY_TRANSF_EMAILS }}
+          NOTIFY_EMAILS: ${{ secrets.NOTIFY_EMAILS }}

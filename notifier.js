@@ -34,6 +34,17 @@ function getNotifyCpeEmails() {
         .filter(Boolean);
 }
 
+function getNotifyTransfEmails() {
+    return (process.env.NOTIFY_TRANSF_EMAILS || process.env.NOTIFY_EMAILS || '')
+        .split(',')
+        .map(e => e.trim())
+        .filter(Boolean);
+}
+
+function escapeHtml(valor) {
+    return String(valor ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 // ──────────────────────────────────────────────────────────
 // Notificación de ERROR en factura del flujo
 // ──────────────────────────────────────────────────────────
@@ -381,9 +392,98 @@ async function sendSilentMiddayNotification({ resultados, checkTime }) {
     }
 }
 
+// ──────────────────────────────────────────────────────────
+// Notificación de TRANSFORMACIÓN TOCINO → CHICHARRÓN (resumen diario + alertas)
+// ──────────────────────────────────────────────────────────
+async function sendTransformacionNotification({ fecha, entorno, grupos, totalUnidades, totalKilos, detalle, alertas }) {
+    const emails = getNotifyTransfEmails();
+    if (emails.length === 0) {
+        console.log('📧 NOTIFY_TRANSF_EMAILS no configurado — se omite notificación de transformación.');
+        return;
+    }
+
+    const a = alertas || {};
+    const nAlertas = (a.sinFilas ? 1 : 0) + (a.noClasificadas || []).length + (a.sinConfig || []).length
+        + (a.advertenciasUM || []).length + (a.netoNoPositivo || []).length
+        + (a.erroresSiesa || []).length + (a.erroresGuardado || []).length;
+
+    const filas = (detalle || []).map((d, i) => `
+        <tr${i % 2 === 0 ? '' : ' style="background: #f9f9f9;"'}>
+            <td style="padding: 6px 8px;">${escapeHtml(d.co)}</td>
+            <td style="padding: 6px 8px; text-align: center;">${escapeHtml(d.bodega)}</td>
+            <td style="padding: 6px 8px; text-align: right;">${Number(d.unidades).toLocaleString('es-CO')}</td>
+            <td style="padding: 6px 8px; text-align: right;">${Number(d.kilos).toLocaleString('es-CO')}</td>
+            <td style="padding: 6px 8px; text-align: center;">${escapeHtml(d.entrada)}</td>
+            <td style="padding: 6px 8px; text-align: center;">${escapeHtml(d.salida)}</td>
+        </tr>`).join('');
+
+    const items = [];
+    if (a.sinFilas) items.push('<li><strong>0 filas</strong> devueltas por Connekta. Probable causa: el POS ya cerró el día y vació las tablas vivas, y la query de acumulados aún no lo trae.</li>');
+    (a.erroresSiesa || []).forEach(e => items.push(`<li><strong>Siesa rechazó ${escapeHtml(e.tipo)}</strong> (CO ${escapeHtml(e.co)}, ${escapeHtml(e.bodega)}): ${escapeHtml(String(e.error).slice(0, 400))}</li>`));
+    (a.erroresGuardado || []).forEach(e => items.push(`<li><strong>No se pudo registrar ${escapeHtml(e.tipo)}</strong> (CO ${escapeHtml(e.co)}, ${escapeHtml(e.bodega)})${e.ok ? ' — Siesa SÍ lo aceptó: no reenviar manualmente' : ''}: ${escapeHtml(e.error)}</li>`));
+    (a.netoNoPositivo || []).forEach(d => items.push(`<li><strong>Neto ≤ 0</strong> (CO ${escapeHtml(d.co)}, ${escapeHtml(d.bodega)}): ventas ${d.ventas}, devoluciones ${d.devoluciones}. No se envió nada.</li>`));
+    (a.noClasificadas || []).forEach(f => items.push(`<li><strong>Fila NO contada</strong>: ${escapeHtml(f.ID_TIPO_DOCTO)} ${escapeHtml(f.CONSEC_DOCTO)} item ${escapeHtml(f.id_item)} naturaleza=${escapeHtml(f.ind_naturaleza)} clase=${escapeHtml(f.ID_CLASE_DOCTO)} cantidad=${escapeHtml(f.CANTIDAD)}</li>`));
+    (a.sinConfig || []).forEach(f => items.push(`<li><strong>Ítem sin configuración</strong> ${escapeHtml(f.id_item)} (${escapeHtml(f.DescItem)}): ${escapeHtml(f.ID_TIPO_DOCTO)} ${escapeHtml(f.CONSEC_DOCTO)}</li>`));
+    (a.advertenciasUM || []).forEach(f => items.push(`<li><strong>Unidad de medida distinta</strong> a la configurada: ${escapeHtml(f.ID_TIPO_DOCTO)} ${escapeHtml(f.CONSEC_DOCTO)} UM=${escapeHtml(String(f.UNIDAD_MEDIDA).trim())} (se contó igual)</li>`));
+
+    const color = nAlertas > 0 ? '#e67e22' : '#27ae60';
+    const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px;">
+  <div style="max-width: 650px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <div style="background: ${color}; color: white; padding: 20px; text-align: center;">
+      <h2 style="margin: 0;">🥓 Transformación tocino → chicharrón</h2>
+      <p style="margin: 5px 0 0; opacity: 0.9;">${escapeHtml(fecha)} · Entorno ${escapeHtml(entorno)}</p>
+    </div>
+    <div style="padding: 20px;">
+      <p style="color: #555; font-size: 14px;">Grupos: <strong>${grupos}</strong> · Unidades netas: <strong>${Number(totalUnidades).toLocaleString('es-CO')}</strong> · Tocino: <strong>${Number(totalKilos).toLocaleString('es-CO')} kg</strong></p>
+      ${filas ? `
+      <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+        <thead>
+          <tr style="background: #ecf0f1;">
+            <th style="padding: 8px; text-align: left;">CO</th>
+            <th style="padding: 8px; text-align: center;">Bodega</th>
+            <th style="padding: 8px; text-align: right;">Unidades</th>
+            <th style="padding: 8px; text-align: right;">Kg</th>
+            <th style="padding: 8px; text-align: center;">CEI</th>
+            <th style="padding: 8px; text-align: center;">CSA</th>
+          </tr>
+        </thead>
+        <tbody>${filas}</tbody>
+      </table>` : '<p style="color: #999;">Sin grupos para procesar.</p>'}
+      ${items.length > 0 ? `
+      <div style="margin-top: 20px; padding: 12px; background: #fff8e1; border-left: 4px solid #e67e22; border-radius: 4px;">
+        <p style="margin: 0 0 8px; font-weight: bold; color: #e67e22;">Alertas (${items.length}):</p>
+        <ul style="margin: 0; padding-left: 20px; color: #555; font-size: 13px; line-height: 1.6;">${items.join('')}</ul>
+      </div>` : ''}
+      <p style="margin-top: 20px; font-size: 13px; color: #999; text-align: center;">
+        Generado automáticamente por SiesaPOS Sync.
+      </p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+    const prefijo = nAlertas > 0 ? '⚠️' : '🥓';
+    try {
+        const info = await transporter.sendMail({
+            from: SMTP_FROM,
+            to: emails.join(', '),
+            subject: `${prefijo} [SiesaPOS] Transformación chicharrón ${fecha} (${totalUnidades} und${nAlertas > 0 ? `, ${nAlertas} alerta(s)` : ''})`,
+            html,
+        });
+        console.log(`📧 Notificación de transformación enviada a ${emails.join(', ')}: ${info.messageId}`);
+    } catch (err) {
+        console.error(`⚠️ Error enviando notificación de transformación: ${err.message}`);
+    }
+}
+
 module.exports = {
     sendErrorNotification,
     sendCpeNotification,
     sendConversionNotification,
     sendSilentMiddayNotification,
+    sendTransformacionNotification,
 };

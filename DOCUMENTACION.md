@@ -39,6 +39,7 @@ Backend Node.js + Frontend React que sincroniza ventas de un sistema POS hacia e
 23. [Resolución de problemas comunes](#23-resolución-de-problemas-comunes)
 24. [Historial de cambios](#24-historial-de-cambios)
 25. [Flujo 011 Genéricos (muestreo diario 9pm)](#25-flujo-011-genéricos-muestreo-diario-9pm)
+26. [Flujo Transformación Tocino → Chicharrón (diario 10pm)](#26-flujo-transformación-tocino--chicharrón-diario-10pm)
 
 ---
 
@@ -1528,6 +1529,183 @@ NOTIFY_ERROR_EMAILS='' NOTIFY_CPE_EMAILS='' NOTIFY_EMAILS='' \
 ### Trazabilidad
 
 Los documentos de este flujo quedan en `sps_facturas` con id `{tipo}:011:Z01:{consec}`. Se identifican de forma **inequívoca** por **`cliente_nit = '222222222222'`** (el flujo normal nunca envía genéricos). El frontend usa ese marcador para mostrar la actividad exclusiva del flujo 011-genéricos.
+
+---
+
+## 26. Flujo Transformación Tocino → Chicharrón (diario 10pm)
+
+### Propósito
+
+El CHICHARRON MERKAHORRO (ítem **15207**) se vende por unidad, pero se produce a partir de tocino (ítem **15202**, en KL). Cada noche el flujo toma las **unidades netas vendidas** del día y registra en Siesa la transformación:
+
+- **ENTRADA (CEI)**: suma las unidades de chicharrón (15207) al inventario.
+- **SALIDA (CSA)**: descuenta el tocino (15202) consumido = unidades netas × factor (0.38 KL por unidad).
+
+Un par de documentos por cada **(fecha, CO, bodega)**.
+
+### Horario y ejecución
+
+| Dato | Valor |
+|------|-------|
+| Módulo | `transformacionCarnes.js` |
+| Runner | `scripts/runTransformacionCron.js` |
+| Workflow | `.github/workflows/transformacion-carnes.yml` |
+| Cron | `0 3 * * *` UTC = **10:00 pm Bogotá** |
+| Manual | `workflow_dispatch` con inputs `fecha` (YYYY-MM-DD), `dry_run` y `entorno` (QA/PROD, **default QA**) |
+| Entorno de escritura | `ENTORNO_SIESA_TRANSF`: el **cron escribe a PROD**; el manual usa el input `entorno` (default QA). Sin la variable, el código cae en QA |
+
+La lectura de Connekta es **siempre PROD** (solo SELECT). Solo la escritura a Siesa cambia según el entorno.
+
+**Fecha objetivo y guardia horaria**
+
+- El workflow calcula la fecha antes de correr: en `schedule` usa la fecha de Bogotá de **hace 4 horas** (`TZ=America/Bogota date -d '4 hours ago' +%F`), así que un retraso del cron de hasta 4 h sigue cayendo en el día correcto. En `workflow_dispatch` usa el input `fecha` tal cual; vacío = hoy en Bogotá (el código trata `''` como no definido).
+- **Guardia de las 21:30 COT** (no aplica en dry-run): si el día objetivo es hoy en Bogotá y son menos de las 21:30, el flujo lanza error ("no se procesa el día en curso antes de las 21:30 COT: el día está incompleto") para no fijar un neto parcial. Fechas pasadas siempre se permiten; fechas futuras siempre dan error.
+
+### Queries Connekta
+
+Connekta **rompe las consultas con `UNION ALL`** (reporta columnas válidas como inválidas), por eso son **dos queries** que el código concatena y **deduplica por `RowidMvto`**:
+
+| Query | Tablas | Alcance |
+|-------|--------|---------|
+| `merkahorro_venta_transformacion` | vivas (`t9820`/`t9830`) | Solo el día en curso |
+| `merkahorro_venta_transformacion_acum` | acumulados (`t9920`/`t9930`) | Últimos 3 días |
+
+Los nombres son configurables con `TRANSF_QUERY_VIVO` y `TRANSF_QUERY_ACUM`. Ambas devuelven las mismas columnas: `CoDoc, ID_TIPO_DOCTO, CONSEC_DOCTO, FECHA_DOCTO, ID_CLASE_DOCTO, IndEstado, IdClientePdv, RowidMvto, id_concepto, id_motivo, ind_naturaleza, CANTIDAD, UNIDAD_MEDIDA, BODEGA, id_item, DescItem, tipo_inv_serv`.
+
+Query viva:
+
+```sql
+SELECT D.f9820_id_co AS CoDoc, D.f9820_id_tipo_docto AS ID_TIPO_DOCTO, D.f9820_consec_docto AS CONSEC_DOCTO, D.f9820_id_fecha_docto AS FECHA_DOCTO, D.f9820_id_clase_docto AS ID_CLASE_DOCTO, D.f9820_ind_estado AS IndEstado, D.f9820_id_cliente_pdv AS IdClientePdv, M.f9830_guid AS RowidMvto, M.f9830_id_concepto AS id_concepto, M.f9830_id_motivo AS id_motivo, M.f9830_ind_naturaleza AS ind_naturaleza, M.f9830_cant_1 AS CANTIDAD, M.f9830_id_unidad_medida AS UNIDAD_MEDIDA, B.f150_id AS BODEGA, I.v121_id_item AS id_item, I.v121_descripcion AS DescItem, LTRIM(RTRIM(I.v121_id_tipo_inv_serv)) AS tipo_inv_serv
+FROM dbo.t9820_pdv_d_doctos D
+INNER JOIN dbo.t9830_pdv_d_movto_venta M ON D.f9820_guid = M.f9830_guid_docto AND D.f9820_id_cia = M.f9830_id_cia
+INNER JOIN dbo.t150_mc_bodegas B ON M.f9830_rowid_bodega = B.f150_rowid AND M.f9830_id_cia = B.f150_id_cia
+INNER JOIN dbo.v121 I ON M.f9830_rowid_item_ext = I.v121_rowid_item_ext AND M.f9830_id_cia = I.v121_id_cia
+WHERE D.f9820_id_cia = 1 AND I.v121_id_item IN (15207)
+```
+
+Query de acumulados: igual, con `t9920_pdv_a_doctos` / `t9930_pdv_a_movto_venta`, prefijos `f9920_` / `f9930_`, y el filtro adicional:
+
+```sql
+AND D.f9920_id_fecha_docto >= DATEADD(day, -3, CAST(GETDATE() AS date))
+```
+
+> Ambas solo traen el ítem 15207. Para agregar más ítems a la transformación hay que ampliar el `IN (...)` de las dos queries **y** el mapa `TRANSF_MAPA`.
+
+La descarga es paginada completa (`tamPag=1000`, `TRANSF_TAM_PAGINA`) con reintentos. Si una página falla tras 3 intentos el flujo **aborta** (un total parcial daría unidades netas incorrectas).
+
+### Reglas de negocio
+
+1. **Día objetivo**: hoy en `America/Bogota` (nunca la hora del servidor). Override con `TRANSF_FECHA=YYYY-MM-DD` para reprocesar. Se compara solo la parte fecha de `FECHA_DOCTO`.
+2. **Clasificación** (se usan **ambos** campos juntos):
+
+   | Tipo | Condición | Efecto |
+   |------|-----------|--------|
+   | Venta | `ind_naturaleza = 2` y `ID_CLASE_DOCTO = 1231` | `+CANTIDAD` |
+   | Devolución (nota crédito, tipo PN7) | `ind_naturaleza = 1` y `ID_CLASE_DOCTO = 1250` | `−CANTIDAD` |
+   | Cualquier otra | — | **No se cuenta**; se informa en el correo de alertas |
+
+3. **No se filtra por tipo de documento ni por cliente.** Las ventas vienen de muchos tipos (P03–P10, Z01, Z02) y clientes (incluido el genérico 222222222222). Cada unidad suele ser su propia línea: se **suman líneas**, nunca se deduplica por documento (solo por `RowidMvto`).
+4. **Agrupación** por (fecha, `CoDoc`, `BODEGA`, ítem). Unidades netas = ventas − devoluciones. Si el neto es **≤ 0** no se envía nada para ese grupo y se alerta por correo.
+5. **Mapa de transformaciones** (`TRANSF_MAPA`, JSON). Se valida al arrancar y el flujo falla si es inválido. Default:
+
+   ```json
+   [{ "itemVenta": 15207, "insumo": 15202, "factor": 0.38, "umVenta": "UND", "umInsumo": "KL", "unidadNegocio": "003" }]
+   ```
+
+   Campo opcional `nombre` (default `chicharron`), usado en la NOTA.
+6. Una fila con unidad de medida distinta a `umVenta` **se cuenta igual** pero se advierte en el correo.
+
+### Documentos enviados a Siesa
+
+Conector **259946 — `TRANSFORMACIONES_CARNES_DEV`** (configurable con `TRANSF_ID_DOCUMENTO` / `TRANSF_NOMBRE_DOCUMENTO`), por el mismo endpoint `conectoresimportar` que usan los demás flujos:
+
+`POST https://{servicios|serviciosqa}.siesacloud.com/api/siesa/v3.1/conectoresimportar?idCompania={CIA}&idSistema=1&idDocumento=259946&nombreDocumento=TRANSFORMACIONES_CARNES_DEV` con headers `ConniKey` / `ConniToken`.
+
+Por grupo se hacen **dos llamadas separadas, ENTRADA primero**. La salida solo se envía si la entrada quedó OK.
+
+| | ENTRADA | SALIDA |
+|---|---------|--------|
+| `TIPO_DTO` | `CEI` | `CSA` |
+| `CLASE_DTO` | `61` | `62` |
+| `CONCEPTO` | `601` | `602` |
+| `MOTIVO` | `06` | `10` |
+| `ITEM` | `0015207` | `0015202` |
+| `UNIDAD_MEDIDA` | `UND` | `KL` |
+| `CANTIDAD` | unidades netas | unidades netas × factor (redondeado a 4 decimales) |
+
+Comunes: `BODEGA` = bodega de la fila de venta (nunca fija), `CENTRO_OPERA_MOVIMIENTO` = `CoDoc`, `UNIDAD_NEGOCIO` del mapa, `CONSECUTIVO` = `"0"`, `NRO_REGISTRO` = `"1"`, fecha = día objetivo `AAAAMMDD`, `NOTA` = `Transformacion chicharron 2026-10-19 CO 001 - 12 und`. `CANTIDAD` se formatea con `formatDecimal` (4 decimales, relleno a 20 caracteres).
+
+```json
+{
+  "Documentos": [{ "TIPO_DTO": "CEI", "FECHA_DOCUMENTO=8 (AAAAMMDD)": "20261019", "CLASE_DTO": "61", "NOTA": "Transformacion chicharron 2026-10-19 CO 001 - 12 und", "CONCEPTO": "601" }],
+  "Movimientos": [{ "TIPO_DTO": "CEI", "CONSECUTIVO": "0", "NRO_REGISTRO": "1", "BODEGA": "PV001", "CONCEPTO": "601", "MOTIVO": "06", "CENTRO_OPERA_MOVIMIENTO": "001", "UNIDAD_MEDIDA": "UND", "CANTIDAD": "000000000000012.0000", "ITEM": "0015207", "UNIDAD_NEGOCIO": "003" }]
+}
+```
+
+Ya fijos en el conector (no se envían): compañía 001, CO 001, consecutivo automático, costo = 0 (Siesa usa costo promedio), cant_2 = 0.
+
+### Idempotencia
+
+Tabla **`sps_transformaciones`** (migración `migrations/005_create_sps_transformaciones.sql`, se ejecuta a mano en Supabase). Una fila por documento, clave única `(fecha, co, bodega, item_venta, tipo_dto)`. Guarda payload, respuesta de Siesa, estado (`OK`/`ERROR`), unidades netas, cantidad, intentos y entorno.
+
+- Documento `OK` → **nunca se reenvía**. Una corrida repetida de un día ya OK no envía nada.
+- CEI `OK` y CSA `ERROR` → el reintento envía **solo CSA**.
+- Documento en `ERROR` → se reintenta en la siguiente corrida (re-ejecutar el workflow con `fecha`).
+- Si las unidades netas cambian después de un envío OK (p. ej. una devolución tardía), **no se corrige automáticamente**: se advierte en el log **y en el correo de alertas** y debe revisarse a mano. Si el CEI ya estaba OK y el CSA se envía en una corrida posterior, el CSA se calcula con las unidades del CEI ya registrado (no con el neto actual), para que la salida de tocino corresponda a la entrada.
+- Si Siesa acepta pero falla el guardado en Supabase: antes de guardar se imprime en el log la fila completa y la respuesta de Siesa (líneas `RESPALDO`, para conciliar a mano); el guardado se reintenta 3 veces (1 s / 2 s). Si aun así falla, se alerta (“NO reenviar a mano”), se **aborta el resto de la corrida** (no se envía ningún documento más), se manda igual el correo resumen y el job queda en rojo.
+- Filas del día sin `RowidMvto`: en corrida real se lanza error antes de enviar nada (sin RowidMvto no hay deduplicación y se contaría doble); en dry-run solo se advierte.
+- `CoDoc` se normaliza con `padStart(3,'0')` (`"1"` → `"001"`).
+
+**Resultado AMBIGUO del POST a Siesa**
+
+El POST tiene `timeout` de 120 s. Un rechazo es **definitivo** solo si hay respuesta y (status 4xx, o `detalle` estructurado no vacío). Todo lo demás (sin respuesta, timeout, ECONNRESET, 5xx sin `detalle`) es **ambiguo**: no se sabe si Siesa creó el documento. En ese caso la fila queda en `ERROR` con el texto `AMBIGUO: ...` en la columna `error`, y:
+
+- **No se reenvía automáticamente** en ninguna corrida posterior; se alerta por correo y el job queda en rojo.
+- Si el CEI es ambiguo (ahora o previamente), el CSA de ese grupo **no se envía**.
+- Procedimiento manual: (1) verificar en Siesa si el documento existe; (2) si **existe**, no reenviar: corregir la fila a mano en `sps_transformaciones` (`status = 'OK'`, `error = null`); si **no existe**, borrar la fila de `sps_transformaciones`; (3) re-ejecutar el workflow con `workflow_dispatch` indicando `fecha` (y `entorno` = PROD si es un día real).
+
+**Reprocesar un día pasado cuyo CSA falló por falta de stock de tocino**
+
+Cuando se corrija el stock: ejecutar `workflow_dispatch` con `fecha` = día a reprocesar y `entorno` = **PROD**. Solo funciona dentro de la ventana de la query de acumulados (**últimos 3 días**); fuera de ella no habrá filas. Como el CEI ya está OK, solo se reenvía el CSA (con las unidades del CEI registrado).
+
+> La clave incluye `item_venta` (además de fecha/CO/bodega/tipo) para que más ítems en el mapa no colisionen.
+
+### Variables de entorno
+
+| Variable | Default | Descripción |
+|----------|---------|-------------|
+| `ENTORNO_SIESA_TRANSF` | `QA` | Entorno de **escritura** (QA / PROD) |
+| `TRANSF_FECHA` | hoy Bogotá | Día a procesar (YYYY-MM-DD) |
+| `TRANSF_DRY_RUN` | — | `1`/`true`: no POST a Siesa, no escribe en Supabase, no envía correo |
+| `TRANSF_MAPA` | ver arriba | JSON del mapa de transformaciones |
+| `TRANSF_ID_DOCUMENTO` | `259946` | Id del conector Siesa |
+| `TRANSF_NOMBRE_DOCUMENTO` | `TRANSFORMACIONES_CARNES_DEV` | Nombre del conector |
+| `TRANSF_QUERY_VIVO` | `merkahorro_venta_transformacion` | Query Connekta (tablas vivas) |
+| `TRANSF_QUERY_ACUM` | `merkahorro_venta_transformacion_acum` | Query Connekta (acumulados) |
+| `TRANSF_TAM_PAGINA` | `1000` | Tamaño de página de Connekta |
+| `NOTIFY_TRANSF_EMAILS` | `NOTIFY_EMAILS` | Destinatarios (separados por coma) |
+
+Además usa `CONNI_KEY`, `CONNI_TOKEN`, `CIA`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` y las `SMTP_*`.
+
+### Dry run
+
+```bash
+# Muestra totales por grupo y los payloads completos; no envía, no escribe, no manda correo
+TRANSF_DRY_RUN=1 TRANSF_FECHA=2026-10-19 node scripts/runTransformacionCron.js
+```
+
+También disponible como input `dry_run` del workflow manual.
+
+### Notificaciones
+
+`notifier.sendTransformacionNotification` envía **un correo diario** a `NOTIFY_TRANSF_EMAILS || NOTIFY_EMAILS` con el resumen (grupos, unidades, kg, estado CEI/CSA) y las **alertas**: filas no clasificadas, ítems sin configuración, unidad de medida distinta, neto ≤ 0, rechazos de Siesa, errores al guardar en Supabase y **0 filas devueltas** (probable cierre del POS que vació las tablas vivas sin que los acumulados lo traigan aún).
+
+El job queda en **rojo** ante rechazos de Siesa, resultados ambiguos o errores al registrar; las demás alertas no lo ponen en rojo. El notifier solo renderiza listas conocidas, por eso los casos ambiguos y los cambios de neto se reflejan también en la lista de errores de Siesa con un mensaje explícito (los títulos dirán "Siesa rechazó CEI AMBIGUO" / "(AVISO, no es rechazo)"; leer el detalle).
+
+### Pendientes
+
+- **Tocino insuficiente (decisión de negocio PENDIENTE).** Si la bodega no tiene tocino suficiente, Siesa rechazará la SALIDA (CSA). Hoy no hay manejo especial: se registra el error en `sps_transformaciones`, se notifica y el job queda en rojo. Queda un comentario `// PENDIENTE:` en `enviarASiesa` (`transformacionCarnes.js`). Opciones por definir: inyectar stock (como el CPE del flujo 011) u omitir.
+- Salida a **PROD**: ya aplicada en el cron (`ENTORNO_SIESA_TRANSF` = PROD en `schedule`); las corridas manuales siguen en QA salvo que se elija PROD.
 
 ---
 
