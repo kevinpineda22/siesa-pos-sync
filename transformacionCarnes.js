@@ -257,7 +257,9 @@ function construirPayloads(grupo, opciones = {}) {
     const kilos = redondear4(netoSalida * cfg.factor);
     const base = `Transformacion ${cfg.nombre} ${fecha} CO ${co}`;
 
-    // `extra`: campos adicionales del movimiento (solo la entrada envía costo; en la salida lo calcula Siesa).
+    // `extra`: campos adicionales del movimiento. El conector exige COSTO_PROMEDIO_UNITARIO en TODOS los
+    // movimientos (CEI y CSA comparten conector): la entrada envía el costo real; la salida envía 0 y
+    // Siesa la valoriza con el costo promedio del insumo.
     const armar = (def, item, um, cantidad, nota, extra = {}) => ({
         Documentos: [{
             "TIPO_DTO": def.tipoDto,
@@ -292,7 +294,8 @@ function construirPayloads(grupo, opciones = {}) {
         salida: {
             tipoDto: DOC_SALIDA.tipoDto,
             cantidad: kilos,
-            payload: armar(DOC_SALIDA, cfg.insumo, cfg.umInsumo, kilos, `${base} - ${limpiarNumero(kilos)} ${cfg.umInsumo.toLowerCase()}`)
+            payload: armar(DOC_SALIDA, cfg.insumo, cfg.umInsumo, kilos, `${base} - ${limpiarNumero(kilos)} ${cfg.umInsumo.toLowerCase()}`,
+                { "COSTO_PROMEDIO_UNITARIO": formatDecimal(0) })
         }
     };
 }

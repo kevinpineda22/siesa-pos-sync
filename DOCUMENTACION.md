@@ -1634,7 +1634,7 @@ Por grupo se hacen **dos llamadas separadas, ENTRADA primero**. La salida solo s
 | `ITEM` | `0015207` | `0015202` |
 | `UNIDAD_MEDIDA` | `UND` | `KL` |
 | `CANTIDAD` | unidades netas | unidades netas × factor (redondeado a 4 decimales) |
-| `COSTO_PROMEDIO_UNITARIO` | `costoUnitario` del mapa | *(no se envía: Siesa usa el costo promedio del tocino)* |
+| `COSTO_PROMEDIO_UNITARIO` | `costoUnitario` del mapa | `0` (Siesa usa el costo promedio del tocino) |
 
 Comunes: `BODEGA` = bodega de la fila de venta (nunca fija), `CENTRO_OPERA_MOVIMIENTO` = `CoDoc`, `UNIDAD_NEGOCIO` del mapa, `CONSECUTIVO` = `"0"`, `NRO_REGISTRO` = `"1"`, fecha = día objetivo `AAAAMMDD`, `NOTA` = `Transformacion chicharron 2026-10-19 CO 001 - 12 und`. `CANTIDAD` se formatea con `formatDecimal` (4 decimales, relleno a 20 caracteres).
 
@@ -1645,7 +1645,7 @@ Comunes: `BODEGA` = bodega de la fila de venta (nunca fija), `CENTRO_OPERA_MOVIM
 }
 ```
 
-Ya fijos en el conector (no se envían): compañía 001, CO 001, consecutivo automático, cant_2 = 0. El costo (`f470_costo_prom_uni`) ya **no** es fijo: se mapea a `COSTO_PROMEDIO_UNITARIO` y solo lo envía el CEI.
+Ya fijos en el conector (no se envían): compañía 001, CO 001, consecutivo automático, cant_2 = 0. El costo (`f470_costo_prom_uni`) ya **no** es fijo: se mapea a `COSTO_PROMEDIO_UNITARIO`. El conector exige la clave en TODOS los movimientos: el CEI envía `costoUnitario` y el CSA envía `0` (Siesa valoriza la salida con el costo promedio). Sin la clave en el CSA, Siesa responde "Error en la Estructura".
 
 ### Idempotencia
 
