@@ -1609,8 +1609,10 @@ La descarga es paginada completa (`tamPag=1000`, `TRANSF_TAM_PAGINA`) con reinte
 5. **Mapa de transformaciones** (`TRANSF_MAPA`, JSON). Se valida al arrancar y el flujo falla si es inválido. Default:
 
    ```json
-   [{ "itemVenta": 15207, "insumo": 15202, "factor": 0.38, "umVenta": "UND", "umInsumo": "KL", "unidadNegocio": "003" }]
+   [{ "itemVenta": 15207, "insumo": 15202, "factor": 0.38, "umVenta": "UND", "umInsumo": "KL", "unidadNegocio": "003", "costoUnitario": 9873 }]
    ```
+
+   `costoUnitario` (obligatorio, > 0): costo unitario de la ENTRADA definido por contabilidad (9873 COP por unidad, confirmado 2026-10-23). Sin él Siesa rechaza el CEI con `46033-El costo promedio total debe ser mayor a cero` cuando el ítem no tiene costo promedio en la bodega. Si `TRANSF_MAPA` se define en GitHub sin este campo, el flujo falla al arrancar.
 
    Campo opcional `nombre` (default `chicharron`), usado en la NOTA.
 6. Una fila con unidad de medida distinta a `umVenta` **se cuenta igual** pero se advierte en el correo.
@@ -1632,6 +1634,7 @@ Por grupo se hacen **dos llamadas separadas, ENTRADA primero**. La salida solo s
 | `ITEM` | `0015207` | `0015202` |
 | `UNIDAD_MEDIDA` | `UND` | `KL` |
 | `CANTIDAD` | unidades netas | unidades netas × factor (redondeado a 4 decimales) |
+| `COSTO_PROMEDIO_UNITARIO` | `costoUnitario` del mapa | *(no se envía: Siesa usa el costo promedio del tocino)* |
 
 Comunes: `BODEGA` = bodega de la fila de venta (nunca fija), `CENTRO_OPERA_MOVIMIENTO` = `CoDoc`, `UNIDAD_NEGOCIO` del mapa, `CONSECUTIVO` = `"0"`, `NRO_REGISTRO` = `"1"`, fecha = día objetivo `AAAAMMDD`, `NOTA` = `Transformacion chicharron 2026-10-19 CO 001 - 12 und`. `CANTIDAD` se formatea con `formatDecimal` (4 decimales, relleno a 20 caracteres).
 
@@ -1642,7 +1645,7 @@ Comunes: `BODEGA` = bodega de la fila de venta (nunca fija), `CENTRO_OPERA_MOVIM
 }
 ```
 
-Ya fijos en el conector (no se envían): compañía 001, CO 001, consecutivo automático, costo = 0 (Siesa usa costo promedio), cant_2 = 0.
+Ya fijos en el conector (no se envían): compañía 001, CO 001, consecutivo automático, cant_2 = 0. El costo (`f470_costo_prom_uni`) ya **no** es fijo: se mapea a `COSTO_PROMEDIO_UNITARIO` y solo lo envía el CEI.
 
 ### Idempotencia
 

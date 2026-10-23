@@ -65,7 +65,7 @@ const DOC_ENTRADA = { tipoDto: 'CEI', claseDto: '61', concepto: '601', motivo: '
 const DOC_SALIDA = { tipoDto: 'CSA', claseDto: '62', concepto: '602', motivo: '10' };
 
 const MAPA_POR_DEFECTO = [
-    { itemVenta: 15207, insumo: 15202, factor: 0.38, umVenta: 'UND', umInsumo: 'KL', unidadNegocio: '003' }
+    { itemVenta: 15207, insumo: 15202, factor: 0.38, umVenta: 'UND', umInsumo: 'KL', unidadNegocio: '003', costoUnitario: 9873 }
 ];
 
 console.log(`🌍 [transformacion] ENTORNO_SIESA_TRANSF=${ENTORNO} | Connekta=${CONNEKTA_DOMAIN} (lectura PROD) | Siesa=${SIESA_DOMAIN} (escritura)`);
@@ -149,6 +149,9 @@ function cargarMapa(raw = process.env.TRANSF_MAPA) {
             if (String(m[campo]).length > 7) throw new Error(`${ctx}.${campo} excede 7 dígitos (límite del campo ITEM).`);
         }
         if (typeof m.factor !== 'number' || !Number.isFinite(m.factor) || m.factor <= 0) throw new Error(`${ctx}.factor debe ser un número mayor a 0.`);
+        // Costo unitario de la ENTRADA (CEI): lo define contabilidad. Sin él Siesa rechaza con 46033
+        // cuando el ítem no tiene costo promedio en la bodega.
+        if (typeof m.costoUnitario !== 'number' || !Number.isFinite(m.costoUnitario) || m.costoUnitario <= 0) throw new Error(`${ctx}.costoUnitario debe ser un número mayor a 0.`);
         for (const campo of ['umVenta', 'umInsumo', 'unidadNegocio']) {
             if (typeof m[campo] !== 'string' || m[campo].trim() === '') throw new Error(`${ctx}.${campo} debe ser un texto no vacío.`);
         }
@@ -160,6 +163,7 @@ function cargarMapa(raw = process.env.TRANSF_MAPA) {
         itemVenta: m.itemVenta,
         insumo: m.insumo,
         factor: m.factor,
+        costoUnitario: m.costoUnitario,
         umVenta: m.umVenta.trim(),
         umInsumo: m.umInsumo.trim(),
         unidadNegocio: m.unidadNegocio.trim()
@@ -253,7 +257,8 @@ function construirPayloads(grupo, opciones = {}) {
     const kilos = redondear4(netoSalida * cfg.factor);
     const base = `Transformacion ${cfg.nombre} ${fecha} CO ${co}`;
 
-    const armar = (def, item, um, cantidad, nota) => ({
+    // `extra`: campos adicionales del movimiento (solo la entrada envía costo; en la salida lo calcula Siesa).
+    const armar = (def, item, um, cantidad, nota, extra = {}) => ({
         Documentos: [{
             "TIPO_DTO": def.tipoDto,
             "FECHA_DOCUMENTO=8 (AAAAMMDD)": fechaSiesa,
@@ -272,7 +277,8 @@ function construirPayloads(grupo, opciones = {}) {
             "UNIDAD_MEDIDA": um,
             "CANTIDAD": formatDecimal(cantidad),
             "ITEM": padItem(item),
-            "UNIDAD_NEGOCIO": cfg.unidadNegocio
+            "UNIDAD_NEGOCIO": cfg.unidadNegocio,
+            ...extra
         }]
     });
 
@@ -280,7 +286,8 @@ function construirPayloads(grupo, opciones = {}) {
         entrada: {
             tipoDto: DOC_ENTRADA.tipoDto,
             cantidad: neto,
-            payload: armar(DOC_ENTRADA, cfg.itemVenta, cfg.umVenta, neto, `${base} - ${limpiarNumero(neto)} ${cfg.umVenta.toLowerCase()}`)
+            payload: armar(DOC_ENTRADA, cfg.itemVenta, cfg.umVenta, neto, `${base} - ${limpiarNumero(neto)} ${cfg.umVenta.toLowerCase()}`,
+                { "COSTO_PROMEDIO_UNITARIO": formatDecimal(cfg.costoUnitario) })
         },
         salida: {
             tipoDto: DOC_SALIDA.tipoDto,
