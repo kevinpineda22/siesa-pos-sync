@@ -1705,6 +1705,16 @@ También disponible como input `dry_run` del workflow manual.
 
 El job queda en **rojo** ante rechazos de Siesa, resultados ambiguos o errores al registrar; las demás alertas no lo ponen en rojo. El notifier solo renderiza listas conocidas, por eso los casos ambiguos y los cambios de neto se reflejan también en la lista de errores de Siesa con un mensaje explícito (los títulos dirán "Siesa rechazó CEI AMBIGUO" / "(AVISO, no es rechazo)"; leer el detalle).
 
+### Registro de corridas
+
+Cada corrida **no dry-run** deja una fila en la tabla `sps_transformaciones_corridas` (migración `migrations/006_create_sps_transformaciones_corridas.sql`, **se ejecuta a mano** en Supabase). Así la vista de Transformaciones de Carnes puede mostrar también los días en que el flujo no envió nada.
+
+- **Resultados:** `PROCESADO` (hubo grupos y todo OK), `SIN_VENTAS` (0 grupos; si las tablas vivas llegaron vacías, el mensaje avisa del posible hueco por cierre del POS), `CON_FALLO` (fallos de Siesa o errores al guardar) y `ERROR_FATAL` (el job terminó con excepción; lo registra `scripts/runTransformacionCron.js`).
+- **Sin clave única:** una fila por corrida; se conserva el historial. La vista usa la última corrida por `(entorno, fecha)`.
+- **Best-effort:** `registrarCorrida` nunca lanza; se llama después de la notificación, con tope de 10 s por intento y 2 intentos. Si falla solo emite un `console.warn` y no cambia el resultado ni el código de salida del job. Los rechazos de la guardia de fecha (`codigo = VALIDACION_FECHA`) no se registran como `ERROR_FATAL`.
+- **Escritura y lectura:** solo la escribe siesa-pos-sync; la lee Backend-Carnes (`GET /api/transformaciones/corridas`).
+- **Backfill:** la migración inserta el registro manual del 23/10/2026 (`PROD`, `SIN_VENTAS`, origen `manual`), anterior al registro de corridas. El INSERT es idempotente: no agrega nada si ya existe alguna corrida (de cualquier origen) de `PROD` para el 23/10, así que la migración se puede volver a ejecutar sin duplicar.
+
 ### Pendientes
 
 - **Tocino insuficiente (decisión de negocio PENDIENTE).** Si la bodega no tiene tocino suficiente, Siesa rechazará la SALIDA (CSA). Hoy no hay manejo especial: se registra el error en `sps_transformaciones`, se notifica y el job queda en rojo. Queda un comentario `// PENDIENTE:` en `enviarASiesa` (`transformacionCarnes.js`). Opciones por definir: inyectar stock (como el CPE del flujo 011) u omitir.

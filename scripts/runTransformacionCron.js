@@ -20,7 +20,29 @@
  * resultado, o hubo un error fatal.
  */
 require('dotenv').config();
-const { transformacionCarnes } = require('../transformacionCarnes');
+const { transformacionCarnes, registrarCorrida, fechaBogota, ENTORNO } = require('../transformacionCarnes');
+
+// Registra una corrida ERROR_FATAL (best-effort): nunca lanza ni enmascara el error original.
+async function registrarErrorFatal(e) {
+    try {
+        if (['1', 'true'].includes((process.env.TRANSF_DRY_RUN || '').toLowerCase())) return;
+        // Rechazo de la guardia de fecha: no es una corrida fallida del flujo.
+        if (e && e.codigo === 'VALIDACION_FECHA') return;
+        const esFechaValida = (f) => /^\d{4}-\d{2}-\d{2}$/.test(f);
+        const forzada = (process.env.TRANSF_FECHA || '').trim();
+        const fecha = esFechaValida(forzada) ? forzada : fechaBogota();
+        if (!esFechaValida(fecha) || !['QA', 'PROD'].includes(ENTORNO)) return;
+        await registrarCorrida({
+            fecha,
+            entorno: ENTORNO,
+            resultado: 'ERROR_FATAL',
+            mensaje: String((e && e.message) || e).slice(0, 500),
+            origen: process.env.GITHUB_EVENT_NAME || 'local'
+        });
+    } catch (err) {
+        console.warn(`⚠️ No se pudo registrar el error fatal: ${err.message}`);
+    }
+}
 
 (async () => {
     console.log('==================================================');
@@ -45,6 +67,7 @@ const { transformacionCarnes } = require('../transformacionCarnes');
     } catch (e) {
         console.error('❌ Error fatal en el job de transformación:', e.message);
         console.error(e.stack);
+        await registrarErrorFatal(e);
         process.exit(1);
     }
 })();

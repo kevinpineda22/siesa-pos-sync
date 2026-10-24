@@ -104,11 +104,13 @@ const MINUTO_MINIMO_DIA_EN_CURSO = 21 * 60 + 30;
 // 21:30 COT: error, salvo dry-run.
 function validarFechaObjetivo(fecha, dryRun, ahora = new Date()) {
     const hoy = ahoraBogota(ahora);
+    // Se etiqueta el error para que el cron no registre una corrida ERROR_FATAL por un rechazo de la guardia.
+    const rechazo = (mensaje) => Object.assign(new Error(mensaje), { codigo: 'VALIDACION_FECHA' });
     if (fecha > hoy.fecha) {
-        throw new Error(`Fecha futura ${fecha} (hoy en Bogotá es ${hoy.fecha}): no se procesa.`);
+        throw rechazo(`Fecha futura ${fecha} (hoy en Bogotá es ${hoy.fecha}): no se procesa.`);
     }
     if (!dryRun && fecha === hoy.fecha && hoy.minutos < MINUTO_MINIMO_DIA_EN_CURSO) {
-        throw new Error('no se procesa el día en curso antes de las 21:30 COT: el día está incompleto');
+        throw rechazo('no se procesa el día en curso antes de las 21:30 COT: el día está incompleto');
     }
 }
 
@@ -381,6 +383,86 @@ async function guardarConReintento(fila, guardar = guardarResultado, esperar = (
 }
 
 // ──────────────────────────────────────────────────────────
+// Registro de corridas (tabla sps_transformaciones_corridas)
+// ──────────────────────────────────────────────────────────
+const TABLA_CORRIDAS = 'sps_transformaciones_corridas';
+
+// Función pura: arma la fila de la corrida a partir del resultado y los metadatos de lectura.
+//   meta = { filasVivo, filasAcum, filasDia, diasDisponibles, origen }
+function resumirCorrida(resultado, meta = {}) {
+    const erroresGuardado = (resultado.alertas && resultado.alertas.erroresGuardado) || [];
+    const fallos = resultado.fallos || 0;
+    const grupos = resultado.grupos || 0;
+
+    let estado;
+    let mensaje;
+    if (fallos > 0 || erroresGuardado.length > 0) {
+        estado = 'CON_FALLO';
+        mensaje = `${fallos} grupo(s) con fallo en Siesa y ${erroresGuardado.length} error(es) al registrar.`;
+    } else if (grupos === 0) {
+        estado = 'SIN_VENTAS';
+        mensaje = meta.filasVivo === 0
+            ? 'Sin ventas de chicharrón en el día. Las tablas vivas llegaron vacías (posible hueco por cierre del POS).'
+            : 'Sin ventas de chicharrón en el día.';
+    } else {
+        estado = 'PROCESADO';
+        mensaje = `${grupos} grupo(s) procesados: ${resultado.totalUnidades} und → ${resultado.totalKilos} kg.`;
+    }
+
+    return {
+        fecha: resultado.fecha,
+        entorno: resultado.entorno,
+        resultado: estado,
+        filas_vivo: meta.filasVivo ?? null,
+        filas_acum: meta.filasAcum ?? null,
+        filas_dia: meta.filasDia ?? null,
+        grupos,
+        unidades: resultado.totalUnidades || 0,
+        kilos: resultado.totalKilos || 0,
+        fallos,
+        dias_disponibles: meta.diasDisponibles ?? null,
+        mensaje,
+        origen: meta.origen ?? null
+    };
+}
+
+const TIMEOUT_REGISTRO_CORRIDA_MS = 10000;
+const INTENTOS_REGISTRO_CORRIDA = 2;
+
+async function insertarCorrida(fila) {
+    const { error } = await getSupabase().from(TABLA_CORRIDAS).insert(fila);
+    if (error) throw new Error(error.message);
+}
+
+// Inserta la fila de la corrida. Best-effort: NUNCA lanza; ante cualquier error avisa y devuelve false.
+// 2 intentos (espera 1s entre ellos), cada uno con tope de 10s para no frenar el job.
+// `insertar`, `esperar` y `timeoutMs` son inyectables para pruebas.
+async function registrarCorrida(fila, {
+    insertar = insertarCorrida,
+    esperar = (ms) => new Promise(r => setTimeout(r, ms)),
+    timeoutMs = TIMEOUT_REGISTRO_CORRIDA_MS
+} = {}) {
+    for (let intento = 1; intento <= INTENTOS_REGISTRO_CORRIDA; intento++) {
+        let timer;
+        try {
+            const tope = new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error(`tiempo de espera agotado (${timeoutMs} ms)`)), timeoutMs);
+            });
+            await Promise.race([Promise.resolve().then(() => insertar(fila)), tope]);
+            return true;
+        } catch (e) {
+            console.warn(`⚠️ No se pudo registrar la corrida en ${TABLA_CORRIDAS} (intento ${intento}/${INTENTOS_REGISTRO_CORRIDA}): ${e.message}`);
+            if (intento < INTENTOS_REGISTRO_CORRIDA) {
+                try { await esperar(1000); } catch (_) { /* nunca lanza */ }
+            }
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+    return false;
+}
+
+// ──────────────────────────────────────────────────────────
 // Envío a Siesa
 // ──────────────────────────────────────────────────────────
 const MARCA_AMBIGUO = 'AMBIGUO';
@@ -630,6 +712,19 @@ async function transformacionCarnes(opciones = {}) {
         } catch (e) {
             console.error(`⚠️ Error en notificación de transformación: ${e.message}`);
         }
+        // Después de notificar: el registro es best-effort y no debe retrasar el correo.
+        try {
+            const meta = {
+                filasVivo: vivo.length,
+                filasAcum: acum.length,
+                filasDia: delDia.length,
+                diasDisponibles: [...new Set(unicas.map(f => soloFecha(f.FECHA_DOCTO)).filter(Boolean))].sort(),
+                origen: process.env.GITHUB_EVENT_NAME || 'local'
+            };
+            await registrarCorrida(resumirCorrida(resultado, meta));
+        } catch (e) {
+            console.warn(`⚠️ No se pudo armar el registro de la corrida: ${e.message}`);
+        }
     }
     return resultado;
 }
@@ -650,4 +745,7 @@ module.exports = {
     filasSinRowid,
     clasificarErrorSiesa,
     guardarConReintento,
+    resumirCorrida,
+    registrarCorrida,
+    ENTORNO,
 };
