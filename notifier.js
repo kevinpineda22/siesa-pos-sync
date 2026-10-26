@@ -293,6 +293,84 @@ async function sendConversionNotification({ tipo, consecutivo, conversiones, co,
 }
 
 // ──────────────────────────────────────────────────────────
+// Notificación de CLIENTE con código y NIT distintos en el POS
+// ──────────────────────────────────────────────────────────
+async function sendClienteInconsistenteNotification({ tipo, consecutivo, co, caja, fecha, neto, idTercero, nitTercero, razonSocial }) {
+    const emails = getNotifyErrorEmails();
+    if (emails.length === 0) {
+        console.log('📧 NOTIFY_ERROR_EMAILS no configurado — se omite notificación de cliente inconsistente.');
+        return;
+    }
+
+    const fechaStr = fecha || '(sin fecha)';
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px;">
+  <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <div style="background: #f39c12; color: white; padding: 20px; text-align: center;">
+      <h2 style="margin: 0;">⚠️ Cliente con código y NIT distintos en el POS</h2>
+      <p style="margin: 5px 0 0; opacity: 0.9;">Requiere confirmar el documento real del cliente</p>
+    </div>
+    <div style="padding: 20px;">
+      <table style="width: 100%; border-collapse: collapse;">
+        <tr>
+          <td style="padding: 8px; font-weight: bold; color: #555; width: 120px;">Documento</td>
+          <td style="padding: 8px;">${escapeHtml(tipo || 'CFZ')} <strong>${escapeHtml(consecutivo)}</strong></td>
+        </tr>
+        <tr style="background: #f9f9f9;">
+          <td style="padding: 8px; font-weight: bold; color: #555;">Caja / CO</td>
+          <td style="padding: 8px;">${escapeHtml(caja || '—')} · ${escapeHtml(co || '—')}</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px; font-weight: bold; color: #555;">Fecha</td>
+          <td style="padding: 8px;">${escapeHtml(fechaStr)}</td>
+        </tr>
+        ${neto ? `<tr style="background: #f9f9f9;"><td style="padding: 8px; font-weight: bold; color: #555;">Valor</td><td style="padding: 8px;">$${Number(neto).toLocaleString('es-CO')}</td></tr>` : ''}
+        <tr>
+          <td style="padding: 8px; font-weight: bold; color: #555;">Cliente</td>
+          <td style="padding: 8px;">${escapeHtml(razonSocial || '(sin razón social)')}</td>
+        </tr>
+        <tr style="background: #f9f9f9;">
+          <td style="padding: 8px; font-weight: bold; color: #555;">Código POS</td>
+          <td style="padding: 8px;">${escapeHtml(idTercero)}</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px; font-weight: bold; color: #555;">NIT enviado</td>
+          <td style="padding: 8px;"><strong>${escapeHtml(nitTercero)}</strong></td>
+        </tr>
+      </table>
+
+      <p style="margin-top: 20px; font-size: 14px; color: #333;">
+        La factura se envió a Siesa con el NIT <strong>${escapeHtml(nitTercero)}</strong>, pero el registro del cliente
+        en el POS tiene un código distinto (<strong>${escapeHtml(idTercero)}</strong>). Alguien debe confirmar cuál es el
+        documento real del cliente y corregir el cliente en el POS.
+      </p>
+
+      <p style="margin-top: 20px; font-size: 13px; color: #999; text-align: center;">
+        Alerta generada por SiesaPOS Sync.
+      </p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+    try {
+        const info = await transporter.sendMail({
+            from: SMTP_FROM,
+            to: emails.join(', '),
+            subject: `⚠️ [SiesaPOS] Cliente con código y NIT distintos en ${tipo || 'factura'} ${consecutivo}`,
+            html,
+        });
+        console.log(`📧 Notificación de cliente inconsistente enviada a ${emails.join(', ')}: ${info.messageId}`);
+    } catch (err) {
+        console.error(`⚠️ Error enviando notificación de cliente inconsistente: ${err.message}`);
+    }
+}
+
+// ──────────────────────────────────────────────────────────
 // Notificación de ALERTA DE SILENCIO (por CO)
 // ──────────────────────────────────────────────────────────
 async function sendSilentMiddayNotification({ resultados, checkTime }) {
@@ -484,6 +562,7 @@ module.exports = {
     sendErrorNotification,
     sendCpeNotification,
     sendConversionNotification,
+    sendClienteInconsistenteNotification,
     sendSilentMiddayNotification,
     sendTransformacionNotification,
 };

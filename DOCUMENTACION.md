@@ -684,6 +684,13 @@ Campos clave: `CoDoc`, `ID_TIPO_DOCTO`, `CONSEC_DOCTO`, `FECHA_DOCTO`, `NitTerce
 
 Filtro en código: excluye `f9820_id_cliente_pdv = '222222222222'`.
 
+**`IdTercero` vs `NitTercero`.** El query cruza el documento POS con la maestra `t9740_pdv_clientes` (`f9820_id_cliente_pdv = f9740_id`) y devuelve `f9740_id AS IdTercero` (código del cliente en el POS) y `f9740_nit AS NitTercero`. El flujo envía a Siesa siempre `NitTercero` (normalizado sin espacios) como `ID_TERCERO` / `TERCERO_REM`. Ambos campos pueden estar digitados distinto en el POS:
+
+- Caso benigno: el código es el NIT con su dígito de verificación DIAN pegado (ej. `9007451372` vs `900745137`, DV = 2), o difieren solo por un sufijo `-DV`. No se alerta.
+- Caso real: documentos distintos (ej. `1035428107` vs `1035867370`). La factura queda en Siesa bajo un ID diferente al que espera el reporte de cruce del POS.
+
+Cuando difieren de verdad (`compararIdNitCliente` en `documento.js`), el flujo **no cambia el envío**, pero: registra un `console.warn` con co/caja/consec, agrega `cliente_id_nit_distinto:id=<IdTercero>,nit=<NitTercero>` a `sps_facturas.automatizaciones_aplicadas` y envía un correo por factura (solo en el paso CFZ) a `NOTIFY_ERROR_EMAILS` para que se confirme el documento real y se corrija el cliente en el POS.
+
 ### `merkahorro_pagos_pos_dev` — Medios de pago
 
 Campos: `CONSEC_DOCTO`, `MEDIO_PAGO`, `VALOR`.

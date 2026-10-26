@@ -1,6 +1,6 @@
 const axios = require('axios');
 const { syncPOS } = require('./syncPOS');
-const { normalizarDocumento } = require('./documento');
+const { normalizarDocumento, compararIdNitCliente } = require('./documento');
 const logger = require('./logger');
 const notifier = require('./notifier');
 require('dotenv').config();
@@ -530,6 +530,28 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
     }));
 }
 
+// Traduce el resultado de syncPOS a un motivo legible para el dashboard. Solo se usa si la
+// factura termina fallando por cliente: sin esto el error mostraba un CLIENTE_FALTANTE genérico
+// y la causa real (rechazo de Siesa, cliente ausente en el POS) quedaba solo en el log de Actions.
+function describirResultadoSyncPOS(res, nits) {
+    if (!res) return 'La sincronización del cliente no devolvió resultado';
+    if (!res.success) {
+        let detalle = res.error || '(sin detalle)';
+        try {
+            const obj = typeof detalle === 'string' ? JSON.parse(detalle) : detalle;
+            if (Array.isArray(obj?.detalle)) {
+                detalle = obj.detalle.map(d => d.f_detalle).filter(Boolean).join(' | ') || detalle;
+            }
+        } catch (_) { /* no es JSON: se usa el texto tal cual */ }
+        return `No se pudo crear el cliente en Siesa: ${String(typeof detalle === 'string' ? detalle : JSON.stringify(detalle)).slice(0, 300)}`;
+    }
+    if (!res.creados) {
+        const docs = [...new Set((nits || []).map(n => String(n).replace(/-\d+$/, '')))];
+        return `El cliente ${docs.join(', ') || '(sin documento)'} no existe en la maestra POS: revisar el documento en el POS`;
+    }
+    return 'El cliente se creó en Siesa, pero la factura sigue sin encontrarlo: revisar que el documento de la factura coincida con el del cliente';
+}
+
 function formatDate(isoString) {
     if (!isoString) return "";
     return isoString.split('T')[0].replace(/-/g, '');
@@ -579,7 +601,11 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     const detallesRaw = await fetchFromConnekta(URL_VENTAS_DETALLE);
     // El NIT del cliente viaja a Siesa (ID_TERCERO / TERCERO_REM) y debe coincidir con el
     // tercero que crea syncPOS: ambos se normalizan sin espacios.
-    detallesRaw.forEach(d => { d.NitTercero = normalizarDocumento(d.NitTercero); });
+    // IdTercero (código del cliente en el POS) se normaliza igual solo para compararlo con el NIT.
+    detallesRaw.forEach(d => {
+        d.NitTercero = normalizarDocumento(d.NitTercero);
+        d.IdTercero = normalizarDocumento(d.IdTercero);
+    });
     const pagosRaw = await fetchFromConnekta(URL_VENTAS_PAGOS);
     const impuestosRaw = await fetchFromConnekta(URL_VENTAS_IMPUESTOS);
 
@@ -1073,16 +1099,38 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     };
 
     // Función que envía 1 factura a Siesa con reintento automático ante cliente/inventario faltante.
-    const enviarFacturaASiesa = async (consecutivo, payload, detallesFactura, tipoDoctoSiesa, meta, conversiones = []) => {
+    const enviarFacturaASiesa = async (consecutivo, payload, detallesFactura, tipoDoctoSiesa, meta, conversiones = [], alertaCliente = null) => {
         const automatizaciones = [...conversiones];
+        if (alertaCliente) {
+            console.warn(`⚠️ [${tipoDoctoSiesa} ${consecutivo}] CO ${meta.co} | Caja ${meta.caja} | Consec ${consecutivo}: cliente con código y NIT distintos en el POS (IdTercero=${alertaCliente.idTercero}, NitTercero=${alertaCliente.nitTercero}). Se envía a Siesa con el NIT.`);
+            automatizaciones.push(`cliente_id_nit_distinto:id=${alertaCliente.idTercero},nit=${alertaCliente.nitTercero}`);
+            // Un solo correo por factura y por corrida: se envía únicamente en el paso CFZ.
+            if (tipoDoctoSiesa === 'CFZ') {
+                notifier.sendClienteInconsistenteNotification({
+                    tipo: tipoDoctoSiesa,
+                    consecutivo,
+                    co: meta.co,
+                    caja: meta.caja,
+                    fecha: meta.fecha_factura,
+                    neto: meta.neto,
+                    idTercero: alertaCliente.idTercero,
+                    nitTercero: alertaCliente.nitTercero,
+                    razonSocial: alertaCliente.razonSocial,
+                }).catch(err => console.error(`⚠️ Error en notificación de cliente inconsistente: ${err.message}`));
+            }
+        }
+        let motivoCliente = null; // motivo real si syncPOS no pudo dejar el cliente en Siesa
         const registrar = async (resultado) => {
-            await logger.registrarResultado(resultado, { ...meta, automatizaciones });
+            const esErrorCliente = !resultado.ok && /cliente no existe|sucursal del cliente/i.test(resultado.mensaje || '');
+            const motivo = esErrorCliente ? motivoCliente : null;
+            if (motivo) console.warn(`🧾 [${resultado.tipo} ${resultado.consecutivo}] Motivo real: ${motivo}`);
+            await logger.registrarResultado({ ...resultado, motivo }, { ...meta, automatizaciones });
             // Notificar por correo si es un error final
             if (!resultado.ok) {
                 notifier.sendErrorNotification({
                     tipo: resultado.tipo,
                     consecutivo: resultado.consecutivo,
-                    mensaje: resultado.mensaje,
+                    mensaje: motivo ? `${motivo}\n\n${resultado.mensaje}` : resultado.mensaje,
                     co: meta.co,
                     caja: meta.caja,
                     fecha: meta.fecha_factura,
@@ -1230,11 +1278,13 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     console.log(`🎯 [${tipoDoctoSiesa} ${consecutivo}] NIT(s) faltante(s) detectado(s): ${nitsFaltantes.join(', ') || '(ninguno extraído)'}`);
                     automatizaciones.push(`sync_cliente:${nitsFaltantes.join(',') || 'all'}`);
                     try {
-                        await syncPOS(nitsFaltantes.length > 0 ? nitsFaltantes : null);
+                        const resSync = await syncPOS(nitsFaltantes.length > 0 ? nitsFaltantes : null);
+                        motivoCliente = describirResultadoSyncPOS(resSync, nitsFaltantes);
                         clientesSincronizados = true; // no reintentar syncPOS en rondas siguientes
                         accionTomada = true;
                     } catch (syncError) {
                         console.error(`❌ [${tipoDoctoSiesa} ${consecutivo}] Error en syncPOS:`, syncError.message);
+                        motivoCliente = `Error al sincronizar el cliente: ${syncError.message}`;
                     }
                 }
 
@@ -1307,6 +1357,17 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             caja
         };
 
+        // Alerta: el código del cliente en el POS (IdTercero) y su NIT difieren de verdad.
+        // El flujo sigue enviando NitTercero sin cambios; solo se avisa para corregir el cliente.
+        let alertaCliente = null;
+        if (!compararIdNitCliente(enc.IdTercero, enc.NitTercero).coincide) {
+            alertaCliente = {
+                idTercero: enc.IdTercero,
+                nitTercero: enc.NitTercero,
+                razonSocial: enc.RazonSocial,
+            };
+        }
+
         if (pasoActual === 1) {
             const tipoDocto = 'CNZ';
             const keyCNZ = `${tipoDocto}:${co}:${caja}:${consecutivo}`;
@@ -1335,7 +1396,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     BASE_GRAVABLE: String(Math.round(baseGravable))
                 };
             });
-            tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDocto, meta, conversiones });
+            tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDocto, meta, conversiones, alertaCliente });
         } else if (pasoActual === 3) {
             const tipoDoc = 'CFZ';
             const keyCFZ = `${tipoDoc}:${co}:${caja}:${consecutivo}`;
@@ -1364,7 +1425,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     BASE_GRAVABLE: String(Math.round(baseGravable))
                 };
             });
-            tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDoc, meta, conversiones });
+            tareas.push({ consecutivo, payload, detalles: fac.items, tipo: tipoDoc, meta, conversiones, alertaCliente });
         }
     });
 
@@ -1387,7 +1448,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     for (let i = 0; i < tareas.length; i += CONCURRENCIA) {
         const lote = tareas.slice(i, i + CONCURRENCIA);
         const resLote = await Promise.allSettled(
-            lote.map(t => enviarFacturaASiesa(t.consecutivo, t.payload, t.detalles, t.tipo, t.meta, t.conversiones))
+            lote.map(t => enviarFacturaASiesa(t.consecutivo, t.payload, t.detalles, t.tipo, t.meta, t.conversiones, t.alertaCliente))
         );
         for (let idx = 0; idx < resLote.length; idx++) {
             const r = resLote[idx];

@@ -117,6 +117,11 @@ async function registrarResultado(resultado, meta = {}) {
     const caja = meta?.caja || '';
     const id = `${resultado.tipo}:${co.trim()}:${caja.trim()}:${resultado.consecutivo}`;
     const errorInfo = resultado.ok ? null : parsearError(resultado.mensaje);
+    // Motivo real calculado por el flujo (ej. por qué no se pudo crear el cliente). Reemplaza el
+    // resumen genérico de la categoría, que es lo que muestra el dashboard.
+    if (errorInfo && resultado.motivo) {
+        errorInfo.resumen = resultado.motivo;
+    }
     
     // Primero, obtener el registro actual (para incrementar intentos)
     const { data: existente } = await supabase
