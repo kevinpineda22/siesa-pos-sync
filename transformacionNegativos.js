@@ -196,10 +196,28 @@ async function guardarFilaDefault(fila) {
     if (error) throw new Error(`Could not save to ${TABLA}: ${error.message}`);
 }
 
+// Splits rows into batches on destination boundaries: all rows of one destination (its CEI and CSAs) always
+// travel in the same batch, i.e. in the same atomic upsert. A destination larger than `tam` gets its own batch.
+function construirLotes(filas, tam) {
+    const porDestino = new Map();
+    for (const f of filas) {
+        const k = claveDestino(f);
+        if (!porDestino.has(k)) porDestino.set(k, []);
+        porDestino.get(k).push(f);
+    }
+    const lotes = [];
+    let actual = [];
+    for (const grupo of porDestino.values()) {
+        if (actual.length > 0 && actual.length + grupo.length > tam) { lotes.push(actual); actual = []; }
+        actual.push(...grupo);
+    }
+    if (actual.length > 0) lotes.push(actual);
+    return lotes;
+}
+
 async function guardarLoteDefault(filas) {
-    const TAM = 500;
-    for (let i = 0; i < filas.length; i += TAM) {
-        const { error } = await getSupabase().from(TABLA).upsert(filas.slice(i, i + TAM).map(sinCamposDeServidor), { onConflict: CONFLICTO });
+    for (const lote of construirLotes(filas, 500)) {
+        const { error } = await getSupabase().from(TABLA).upsert(lote.map(sinCamposDeServidor), { onConflict: CONFLICTO });
         if (error) throw new Error(`Could not save plan to ${TABLA}: ${error.message}`);
     }
 }
@@ -469,8 +487,16 @@ async function transformacionNegativos(opciones = {}, depsInyectadas = {}) {
         });
         alertas.omitidos = plan.omitidos;
         alertas.errores = plan.errores;
+        const csasPorDestino = new Map();
+        for (const d of plan.documentos) {
+            if (d.tipo_dto === 'CSA') csasPorDestino.set(claveDestino(d), (csasPorDestino.get(claveDestino(d)) || 0) + 1);
+        }
+        // The CEI row carries the number of CSAs planned (in `respuesta`, unused until the first send) so a
+        // partially saved plan can be detected before the CEI is sent. It never reaches the Siesa payload.
         const nuevas = plan.documentos.map(d => ({
-            ...d, status: 'PLANNED', intentos: 0, respuesta: null, error: null, updated_at: new Date().toISOString()
+            ...d, status: 'PLANNED', intentos: 0,
+            respuesta: d.tipo_dto === 'CEI' ? { plan: { csas_planificadas: csasPorDestino.get(claveDestino(d)) || 0 } } : null,
+            error: null, updated_at: new Date().toISOString()
         }));
         destinos = nuevas.filter(d => d.tipo_dto === 'CEI').length;
         console.log(`   Plan: ${destinos} destination(s), ${nuevas.length} document(s), ${plan.omitidos.length} skipped, ${plan.errores.length} error(s).`);
@@ -512,6 +538,19 @@ async function transformacionNegativos(opciones = {}, depsInyectadas = {}) {
 
         // CEI: only the target-date destinations send their CEI; prior-day CEIs are cancelled or left alone.
         let ceiListo = cei.status === 'OK';
+        if (!ceiListo && !esDiaPrevio && cei.status === 'PLANNED' && (cei.intentos || 0) === 0) {
+            // First send: the stored CSA rows must match the count planned with the CEI. A missing marker or a
+            // mismatch means the plan save was partial: nothing is sent (a CEI without its CSAs inflates stock).
+            const esperado = cei.respuesta && cei.respuesta.plan ? cei.respuesta.plan.csas_planificadas : undefined;
+            if (!Number.isInteger(esperado) || esperado !== csas.length) {
+                alertas.anomalias.push({
+                    ...idFila(cei), tipoAnomalia: 'PLAN_INCOMPLETO',
+                    motivo: `plan incompleto: CEI expects ${Number.isInteger(esperado) ? esperado : 'unknown'} CSA row(s) but ${csas.length} stored; not sent, manual review.`
+                });
+                bloquear('plan incompleto; CSAs not sent.');
+                continue;
+            }
+        }
         if (!ceiListo && !esDiaPrevio && ESTADOS_REINTENTABLES.includes(cei.status)) {
             const r = await enviarFila(cei, ctx);
             ceiListo = r.status === 'OK' || r.status === 'DRY_RUN';
@@ -546,7 +585,8 @@ async function transformacionNegativos(opciones = {}, depsInyectadas = {}) {
     // 7) Summary.
     const documentos = detalle.filter(d => d.resultado === 'OK').length;
     const fallos = detalle.filter(d => d.resultado === 'ERROR' || d.resultado === 'AMBIGUO').length
-        + alertas.ambiguos.filter(a => a.previo).length + alertas.bloqueados.length;
+        + alertas.ambiguos.filter(a => a.previo).length + alertas.bloqueados.length
+        + alertas.anomalias.filter(a => a.tipoAnomalia === 'PLAN_INCOMPLETO').length;
     console.log('\n==========================================');
     console.log(`SUMMARY ${fecha}: destinations=${destinos} | sent OK=${documentos} | failures=${fallos} | skipped=${alertas.omitidos.length} | cancelled=${alertas.cancelados.length}`);
     console.log('==========================================\n');
@@ -582,6 +622,7 @@ module.exports = {
     registrarCorridaNegativos,
     resumirCorridaNegativos,
     mapearInventario,
+    construirLotes,
     QUERY_INVENTARIO_POR_DEFECTO,
     COLUMNAS_POR_DEFECTO,
     MOTIVO_CEI_POSIBLEMENTE_ENVIADO,

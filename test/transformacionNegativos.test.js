@@ -4,7 +4,7 @@ process.env.ENTORNO_SIESA_TRANSF = 'QA';
 const test = require('node:test');
 const assert = require('node:assert');
 const {
-    transformacionNegativos, mapearInventario, resumirCorridaNegativos, MOTIVO_CEI_POSIBLEMENTE_ENVIADO
+    transformacionNegativos, mapearInventario, resumirCorridaNegativos, construirLotes, MOTIVO_CEI_POSIBLEMENTE_ENVIADO
 } = require('../transformacionNegativos');
 
 const HOY = '2026-10-29';
@@ -373,4 +373,97 @@ test('mapearInventario maps the Connekta columns and discards unparseable rows',
     // Column override
     const o = mapearInventario([{ a: '2', b: 'B', c: 7, d: 1, e: 2, f: 'UN' }], { co: 'a', bodega: 'b', item: 'c', disponible: 'd', costo: 'e', um: 'f' });
     assert.deepStrictEqual(o.filas[0], { co: '002', bodega: 'B', item: 7, disponible: 1, costo: 2, um: 'UN' });
+});
+
+// ── orphan CEI protection: batches never split a destination ─────────────
+
+const filaPlan = (item, tipo, origen) => ({
+    entorno: 'QA', fecha: HOY, co: '001', bodega: '00201', item_destino: item, tipo_dto: tipo, item_origen: origen
+});
+const destinoPlan = (item, nCsa) => [filaPlan(item, 'CEI', 0), ...Array.from({ length: nCsa }, (_, i) => filaPlan(item, 'CSA', 100 + i))];
+
+test('construirLotes never splits a destination across batches', () => {
+    const filas = [...destinoPlan(1, 2), ...destinoPlan(2, 2), ...destinoPlan(3, 1), ...destinoPlan(4, 3)];
+    const lotes = construirLotes(filas, 4);
+    assert.strictEqual(lotes.flat().length, filas.length);
+    const lotesPorDestino = new Map();
+    lotes.forEach((l, i) => l.forEach(f => {
+        if (!lotesPorDestino.has(f.item_destino)) lotesPorDestino.set(f.item_destino, new Set());
+        lotesPorDestino.get(f.item_destino).add(i);
+    }));
+    for (const [, set] of lotesPorDestino) assert.strictEqual(set.size, 1);
+    assert.ok(lotes.length > 1);
+});
+
+test('construirLotes: a destination larger than the batch size goes alone in one batch', () => {
+    const lotes = construirLotes([...destinoPlan(1, 1), ...destinoPlan(2, 9)], 3);
+    assert.strictEqual(lotes.length, 2);
+    assert.strictEqual(lotes[1].length, 10);
+    assert.deepStrictEqual(construirLotes([], 3), []);
+});
+
+test('partial plan save (CEI saved, CSAs lost): re-run sends nothing and reports "plan incompleto"', async () => {
+    const env = crearEntorno();
+    // Simulates a batch boundary failure: only the CEI row reaches storage, then the save throws.
+    env.deps.guardarLote = async (filas) => {
+        const cei = filas.find(f => f.tipo_dto === 'CEI');
+        env.db.set(clave(cei), JSON.parse(JSON.stringify(cei)));
+        throw new Error('db down');
+    };
+    await assert.rejects(() => correr({ fecha: HOY }, env.deps), /db down/);
+    assert.strictEqual(env.posts.length, 0);
+
+    const env2 = crearEntorno({ guardadas: [...env.db.values()] });
+    const r = await correr({ fecha: HOY }, env2.deps);
+    assert.strictEqual(env2.posts.length, 0, 'an incomplete plan must not send the CEI');
+    assert.ok(r.alertas.anomalias.some(a => a.tipo_dto === 'CEI' && /plan incompleto/i.test(a.motivo)));
+    assert.ok(r.fallos > 0);
+    assert.strictEqual([...env2.db.values()].find(f => f.tipo_dto === 'CEI').status, 'PLANNED');
+});
+
+test('stored CEI whose CSA count does not match the planned count is not sent', async () => {
+    const env = crearEntorno({
+        guardadas: [
+            filaGuardada(HOY, 'CEI', 0, 'PLANNED', { respuesta: { plan: { csas_planificadas: 2 } } }),
+            filaGuardada(HOY, 'CSA', 15101, 'PLANNED')
+        ],
+        inventario: []
+    });
+    const r = await correr({ fecha: HOY }, env.deps);
+    assert.strictEqual(env.posts.length, 0);
+    assert.strictEqual(r.alertas.anomalias.filter(a => /plan incompleto/i.test(a.motivo)).length, 1);
+});
+
+test('valid CEI-only plan (zero CSAs) still sends, and its re-run is a no-op', async () => {
+    const env = crearEntorno({
+        inventario: [{ IDCO: '001', IdBodega: '00201', CodigoItem: 15202, CantidadDisponible: -5, CostoPromUnitInst: 9000, UM: 'KL' }]
+    });
+    const r = await correr({ fecha: HOY }, env.deps);
+    assert.deepStrictEqual(env.posts, ['CEI:15202']);
+    assert.strictEqual(r.alertas.anomalias.length, 0);
+    assert.strictEqual(r.documentos, 1);
+    const env2 = crearEntorno({ guardadas: [...env.db.values()] });
+    await correr({ fecha: HOY }, env2.deps);
+    assert.strictEqual(env2.posts.length, 0);
+});
+
+test('the planned CSA count is persisted on the CEI row, not in the Siesa payload', async () => {
+    let cei;
+    const env = crearEntorno();
+    env.deps.guardarLote = async (filas) => { cei = JSON.parse(JSON.stringify(filas.find(f => f.tipo_dto === 'CEI'))); };
+    await correr({ fecha: HOY }, env.deps);
+    assert.strictEqual(cei.respuesta.plan.csas_planificadas, 2);
+    assert.ok(!JSON.stringify(cei.payload).includes('csas_planificadas'));
+});
+
+test('prior-day CEI PLANNED with attempts > 0 is an anomaly: not cancelled, not sent', async () => {
+    const env = crearEntorno({
+        guardadas: [filaGuardada(AYER, 'CEI', 0, 'PLANNED', { intentos: 1 }), filaGuardada(AYER, 'CSA', 15101, 'PLANNED')],
+        inventario: []
+    });
+    const r = await correr({ fecha: HOY }, env.deps);
+    assert.strictEqual(env.posts.length, 0);
+    assert.strictEqual(r.alertas.cancelados.length, 0);
+    assert.ok(r.alertas.anomalias.some(a => a.fecha === AYER && /attempts > 0/.test(a.motivo)));
+    assert.strictEqual([...env.db.values()].find(f => f.tipo_dto === 'CEI').status, 'PLANNED');
 });
