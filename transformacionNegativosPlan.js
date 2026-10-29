@@ -133,19 +133,36 @@ function planificarTransformaciones({
         });
     }
 
+    // Deduplicate inventory rows per co|bodega|item. Identical duplicates collapse to one row; conflicting
+    // duplicates (different stock, cost or UM) make the key an anomaly: it is neither planned nor used as an
+    // origin, and it is reported (fail safe).
+    const filas = new Map();
+    const conflictivos = new Map();
+    for (const r of inventario) {
+        const disp = Number(r.disponible);
+        if (!Number.isFinite(disp)) continue;
+        const k = clave(r.co, r.bodega, r.item);
+        const fila = { co: norm(r.co), bodega: norm(r.bodega), item: Number(r.item), disp, costo: r.costo, um: norm(r.um) };
+        const previa = filas.get(k);
+        if (!previa) { filas.set(k, fila); continue; }
+        const igual = previa.disp === fila.disp && Number(previa.costo) === Number(fila.costo) && previa.um.toUpperCase() === fila.um.toUpperCase();
+        if (!igual) conflictivos.set(k, fila);
+    }
+
     // Ledger: availability in cents (truncated), cost and UM per co|bodega|item.
     const ledger = new Map();
     const negativos = [];
-    for (const r of inventario) {
-        const k = clave(r.co, r.bodega, r.item);
-        const disp = Number(r.disponible);
-        if (!Number.isFinite(disp)) continue;
-        ledger.set(k, {
-            dispCents: disp > 0 ? truncarCentavos(disp) : 0,
-            costo: r.costo,
-            um: norm(r.um)
-        });
-        if (disp < 0) negativos.push({ co: norm(r.co), bodega: norm(r.bodega), item: Number(r.item), disp, costo: r.costo, um: norm(r.um) });
+    const omitidos = [];
+    for (const [k, f] of filas) {
+        if (conflictivos.has(k)) {
+            omitidos.push({
+                co: f.co, bodega: f.bodega, item_destino: f.item, item_origen: f.item, motivo: 'INVENTARIO_DUPLICADO',
+                detalle: 'Conflicting inventory rows for the same co|bodega|item; item ignored.'
+            });
+            continue;
+        }
+        ledger.set(k, { dispCents: f.disp > 0 ? truncarCentavos(f.disp) : 0, costo: f.costo, um: f.um });
+        if (f.disp < 0) negativos.push(f);
     }
 
     // The destination set is fixed before allocation: a destination negative in this run is never an origin
@@ -165,7 +182,6 @@ function planificarTransformaciones({
     );
 
     const documentos = [];
-    const omitidos = [];
     const errores = [];
 
     for (const dest of negativos) {
@@ -190,6 +206,12 @@ function planificarTransformaciones({
             continue;
         }
 
+        // A destination without UM cannot produce a valid CEI nor be matched against origins: fail safe.
+        if (!dest.um) {
+            errores.push({ ...base, cantidad: q / 100, error: 'Destination UM is missing; nothing sent.' });
+            continue;
+        }
+
         // Tentative allocation: the ledger is only committed when the whole destination is accepted.
         let restante = q;
         const asignaciones = [];
@@ -201,7 +223,8 @@ function planificarTransformaciones({
             if (esDestinoEstaCorrida.has(kOrig)) continue;
             const entrada = ledger.get(kOrig);
             if (!entrada || entrada.dispCents <= 0) continue;
-            if (entrada.um.toUpperCase() !== dest.um.toUpperCase()) {
+            // An origin without UM is unknown, never a match.
+            if (!entrada.um || entrada.um.toUpperCase() !== dest.um.toUpperCase()) {
                 omitidosDest.push({ ...base, item_origen: origen, motivo: 'UM', detalle: `Origin UM ${entrada.um || '?'} differs from destination UM ${dest.um || '?'}.` });
                 continue;
             }

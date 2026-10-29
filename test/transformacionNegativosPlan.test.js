@@ -234,3 +234,55 @@ test('destination without an active equivalence produces nothing', () => {
     const plan = planificar([inv(9, -2), inv(1, 10)], r);
     assert.strictEqual(plan.documentos.length, 0);
 });
+
+// ---- Duplicate inventory rows ----
+test('identical duplicate negative rows for the same key produce a single CEI', () => {
+    const r = reglas([[1, 9]], [1]);
+    const plan = planificar([inv(9, -4), inv(9, -4), inv(1, 10)], r);
+    assert.strictEqual(plan.documentos.filter(d => d.tipo_dto === 'CEI').length, 1);
+    assert.strictEqual(cei(plan, 9).cantidad, 4);
+    assert.strictEqual(csas(plan, 9).length, 1);
+    assert.strictEqual(plan.omitidos.filter(o => o.motivo === 'INVENTARIO_DUPLICADO').length, 0);
+});
+
+test('identical duplicate origin rows do not double the origin stock', () => {
+    const r = reglas([[1, 9]], [1]);
+    const plan = planificar([inv(9, -8), inv(1, 5), inv(1, 5)], r);
+    assert.strictEqual(csas(plan, 9)[0].cantidad, 5);
+    assert.ok(plan.omitidos.some(o => o.motivo === 'SIN_STOCK' && o.cantidad === 3));
+});
+
+test('conflicting duplicate destination rows are skipped, reported, and leave the ledger untouched', () => {
+    const r = reglas([[1, 8], [1, 9]], [1]);
+    const plan = planificar([inv(8, -3), inv(9, -3), inv(9, -5), inv(1, 10)], r);
+    assert.strictEqual(cei(plan, 9), undefined);
+    assert.strictEqual(csas(plan, 9).length, 0);
+    assert.ok(plan.omitidos.some(o => o.motivo === 'INVENTARIO_DUPLICADO' && o.item_destino === 9));
+    // Destination 8 is unaffected and sees the full origin stock.
+    assert.strictEqual(csas(plan, 8)[0].cantidad, 3);
+});
+
+test('conflicting duplicate origin rows make that origin unusable and are reported', () => {
+    const r = reglas([[1, 9], [2, 9]], [1, 2]);
+    const plan = planificar([inv(9, -4), inv(1, 10), inv(1, 10, { costo: 2000 }), inv(2, 10)], r);
+    assert.deepStrictEqual(csas(plan, 9).map(d => d.item_origen), [2]);
+    assert.ok(plan.omitidos.some(o => o.motivo === 'INVENTARIO_DUPLICADO' && o.item_origen === 1));
+});
+
+// ---- Missing UM ----
+test('destination with empty or missing UM is not transformed and is reported', () => {
+    const r = reglas([[1, 9]], [1]);
+    for (const um of ['', null, undefined, '  ']) {
+        const plan = planificar([inv(9, -4, { um }), inv(1, 10, { um: '' })], r);
+        assert.strictEqual(plan.documentos.length, 0);
+        assert.strictEqual(plan.errores.length, 1);
+        assert.match(plan.errores[0].error, /UM/);
+    }
+});
+
+test('origin with empty UM is never matched, even against a valid destination UM', () => {
+    const r = reglas([[1, 9], [2, 9]], [1, 2]);
+    const plan = planificar([inv(9, -4), inv(1, 10, { um: '' }), inv(2, 10)], r);
+    assert.deepStrictEqual(csas(plan, 9).map(d => d.item_origen), [2]);
+    assert.ok(plan.omitidos.some(o => o.motivo === 'UM' && o.item_origen === 1));
+});
