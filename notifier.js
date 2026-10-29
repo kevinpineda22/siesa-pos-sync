@@ -558,6 +558,115 @@ async function sendTransformacionNotification({ fecha, entorno, grupos, totalUni
     }
 }
 
+// ──────────────────────────────────────────────────────────
+// Notificación de TRANSFORMACIÓN NEGATIVOS (CEI + CSA por destino con inventario negativo)
+// ──────────────────────────────────────────────────────────
+// Destinatarios: NOTIFY_TRANSF_NEG_EMAILS -> NOTIFY_TRANSF_EMAILS -> NOTIFY_EMAILS
+// (la lista propia aún no está confirmada por negocio).
+function getNotifyTransfNegEmails() {
+    return (process.env.NOTIFY_TRANSF_NEG_EMAILS || process.env.NOTIFY_TRANSF_EMAILS || process.env.NOTIFY_EMAILS || '')
+        .split(',')
+        .map(e => e.trim())
+        .filter(Boolean);
+}
+
+// Construcción pura del correo (sin red): facilita las pruebas con transporte inyectado.
+function buildTransformacionNegativosEmail(resultado) {
+    const r = resultado || {};
+    const a = r.alertas || {};
+    const ref = (f) => `${escapeHtml(f.fecha)} CO ${escapeHtml(f.co)} ${escapeHtml(f.bodega)} item ${escapeHtml(f.item_destino)} ${escapeHtml(f.tipo_dto || '')}${f.item_origen ? ` origen ${escapeHtml(f.item_origen)}` : ''}`;
+    const items = [];
+
+    (a.ambiguos || []).forEach(f => items.push(`<li><strong>AMBIGUO${f.previo ? ' (SENDING -> AMBIGUO al inicio)' : ''}</strong> ${ref(f)}: ${f.tipo_dto === 'CEI' ? 'CEI possibly sent, CSAs blocked, manual review. ' : 'CSA possibly sent, manual review. '}${escapeHtml(String(f.error || '').slice(0, 300))}</li>`));
+    (a.bloqueados || []).forEach(f => items.push(`<li><strong>CSA bloqueada</strong> ${ref(f)} cantidad ${escapeHtml(f.cantidad)}: ${escapeHtml(f.motivo)}</li>`));
+    (a.erroresSiesa || []).forEach(f => items.push(`<li><strong>Siesa rechazó</strong> ${ref(f)}: ${escapeHtml(String(f.error).slice(0, 400))}</li>`));
+    (a.erroresGuardado || []).forEach(f => items.push(`<li><strong>No se pudo registrar</strong> (${escapeHtml(f.fase)}) ${ref(f)}${f.ok ? ' — Siesa SÍ lo aceptó: no reenviar manualmente' : ''}: ${escapeHtml(f.error)}</li>`));
+    (a.anomalias || []).forEach(f => items.push(`<li><strong>${escapeHtml(f.tipoAnomalia || 'ANOMALIA')}</strong> ${ref(f)}: ${escapeHtml(f.motivo)}</li>`));
+    (a.errores || []).forEach(f => items.push(`<li><strong>Error de planeación</strong> ${ref(f)} cantidad ${escapeHtml(f.cantidad)}: ${escapeHtml(f.error)}</li>`));
+    (a.omitidos || []).forEach(f => items.push(`<li><strong>Omitido ${escapeHtml(f.motivo)}</strong> ${ref(f)}${f.cantidad ? ` cantidad ${escapeHtml(f.cantidad)}` : ''}: ${escapeHtml(f.detalle || '')}</li>`));
+    (a.reintentosDiasPrevios || []).forEach(f => items.push(`<li><strong>Reintento de día previo</strong> ${ref(f)} cantidad ${escapeHtml(f.cantidad)} (intentos previos ${escapeHtml(f.intentosPrevios)}): ${escapeHtml(f.resultado)}</li>`));
+    (a.cancelados || []).forEach(f => items.push(`<li><strong>Cancelado</strong> (estado previo ${escapeHtml(f.estadoPrevio)}) ${ref(f)}</li>`));
+    if (r.abortada) items.push('<li><strong>Corrida abortada</strong>: quedaron destinos sin procesar.</li>');
+
+    const nAlertas = items.length;
+    const inv = r.inventario;
+    const invTexto = inv ? `${Number(inv.filas).toLocaleString('es-CO')} filas en ${inv.paginas} page(s)` : 'sin consulta (solo reanudación)';
+    const filas = (r.detalle || []).map((d, i) => `
+        <tr${i % 2 === 0 ? '' : ' style="background: #f9f9f9;"'}>
+            <td style="padding: 6px 8px;">${escapeHtml(d.co)}</td>
+            <td style="padding: 6px 8px; text-align: center;">${escapeHtml(d.bodega)}</td>
+            <td style="padding: 6px 8px; text-align: center;">${escapeHtml(d.item_destino)}</td>
+            <td style="padding: 6px 8px; text-align: center;">${escapeHtml(d.tipo_dto)}${d.item_origen ? ` (${escapeHtml(d.item_origen)})` : ''}</td>
+            <td style="padding: 6px 8px; text-align: right;">${escapeHtml(d.cantidad)}</td>
+            <td style="padding: 6px 8px; text-align: center;">${escapeHtml(d.resultado)}</td>
+        </tr>`).join('');
+
+    const color = nAlertas > 0 ? '#e67e22' : '#27ae60';
+    const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px;">
+  <div style="max-width: 700px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <div style="background: ${color}; color: white; padding: 20px; text-align: center;">
+      <h2 style="margin: 0;">Transformación de inventario negativo</h2>
+      <p style="margin: 5px 0 0; opacity: 0.9;">${escapeHtml(r.fecha)} · Entorno ${escapeHtml(r.entorno)} · Modo ${escapeHtml(r.modo)}</p>
+    </div>
+    <div style="padding: 20px;">
+      <p style="color: #555; font-size: 14px;">Destinos: <strong>${escapeHtml(r.destinos)}</strong> · Documentos enviados OK: <strong>${escapeHtml(r.documentos)}</strong> · Fallos: <strong>${escapeHtml(r.fallos)}</strong></p>
+      <p style="color: #555; font-size: 14px;">Consulta de inventario: ${invTexto}</p>
+      ${filas ? `
+      <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+        <thead>
+          <tr style="background: #ecf0f1;">
+            <th style="padding: 8px; text-align: left;">CO</th>
+            <th style="padding: 8px; text-align: center;">Bodega</th>
+            <th style="padding: 8px; text-align: center;">Destino</th>
+            <th style="padding: 8px; text-align: center;">Doc</th>
+            <th style="padding: 8px; text-align: right;">Cantidad</th>
+            <th style="padding: 8px; text-align: center;">Resultado</th>
+          </tr>
+        </thead>
+        <tbody>${filas}</tbody>
+      </table>` : '<p style="color: #999;">Sin documentos enviados.</p>'}
+      ${items.length > 0 ? `
+      <div style="margin-top: 20px; padding: 12px; background: #fff8e1; border-left: 4px solid #e67e22; border-radius: 4px;">
+        <p style="margin: 0 0 8px; font-weight: bold; color: #e67e22;">Alertas (${items.length}):</p>
+        <ul style="margin: 0; padding-left: 20px; color: #555; font-size: 13px; line-height: 1.6;">${items.join('')}</ul>
+      </div>` : ''}
+      <p style="margin-top: 20px; font-size: 13px; color: #999; text-align: center;">
+        Generado automáticamente por SiesaPOS Sync.
+      </p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+    const subject = `${nAlertas > 0 ? '[ALERTA]' : '[OK]'} [SiesaPOS] Transformación negativos ${r.fecha} (${r.documentos} doc${nAlertas > 0 ? `, ${nAlertas} alerta(s)` : ''})`;
+    return { subject, html, nAlertas };
+}
+
+// `deps.transport` permite inyectar un transporte en pruebas (nunca enviar correo real).
+async function sendTransformacionNegativosNotification(resultado, deps = {}) {
+    const emails = getNotifyTransfNegEmails();
+    if (emails.length === 0) {
+        console.log('NOTIFY_TRANSF_NEG_EMAILS/NOTIFY_TRANSF_EMAILS/NOTIFY_EMAILS no configurado — se omite notificación de negativos.');
+        return;
+    }
+    const { subject, html } = buildTransformacionNegativosEmail(resultado);
+    try {
+        const info = await (deps.transport || transporter).sendMail({
+            from: SMTP_FROM,
+            to: emails.join(', '),
+            subject,
+            html,
+        });
+        console.log(`Notificación de negativos enviada a ${emails.join(', ')}: ${info && info.messageId}`);
+    } catch (err) {
+        console.error(`Error enviando notificación de negativos: ${err.message}`);
+    }
+}
+
 module.exports = {
     sendErrorNotification,
     sendCpeNotification,
@@ -565,4 +674,6 @@ module.exports = {
     sendClienteInconsistenteNotification,
     sendSilentMiddayNotification,
     sendTransformacionNotification,
+    sendTransformacionNegativosNotification,
+    buildTransformacionNegativosEmail,
 };

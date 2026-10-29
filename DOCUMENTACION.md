@@ -1729,6 +1729,87 @@ Cada corrida **no dry-run** deja una fila en la tabla `sps_transformaciones_corr
 
 ---
 
+## 27. Flujo Transformación de Inventario Negativo (después de tocino)
+
+### Propósito
+
+Cuando un ítem destino de carnes queda con **inventario negativo** en una bodega, el flujo lo normaliza con una transformación en Siesa: una **ENTRADA (CEI)** del destino por la cantidad negativa y una o varias **SALIDAS (CSA)**, una por cada ítem origen con stock, según la tabla de equivalencias y prioridades. El costo del destino se toma de la consulta de inventario; si falta costo o unidad de medida (UM), el destino no se envía y se reporta.
+
+### Ejecución y orden
+
+| Dato | Valor |
+|------|-------|
+| Módulo | `transformacionNegativos.js` (planificador puro: `transformacionNegativosPlan.js`) |
+| Runner | `scripts/runTransformacionNegativosCron.js` |
+| Workflow | `.github/workflows/transformacion-carnes.yml`, job `transformacion-negativos` |
+| Orden | corre **después** del job de tocino (`needs: transformacion-carnes`); si tocino falla, este job se omite |
+| Concurrencia | grupo propio `transformacion-negativos`, `cancel-in-progress: false` |
+| Entradas | las mismas del workflow manual: `fecha`, `dry_run`, `entorno` (default QA; el cron escribe a PROD) |
+
+**Reglas de fecha:** el día en curso solo se procesa desde las 21:30 COT; una fecha futura se rechaza sin escribir nada; una **fecha pasada solo reanuda** documentos pendientes (no consulta inventario ni planifica nuevos destinos).
+
+### Variables de entorno
+
+| Variable | Default | Descripción |
+|----------|---------|-------------|
+| `TRANSF_NEG_QUERY_INVENTARIO` | `merkahorro_items_inventario_costo_dev_transformaciones` | Query Connekta de inventario. Vacía = falla rápida |
+| `TRANSF_NEG_COLUMNAS` | (código) | JSON para sobreescribir nombres de columnas |
+| `TRANSF_NEG_ITEMS_EXCLUIDOS` | `15207` | Ítems que nunca se tratan como destino (lista separada por coma) |
+| `TRANSF_NEG_DIAS_REANUDAR` | `7` | Ventana (días) para reanudar documentos pendientes |
+| `TRANSF_NEG_UNIDAD_NEGOCIO` | `003` | Unidad de negocio |
+| `NOTIFY_TRANSF_NEG_EMAILS` | `NOTIFY_TRANSF_EMAILS`, luego `NOTIFY_EMAILS` | Destinatarios (los definitivos aún no están confirmados por negocio) |
+
+Comparte `TRANSF_ID_DOCUMENTO`, `TRANSF_NOMBRE_DOCUMENTO`, `TRANSF_FECHA`, `TRANSF_DRY_RUN`, `ENTORNO_SIESA_TRANSF`, `CONNI_*`, `CIA`, `SUPABASE_*` y `SMTP_*` con el flujo de tocino.
+
+### Tablas (migraciones 007 y 008, **se ejecutan a mano** en Supabase)
+
+- `sps_transformaciones_equivalencias`: origen -> destino, factor y UM (semilla de la migración 008).
+- `sps_transformaciones_prioridad`: orden de consumo de orígenes por destino.
+- `sps_transformaciones_negativos`: un documento por fila (CEI/CSA), con `status`.
+- `sps_transformaciones_negativos_corridas`: una fila por corrida (`PROCESADO`, `SIN_NEGATIVOS`, `CON_FALLO`, `ERROR_FATAL`).
+
+### Estados de un documento
+
+| Estado | Significado |
+|--------|-------------|
+| `PLANNED` | Planificado y guardado; aún no enviado |
+| `SENDING` | Marcado **antes** del POST a Siesa. Si la corrida muere en este punto, al iniciar la siguiente pasa a `AMBIGUO` |
+| `OK` | Siesa lo aceptó |
+| `ERROR` | Siesa lo rechazó; se reintenta en la siguiente corrida |
+| `AMBIGUO` | No se sabe si Siesa lo recibió. **Nunca se reenvía automáticamente** |
+| `CANCELADO` | Documento de un día previo no enviado (`PLANNED` con 0 intentos o `ERROR`), cancelado al iniciar antes de planificar los nuevos destinos |
+
+Secuencia: se guarda **todo el plan** antes de enviar; la CEI se envía antes que las CSA; si la CEI falla o queda `AMBIGUO`, las CSA quedan **bloqueadas**. Si el guardado del plan quedó incompleto (la CEI espera N CSA y hay otro número guardado) se reporta `PLAN_INCOMPLETO`, no se envía nada y se cuenta como fallo.
+
+### Notificación
+
+`notifier.sendTransformacionNegativosNotification` envía un correo por corrida no dry-run con: documentos procesados, errores (sin costo/UM, filas de inventario duplicadas y conflictivas), `AMBIGUO` ("CEI possibly sent, CSAs blocked, manual review"), anomalías `PLAN_INCOMPLETO`, reintentos de CSA de días previos, omitidos (UM distinta, sin stock, bloqueado) y las páginas/filas leídas de la consulta. El job queda en **rojo** ante fallos de Siesa, `AMBIGUO`, destinos bloqueados, `PLAN_INCOMPLETO` o errores al guardar.
+
+### Resolución manual de un AMBIGUO
+
+1. Buscar en Siesa si el documento (CEI o CSA) existe, con la nota `Transformacion negativos <fecha> CO <co>` y el ítem/bodega de la alerta.
+2. Si **existe**: actualizar la fila a `status = 'OK'` en `sps_transformaciones_negativos`.
+3. Si **no existe**: actualizar la fila a `status = 'ERROR'`; la siguiente corrida la reintenta.
+4. Si el AMBIGUO es una **CEI**, las CSA de ese destino siguen bloqueadas hasta resolverla.
+5. Nunca borrar la fila ni reenviar a mano un documento que Siesa sí aceptó.
+
+### Dry run
+
+```bash
+# Muestra el plan y los payloads; no envía, no escribe en Supabase, no manda correo (NO ejecutar contra PROD sin revisar)
+TRANSF_DRY_RUN=1 TRANSF_FECHA=2026-10-29 ENTORNO_SIESA_TRANSF=QA node scripts/runTransformacionNegativosCron.js
+```
+
+### Checklist de QA (manual)
+
+- [ ] Ejecutar las migraciones 007 y 008 en Supabase.
+- [ ] Dry run en QA; revisar el plan y el correo/log.
+- [ ] Corrida real en QA: verificar que el conector acepta una CSA con costo distinto de cero y documentos reanudados con fecha pasada.
+- [ ] Confirmar columnas de la query de inventario y la política cuando la UM de origen y destino difieren.
+- [ ] PROD: confirmar `TRANSF_NEG_QUERY_INVENTARIO` y los destinatarios antes del primer cron.
+
+---
+
 ## Contacto / Soporte
 
 **Backend:** `siesa-pos-sync` (este repo)

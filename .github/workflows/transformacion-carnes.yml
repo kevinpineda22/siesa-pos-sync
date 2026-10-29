@@ -95,3 +95,69 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           NOTIFY_TRANSF_EMAILS: ${{ secrets.NOTIFY_TRANSF_EMAILS }}
           NOTIFY_EMAILS: ${{ secrets.NOTIFY_EMAILS }}
+
+  # Segundo job: limpia el inventario negativo de destinos (CEI + CSA por origen).
+  # Corre DESPUES del job de tocino (needs): si tocino falla este job se omite.
+  transformacion-negativos:
+    needs: transformacion-carnes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Grupo propio: nunca cancela una corrida en curso (puede haber documentos en vuelo hacia Siesa).
+    concurrency:
+      group: transformacion-negativos
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      # Misma regla de fecha objetivo que el job de tocino (inputs compartidos).
+      - name: Calcular fecha objetivo
+        id: fecha
+        env:
+          EVENTO: ${{ github.event_name }}
+          FECHA_INPUT: ${{ github.event.inputs.fecha }}
+        run: |
+          if [ "$EVENTO" = "schedule" ]; then
+            FECHA=$(TZ=America/Bogota date -d '4 hours ago' +%F)
+          else
+            FECHA="$FECHA_INPUT"
+          fi
+          echo "Fecha objetivo: '${FECHA}'"
+          echo "fecha=${FECHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Ejecutar transformacion de inventario negativo
+        run: node scripts/runTransformacionNegativosCron.js
+        env:
+          # --- Credenciales / conexion (GitHub Secrets) ---
+          CONNI_KEY: ${{ secrets.CONNI_KEY }}
+          CONNI_TOKEN: ${{ secrets.CONNI_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          CIA: ${{ secrets.CIA }}
+          # --- Configuracion del flujo (mismos inputs que el job de tocino) ---
+          ENTORNO_SIESA_TRANSF: ${{ github.event.inputs.entorno || 'PROD' }}
+          TRANSF_FECHA: ${{ steps.fecha.outputs.fecha }}
+          TRANSF_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          # --- Especificas de negativos (vacio = default en codigo) ---
+          TRANSF_NEG_QUERY_INVENTARIO: ${{ vars.TRANSF_NEG_QUERY_INVENTARIO || 'merkahorro_items_inventario_costo_dev_transformaciones' }}
+          TRANSF_NEG_COLUMNAS: ${{ vars.TRANSF_NEG_COLUMNAS || '' }}
+          TRANSF_NEG_ITEMS_EXCLUIDOS: ${{ vars.TRANSF_NEG_ITEMS_EXCLUIDOS || '' }}
+          TRANSF_NEG_DIAS_REANUDAR: ${{ vars.TRANSF_NEG_DIAS_REANUDAR || '' }}
+          TRANSF_NEG_UNIDAD_NEGOCIO: ${{ vars.TRANSF_NEG_UNIDAD_NEGOCIO || '' }}
+          # --- Notificaciones por correo (GitHub Secrets) ---
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          NOTIFY_TRANSF_NEG_EMAILS: ${{ secrets.NOTIFY_TRANSF_NEG_EMAILS }}
+          NOTIFY_TRANSF_EMAILS: ${{ secrets.NOTIFY_TRANSF_EMAILS }}
+          NOTIFY_EMAILS: ${{ secrets.NOTIFY_EMAILS }}
