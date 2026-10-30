@@ -436,7 +436,12 @@ test('stored CEI whose CSA count does not match the planned count is not sent', 
 
 test('valid CEI-only plan (zero CSAs) still sends, and its re-run is a no-op', async () => {
     const env = crearEntorno({
-        inventario: [{ IDCO: '001', IdBodega: '00201', CodigoItem: 15202, CantidadDisponible: -5, CostoPromUnitInst: 9000, UM: 'KL' }]
+        // Origin rows must be present (zero stock): a missing row means unknown stock and skips the destination.
+        inventario: [
+            { IDCO: '001', IdBodega: '00201', CodigoItem: 15202, CantidadDisponible: -5, CostoPromUnitInst: 9000, UM: 'KL' },
+            { IDCO: '001', IdBodega: '00201', CodigoItem: 15101, CantidadDisponible: 0, CostoPromUnitInst: 5000, UM: 'KL' },
+            { IDCO: '001', IdBodega: '00201', CodigoItem: 15102, CantidadDisponible: 0, CostoPromUnitInst: 6000, UM: 'KL' }
+        ]
     });
     const r = await correr({ fecha: HOY }, env.deps);
     assert.deepStrictEqual(env.posts, ['CEI:15202']);
