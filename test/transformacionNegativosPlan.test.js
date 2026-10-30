@@ -286,3 +286,49 @@ test('origin with empty UM is never matched, even against a valid destination UM
     assert.deepStrictEqual(csas(plan, 9).map(d => d.item_origen), [2]);
     assert.ok(plan.omitidos.some(o => o.motivo === 'UM' && o.item_origen === 1));
 });
+
+// ---- Missing origin inventory row = unknown stock ----
+test('missing first origin row skips the whole destination and reports ORIGEN_SIN_DATO', () => {
+    const r = reglas([[1, 9], [2, 9]], [1, 2]);
+    const plan = planificar([inv(9, -4), inv(2, 10)], r);
+    assert.strictEqual(plan.documentos.length, 0);
+    const o = plan.omitidos.find(x => x.motivo === 'ORIGEN_SIN_DATO');
+    assert.ok(o);
+    assert.strictEqual(o.bodega, '00101');
+    assert.strictEqual(o.item_destino, 9);
+    assert.strictEqual(o.item_origen, 1);
+});
+
+test('missing origin row after partial coverage skips the destination and leaves the ledger untouched', () => {
+    const r = reglas([[1, 8], [2, 8], [1, 9], [3, 9]], [1, 2, 3]);
+    // Destination 8 takes origin 1 (2 of 5) then hits missing origin 2; destination 9 must still see origin 1 in full.
+    const plan = planificar([inv(8, -5), inv(9, -2), inv(1, 2), inv(3, 10)], r);
+    assert.strictEqual(cei(plan, 8), undefined);
+    assert.strictEqual(csas(plan, 8).length, 0);
+    assert.ok(plan.omitidos.some(o => o.motivo === 'ORIGEN_SIN_DATO' && o.item_destino === 8 && o.item_origen === 2));
+    assert.strictEqual(csas(plan, 9)[0].cantidad, 2);
+    assert.strictEqual(csas(plan, 9)[0].item_origen, 1);
+});
+
+test('missing origin row after full coverage is irrelevant', () => {
+    const r = reglas([[1, 9], [2, 9]], [1, 2]);
+    const plan = planificar([inv(9, -4), inv(1, 10)], r);
+    assert.strictEqual(cei(plan, 9).cantidad, 4);
+    assert.deepStrictEqual(csas(plan, 9).map(d => d.item_origen), [1]);
+    assert.strictEqual(plan.omitidos.filter(o => o.motivo === 'ORIGEN_SIN_DATO').length, 0);
+});
+
+test('all origin rows present with zero or negative stock still sends the CEI alone', () => {
+    const r = reglas([[1, 9], [2, 9]], [1, 2]);
+    const plan = planificar([inv(9, -5), inv(1, 0), inv(2, 0)], r);
+    assert.strictEqual(plan.documentos.length, 1);
+    assert.strictEqual(cei(plan, 9).cantidad, 5);
+    assert.strictEqual(plan.omitidos.filter(o => o.motivo === 'ORIGEN_SIN_DATO').length, 0);
+});
+
+test('UM-mismatched origin does not count as missing; walk continues to the next present origin', () => {
+    const r = reglas([[1, 9], [2, 9]], [1, 2]);
+    const plan = planificar([inv(9, -4), inv(1, 10, { um: 'UND' }), inv(2, 10)], r);
+    assert.deepStrictEqual(csas(plan, 9).map(d => d.item_origen), [2]);
+    assert.strictEqual(plan.omitidos.filter(o => o.motivo === 'ORIGEN_SIN_DATO').length, 0);
+});

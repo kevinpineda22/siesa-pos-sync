@@ -217,12 +217,18 @@ function planificarTransformaciones({
         const asignaciones = [];
         const omitidosDest = [];
         let errorCosto = null;
+        let origenSinDato = null;
         for (const origen of origenes) {
             if (restante <= 0) break;
             const kOrig = clave(dest.co, dest.bodega, origen);
             if (esDestinoEstaCorrida.has(kOrig)) continue;
+            // Conflicting duplicates are already reported as INVENTARIO_DUPLICADO and the origin stays unusable.
+            if (conflictivos.has(kOrig)) continue;
             const entrada = ledger.get(kOrig);
-            if (!entrada || entrada.dispCents <= 0) continue;
+            // The inventory query has no ORDER BY, so paging can skip rows: an origin with no row is UNKNOWN
+            // stock, not zero. Reaching it before the quantity is covered means we cannot trust the plan.
+            if (!entrada) { origenSinDato = origen; break; }
+            if (entrada.dispCents <= 0) continue;
             // An origin without UM is unknown, never a match.
             if (!entrada.um || entrada.um.toUpperCase() !== dest.um.toUpperCase()) {
                 omitidosDest.push({ ...base, item_origen: origen, motivo: 'UM', detalle: `Origin UM ${entrada.um || '?'} differs from destination UM ${dest.um || '?'}.` });
@@ -235,6 +241,14 @@ function planificarTransformaciones({
             const toma = Math.min(entrada.dispCents, restante);
             restante -= toma;
             asignaciones.push({ origen, toma, entrada });
+        }
+
+        if (origenSinDato !== null) {
+            omitidos.push({
+                ...base, item_origen: origenSinDato, motivo: 'ORIGEN_SIN_DATO',
+                detalle: `No inventory row for origin ${origenSinDato} in bodega ${dest.bodega}; stock unknown, destination skipped and retried next run.`
+            });
+            continue;
         }
 
         if (errorCosto) {
