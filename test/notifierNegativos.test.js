@@ -46,6 +46,15 @@ test('builder: PLAN_INCOMPLETO, missing cost/UM, duplicates, prior-day retries a
     }
 });
 
+test('builder: ORIGEN_SIN_DATO skip is listed with the missing origin and counts as an alert', () => {
+    const m = notifier.buildTransformacionNegativosEmail(conAlertas({
+        omitidos: [{ ...id, tipo_dto: undefined, item_origen: 15177, motivo: 'ORIGEN_SIN_DATO', detalle: 'No inventory row for origin 15177' }]
+    }));
+    assert.match(m.html, /ORIGEN_SIN_DATO/);
+    assert.match(m.html, /origen 15177/);
+    assert.ok(m.nAlertas >= 1);
+});
+
 test('builder: escapes HTML in dynamic text', () => {
     const m = notifier.buildTransformacionNegativosEmail(conAlertas({
         errores: [{ ...id, cantidad: 1, error: '<script>x</script>' }]

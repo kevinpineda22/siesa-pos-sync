@@ -1781,9 +1781,18 @@ Comparte `TRANSF_ID_DOCUMENTO`, `TRANSF_NOMBRE_DOCUMENTO`, `TRANSF_FECHA`, `TRAN
 
 Secuencia: se guarda **todo el plan** antes de enviar; la CEI se envía antes que las CSA; si la CEI falla o queda `AMBIGUO`, las CSA quedan **bloqueadas**. Si el guardado del plan quedó incompleto (la CEI espera N CSA y hay otro número guardado) se reporta `PLAN_INCOMPLETO`, no se envía nada y se cuenta como fallo.
 
+### Ítem origen sin fila de inventario (stock desconocido)
+
+La consulta de inventario de Connekta **no tiene `ORDER BY`**, por lo que la paginación puede **omitir filas**. Por eso un ítem origen que no aparece en la consulta para esa bodega se trata como **stock desconocido, no como cero**:
+
+- Al recorrer los orígenes de un destino por prioridad, si se llega a un origen **sin fila** antes de cubrir la cantidad negativa, se **omite el destino completo** (ni CEI ni CSA) y se reporta como omitido `ORIGEN_SIN_DATO` (bodega, destino y código del origen faltante). Se reintenta de forma natural en la corrida de la noche siguiente.
+- Si la cantidad ya quedó cubierta por orígenes anteriores, los orígenes faltantes posteriores no importan y el plan sigue normal.
+- Una fila **presente** con stock 0 o negativo sí es información: se pasa al siguiente origen y, si ningún origen tiene stock, se envía solo la CEI. Los orígenes saltados por UM distinta mantienen su comportamiento.
+- **Recomendación:** agregar `ORDER BY IdBodega, CodigoItem` a la query de Connekta; con un orden estable, la ausencia de fila podría volver a tratarse como cero. Si el mismo par destino/origen se reporta de forma recurrente, la fila realmente no existe (cero real) y conviene revisar esa equivalencia.
+
 ### Notificación
 
-`notifier.sendTransformacionNegativosNotification` envía un correo por corrida no dry-run con: documentos procesados, errores (sin costo/UM, filas de inventario duplicadas y conflictivas), `AMBIGUO` ("CEI possibly sent, CSAs blocked, manual review"), anomalías `PLAN_INCOMPLETO`, reintentos de CSA de días previos, omitidos (UM distinta, sin stock, bloqueado) y las páginas/filas leídas de la consulta. El job queda en **rojo** ante fallos de Siesa, `AMBIGUO`, destinos bloqueados, `PLAN_INCOMPLETO` o errores al guardar.
+`notifier.sendTransformacionNegativosNotification` envía un correo por corrida no dry-run con: documentos procesados, errores (sin costo/UM, filas de inventario duplicadas y conflictivas), `AMBIGUO` ("CEI possibly sent, CSAs blocked, manual review"), anomalías `PLAN_INCOMPLETO`, reintentos de CSA de días previos, omitidos (UM distinta, sin stock, bloqueado, `ORIGEN_SIN_DATO`) y las páginas/filas leídas de la consulta. El job queda en **rojo** ante fallos de Siesa, `AMBIGUO`, destinos bloqueados, `PLAN_INCOMPLETO` o errores al guardar.
 
 ### Resolución manual de un AMBIGUO
 
