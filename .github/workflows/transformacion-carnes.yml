@@ -100,6 +100,9 @@ jobs:
   # Corre DESPUES del job de tocino (needs): si tocino falla este job se omite.
   transformacion-negativos:
     needs: transformacion-carnes
+    # Pausado: solo corre si la variable del repo TRANSF_NEG_HABILITADO vale 'true'
+    # (Settings > Secrets and variables > Actions > Variables). Sin ella el job se omite.
+    if: vars.TRANSF_NEG_HABILITADO == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Grupo propio: nunca cancela una corrida en curso (puede haber documentos en vuelo hacia Siesa).
