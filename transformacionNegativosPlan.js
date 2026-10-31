@@ -68,6 +68,26 @@ function costoValido(c) {
     return c !== null && c !== undefined && c !== '' && Number.isFinite(n) && n > 0;
 }
 
+// Configured exclusions ADD to the defaults (never replace them). Any token that is not an integer item code is a
+// configuration error: fail fast instead of silently ignoring it.
+function construirExcluidos(extra) {
+    const set = new Set(ITEMS_EXCLUIDOS_POR_DEFECTO.map(Number));
+    for (const token of extra || []) {
+        const texto = norm(token);
+        const n = Number(texto);
+        if (!/^\d+$/.test(texto) || !Number.isSafeInteger(n)) {
+            throw new Error(`Invalid excluded item code "${texto}": expected an integer item code.`);
+        }
+        set.add(n);
+    }
+    return set;
+}
+
+// Statuses of a CSA from an earlier run that may still be sent (PLANNED, ERROR) or may already have landed in
+// Siesa without being reflected in the inventory read (SENDING, AMBIGUO). OK is already in the inventory and
+// CANCELADO will never be sent.
+const ESTADOS_CSA_RESERVAN_ORIGEN = new Set(['PLANNED', 'SENDING', 'ERROR', 'AMBIGUO']);
+
 const comparadorNumerico = new Intl.Collator('en', { numeric: true });
 
 // ──────────────────────────────────────────────────────────
@@ -111,7 +131,7 @@ function planificarTransformaciones({
     unidadNegocio = UNIDAD_NEGOCIO_POR_DEFECTO,
     politicaCostoCsa = POLITICA_COSTO_CSA_POR_DEFECTO
 } = {}) {
-    const excluidos = new Set((reglas.excluidos || ITEMS_EXCLUIDOS_POR_DEFECTO).map(Number));
+    const excluidos = construirExcluidos(reglas.excluidos);
     const equivalencias = (reglas.equivalencias || []).filter(e => e.activo !== false);
     const ordenPrioridad = new Map(
         (reglas.prioridad || []).filter(p => p.activo !== false).map(p => [Number(p.item_origen), Number(p.orden)])
@@ -172,6 +192,13 @@ function planificarTransformaciones({
     const yaPlanificados = new Set();
     const bloqueados = new Set();
     for (const p of previos) {
+        // Reserve origin stock for pending CSAs of earlier runs: Siesa does not validate stock on exits, so
+        // planning the same stock again would overdraw the origin once both CSAs are sent.
+        if (p.tipo_dto === 'CSA' && ESTADOS_CSA_RESERVAN_ORIGEN.has(p.status)) {
+            const reservado = ledger.get(clave(p.co, p.bodega, p.item_origen));
+            const cents = Number.isFinite(Number(p.cantidad)) ? aCentavos(p.cantidad) : 0;
+            if (reservado && cents > 0) reservado.dispCents = Math.max(0, reservado.dispCents - cents);
+        }
         const k = clave(p.co, p.bodega, p.item_destino);
         if (norm(p.fecha) === fecha) yaPlanificados.add(k);
         if (p.tipo_dto === 'CEI' && (p.status === 'SENDING' || p.status === 'AMBIGUO')) bloqueados.add(k);

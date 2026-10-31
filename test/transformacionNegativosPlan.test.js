@@ -332,3 +332,74 @@ test('UM-mismatched origin does not count as missing; walk continues to the next
     assert.deepStrictEqual(csas(plan, 9).map(d => d.item_origen), [2]);
     assert.strictEqual(plan.omitidos.filter(o => o.motivo === 'ORIGEN_SIN_DATO').length, 0);
 });
+
+// ---- W1: pending CSAs from earlier runs reserve origin stock ----
+const csaPrevio = (status, cantidad, extra = {}) => ({
+    fecha: '2026-10-28', co: '001', bodega: '00101', item_destino: 8, tipo_dto: 'CSA', item_origen: 1, cantidad, status, ...extra
+});
+
+test('W1 a pending ERROR CSA from a previous day reduces origin availability; the destination falls to the next origin', () => {
+    const r = reglas([[1, 9], [2, 9]], [1, 2]);
+    const plan = planificar([inv(9, -8), inv(1, 10), inv(2, 10)], r, { previos: [csaPrevio('ERROR', 6)] });
+    assert.deepStrictEqual(csas(plan, 9).map(d => [d.item_origen, d.cantidad]), [[1, 4], [2, 4]]);
+});
+
+test('W1 AMBIGUO, PLANNED and SENDING CSAs reserve origin stock', () => {
+    const r = reglas([[1, 9]], [1]);
+    for (const status of ['AMBIGUO', 'PLANNED', 'SENDING']) {
+        const plan = planificar([inv(9, -8), inv(1, 10)], r, { previos: [csaPrevio(status, 6)] });
+        assert.strictEqual(csas(plan, 9)[0].cantidad, 4, status);
+        assert.ok(plan.omitidos.some(o => o.motivo === 'SIN_STOCK' && o.cantidad === 4), status);
+    }
+});
+
+test('W1 OK and CANCELADO CSAs do not reserve origin stock', () => {
+    const r = reglas([[1, 9]], [1]);
+    for (const status of ['OK', 'CANCELADO']) {
+        const plan = planificar([inv(9, -8), inv(1, 10)], r, { previos: [csaPrevio(status, 6)] });
+        assert.strictEqual(csas(plan, 9)[0].cantidad, 8, status);
+    }
+});
+
+test('W1 reservations are clamped at zero and fall back to CEI-only when every origin is exhausted', () => {
+    const r = reglas([[1, 9]], [1]);
+    const plan = planificar([inv(9, -5), inv(1, 3)], r, { previos: [csaPrevio('ERROR', 2), csaPrevio('PLANNED', 5, { item_destino: 7 })] });
+    assert.strictEqual(csas(plan, 9).length, 0);
+    assert.strictEqual(cei(plan, 9).cantidad, 5);
+});
+
+test('W1 reservations are cent-exact and scoped to co|bodega|item_origen', () => {
+    const r = reglas([[1, 9]], [1]);
+    const plan = planificar([inv(9, -8), inv(1, 10.3)], r, { previos: [csaPrevio('ERROR', 0.1)] });
+    assert.strictEqual(csas(plan, 9)[0].cantidad, 8);
+    const otraBodega = planificar([inv(9, -8), inv(1, 10)], r, { previos: [csaPrevio('ERROR', 9, { bodega: '00102' }), csaPrevio('ERROR', 9, { co: '002' }), csaPrevio('ERROR', 9, { item_origen: 2 })] });
+    assert.strictEqual(csas(otraBodega, 9)[0].cantidad, 8);
+    const exacto = planificar([inv(9, -8), inv(1, 10.3)], r, { previos: [csaPrevio('ERROR', 2.35)] });
+    assert.strictEqual(csas(exacto, 9)[0].cantidad, 7.95);
+});
+
+test('W1 CEI rows and CSA rows without item_origen/cantidad do not reserve anything', () => {
+    const r = reglas([[1, 9]], [1]);
+    const previos = [
+        { fecha: '2026-10-28', co: '001', bodega: '00101', item_destino: 8, tipo_dto: 'CEI', item_origen: 0, cantidad: 6, status: 'ERROR' },
+        csaPrevio('ERROR', undefined)
+    ];
+    const plan = planificar([inv(9, -8), inv(1, 10)], r, { previos });
+    assert.strictEqual(csas(plan, 9)[0].cantidad, 8);
+});
+
+// ---- S1: configured exclusions add to the defaults ----
+test('S1 reglas.excluidos adds to the default exclusions (15207 is always excluded)', () => {
+    const r = reglas([[1, 9], [1, 15207], [1, 8]], [1], { excluidos: [9] });
+    const plan = planificar([inv(9, -2), inv(15207, -2), inv(8, -2), inv(1, 50)], r);
+    assert.strictEqual(cei(plan, 9), undefined);
+    assert.strictEqual(cei(plan, 15207), undefined);
+    assert.ok(cei(plan, 8));
+});
+
+test('S1 an invalid excluded token throws a clear config error', () => {
+    const r = reglas([[1, 9]], [1], { excluidos: [9, 'abc'] });
+    assert.throws(() => planificar([inv(9, -2), inv(1, 5)], r), /excluded item/i);
+    const r2 = reglas([[1, 9]], [1], { excluidos: [1.5] });
+    assert.throws(() => planificar([inv(9, -2), inv(1, 5)], r2), /excluded item/i);
+});
