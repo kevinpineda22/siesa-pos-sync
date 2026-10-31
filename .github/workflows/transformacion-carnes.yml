@@ -1,4 +1,4 @@
-name: Transformacion tocino -> chicharron (diario 10pm)
+name: Transformaciones carnes (diario 10pm)
 
 # Toma las unidades netas vendidas del item 15207 (CHICHARRON MERKAHORRO) del dia y registra
 # en Siesa la ENTRADA de chicharron (CEI) y la SALIDA de tocino 15202 (CSA) por CO/bodega.
