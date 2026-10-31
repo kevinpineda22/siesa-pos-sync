@@ -1792,7 +1792,7 @@ La consulta de inventario de Connekta **no tiene `ORDER BY`**, por lo que la pag
 
 ### Reserva de stock por CSA pendientes de corridas previas
 
-El ledger de orígenes parte del inventario vivo y **descuenta** la cantidad de toda CSA de corridas anteriores en estado `PLANNED`, `SENDING`, `ERROR` o `AMBIGUO` (puede enviarse todavía o puede haber llegado a Siesa sin reflejarse en el inventario leído). Las `OK` (ya están en el inventario) y las `CANCELADO` no descuentan. Se calcula con las filas posteriores a la cancelación de días previos, en centavos enteros y con piso en 0. Sin esto, una CSA fallida de ayer más otra CSA de hoy sobre el mismo origen lo dejarían sobregirado (Siesa no valida stock en salidas).
+El ledger de orígenes parte del inventario vivo y **descuenta** la cantidad de toda CSA de corridas anteriores en estado `PLANNED` o `ERROR`, es decir, las que todavía se reenviarán automáticamente. Las `AMBIGUO` y `SENDING` (que pasa a `AMBIGUO` al reanudar) **no** descuentan: nunca se reenvían solas, y si llegaron a Siesa el inventario vivo ya las refleja; descontarlas contaría dos veces, achicaría el origen disponible y produciría CEI completa con CSA parcial (inflado de inventario). Las `OK` (ya están en el inventario) y las `CANCELADO` tampoco descuentan. `disponible_snapshot` de cada CSA registra la disponibilidad viva del origen (descontando solo las asignaciones previas de la misma corrida), sin la reserva. Se calcula con las filas posteriores a la cancelación de días previos, en centavos enteros y con piso en 0. Sin esto, una CSA fallida de ayer más otra CSA de hoy sobre el mismo origen lo dejarían sobregirado (Siesa no valida stock en salidas).
 
 ### Corrida programada que cruza la medianoche de Bogotá
 
