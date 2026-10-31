@@ -94,9 +94,16 @@ function idFila(f) {
     return { fecha: f.fecha, co: f.co, bodega: f.bodega, item_destino: f.item_destino, tipo_dto: f.tipo_dto, item_origen: f.item_origen };
 }
 
+// TRANSF_NEG_ITEMS_EXCLUIDOS: comma separated integer item codes that ADD to the default exclusions.
+// A token that is not an integer item code is a configuration error (fail fast, never silently dropped).
 function parseLista(raw) {
     if (raw === undefined || raw === null || String(raw).trim() === '') return undefined;
-    return String(raw).split(',').map(s => Number(s.trim())).filter(Number.isFinite);
+    return String(raw).split(',').map(s => s.trim()).filter(s => s !== '').map(t => {
+        if (!/^\d+$/.test(t) || !Number.isSafeInteger(Number(t))) {
+            throw new Error(`TRANSF_NEG_ITEMS_EXCLUIDOS has an invalid item code "${t}": expected comma separated integers.`);
+        }
+        return Number(t);
+    });
 }
 
 function leerConfig(opciones) {
@@ -409,6 +416,17 @@ async function transformacionNegativos(opciones = {}, depsInyectadas = {}) {
         erroresSiesa: [], ambiguos: [], erroresGuardado: [], bloqueados: [], cancelados: [],
         anomalias: [], omitidos: [], errores: [], reintentosDiasPrevios: []
     };
+    // A scheduled run must always target today's Bogota date. If it lands on a past date (GitHub delayed the
+    // cron past Bogota midnight) it would silently degrade to resume-only and plan nothing: raise it as a failure.
+    const evento = opciones.evento !== undefined ? opciones.evento : process.env.GITHUB_EVENT_NAME;
+    if (modo === 'SOLO_REANUDAR' && evento === 'schedule') {
+        const hoy = ahoraBogota(ahora).fecha;
+        alertas.fechaDesfasada = {
+            fecha, hoy,
+            motivo: `Scheduled run targeted ${fecha} but today (Bogota) is ${hoy}: resume-only, nothing was planned. Re-run manually for ${hoy} after 21:30 COT.`
+        };
+        console.error(`   ${alertas.fechaDesfasada.motivo}`);
+    }
     const detalle = [];
     const ctx = { deps, dryRun, detalle, alertas };
 
@@ -586,7 +604,8 @@ async function transformacionNegativos(opciones = {}, depsInyectadas = {}) {
     const documentos = detalle.filter(d => d.resultado === 'OK').length;
     const fallos = detalle.filter(d => d.resultado === 'ERROR' || d.resultado === 'AMBIGUO').length
         + alertas.ambiguos.filter(a => a.previo).length + alertas.bloqueados.length
-        + alertas.anomalias.filter(a => a.tipoAnomalia === 'PLAN_INCOMPLETO').length;
+        + alertas.anomalias.filter(a => a.tipoAnomalia === 'PLAN_INCOMPLETO').length
+        + (alertas.fechaDesfasada ? 1 : 0);
     console.log('\n==========================================');
     console.log(`SUMMARY ${fecha}: destinations=${destinos} | sent OK=${documentos} | failures=${fallos} | skipped=${alertas.omitidos.length} | cancelled=${alertas.cancelados.length}`);
     console.log('==========================================\n');

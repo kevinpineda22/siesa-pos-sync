@@ -472,3 +472,96 @@ test('prior-day CEI PLANNED with attempts > 0 is an anomaly: not cancelled, not 
     assert.ok(r.alertas.anomalias.some(a => a.fecha === AYER && /attempts > 0/.test(a.motivo)));
     assert.strictEqual([...env.db.values()].find(f => f.tipo_dto === 'CEI').status, 'PLANNED');
 });
+
+// ── W1 (orchestrator side): the planner sees post-cancel rows ─────────────
+
+const INV_ORIGEN_UNICO = [
+    { IDCO: '001', IdBodega: '00201', CodigoItem: 15202, CantidadDisponible: -5, CostoPromUnitInst: 9000, UM: 'KL' },
+    { IDCO: '001', IdBodega: '00201', CodigoItem: 15101, CantidadDisponible: 0, CostoPromUnitInst: 5000, UM: 'KL' },
+    { IDCO: '001', IdBodega: '00201', CodigoItem: 15102, CantidadDisponible: 10, CostoPromUnitInst: 6000, UM: 'KL' }
+];
+const csaNuevaDe = (env, origen) => [...env.db.values()].find(f => f.fecha === HOY && f.tipo_dto === 'CSA' && f.item_origen === origen);
+
+test('W1 a retryable prior-day CSA (CEI OK) reserves its origin stock for the new plan', async () => {
+    const env = crearEntorno({
+        guardadas: [
+            filaGuardada(AYER, 'CEI', 0, 'OK', { intentos: 1 }),
+            filaGuardada(AYER, 'CSA', 15102, 'ERROR', { intentos: 1, cantidad: 8 })
+        ],
+        inventario: INV_ORIGEN_UNICO
+    });
+    const r = await correr({ fecha: HOY }, env.deps);
+    assert.strictEqual(csaNuevaDe(env, 15102).cantidad, 2);
+    assert.ok(r.alertas.omitidos.some(o => o.motivo === 'SIN_STOCK' && o.cantidad === 3));
+});
+
+test('W1 prior-day rows cancelled at run start no longer reserve stock (cancel happens before planning)', async () => {
+    const env = crearEntorno({
+        guardadas: [
+            filaGuardada(AYER, 'CEI', 0, 'PLANNED'),
+            filaGuardada(AYER, 'CSA', 15102, 'PLANNED', { cantidad: 8 })
+        ],
+        inventario: INV_ORIGEN_UNICO
+    });
+    const r = await correr({ fecha: HOY }, env.deps);
+    assert.strictEqual(r.alertas.cancelados.length, 2);
+    assert.strictEqual(csaNuevaDe(env, 15102).cantidad, 5);
+});
+
+// ── W3: a scheduled run that lands on a past Bogota date must not pass silently ──
+
+test('W3 scheduled run on a past fecha raises an alert and counts as failed; resume-only safety is kept', async () => {
+    const env = crearEntorno();
+    const r = await correr({ fecha: AYER, evento: 'schedule' }, env.deps);
+
+    assert.strictEqual(r.modo, 'SOLO_REANUDAR');
+    assert.ok(r.fallos >= 1);
+    assert.ok(r.alertas.fechaDesfasada);
+    assert.strictEqual(r.alertas.fechaDesfasada.fecha, AYER);
+    assert.strictEqual(r.alertas.fechaDesfasada.hoy, HOY);
+    assert.ok(!env.eventos.some(e => e.startsWith('INV:') || e.startsWith('LOTE')));
+    assert.strictEqual(env.posts.length, 0);
+    assert.strictEqual(env.notificaciones.length, 1);
+    assert.strictEqual(env.corridas[0].resultado, 'CON_FALLO');
+});
+
+test('W3 manual dispatch on a past fecha stays a legitimate resume-only run (no alert)', async () => {
+    const env = crearEntorno();
+    const r = await correr({ fecha: AYER, evento: 'workflow_dispatch' }, env.deps);
+    assert.strictEqual(r.fallos, 0);
+    assert.strictEqual(r.alertas.fechaDesfasada, undefined);
+});
+
+test('W3 scheduled run on today plans normally with no date alert', async () => {
+    const env = crearEntorno();
+    const r = await correr({ fecha: HOY, evento: 'schedule' }, env.deps);
+    assert.strictEqual(r.modo, 'PLANIFICAR');
+    assert.strictEqual(r.fallos, 0);
+    assert.strictEqual(r.alertas.fechaDesfasada, undefined);
+});
+
+// ── S1: TRANSF_NEG_ITEMS_EXCLUIDOS adds to the defaults and is validated ──
+
+async function conEnv(valor, fn) {
+    const previo = process.env.TRANSF_NEG_ITEMS_EXCLUIDOS;
+    process.env.TRANSF_NEG_ITEMS_EXCLUIDOS = valor;
+    try { return await fn(); } finally {
+        if (previo === undefined) delete process.env.TRANSF_NEG_ITEMS_EXCLUIDOS; else process.env.TRANSF_NEG_ITEMS_EXCLUIDOS = previo;
+    }
+}
+
+test('S1 env exclusions add to the defaults: the configured item and 15207 are both excluded', async () => {
+    const inventario = [...INVENTARIO_RAW, { IDCO: '001', IdBodega: '00201', CodigoItem: 15207, CantidadDisponible: -2, CostoPromUnitInst: 9000, UM: 'KL' }];
+    const reglas = { ...REGLAS, equivalencias: [...REGLAS.equivalencias, { item_origen: 15101, item_destino: 15207, activo: true }] };
+    const env = crearEntorno({ inventario });
+    env.deps.cargarReglas = async () => JSON.parse(JSON.stringify(reglas));
+    const r = await conEnv('15202', () => correr({ fecha: HOY }, env.deps));
+    assert.strictEqual(r.destinos, 0);
+    assert.strictEqual(env.posts.length, 0);
+});
+
+test('S1 an invalid token in the env list fails fast before any read or write', async () => {
+    const env = crearEntorno();
+    await assert.rejects(conEnv('15202,abc', () => correr({ fecha: HOY }, env.deps)), /TRANSF_NEG_ITEMS_EXCLUIDOS.*abc/);
+    assert.deepStrictEqual(env.eventos, []);
+});
