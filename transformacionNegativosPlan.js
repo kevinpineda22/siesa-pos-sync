@@ -83,10 +83,12 @@ function construirExcluidos(extra) {
     return set;
 }
 
-// Statuses of a CSA from an earlier run that may still be sent (PLANNED, ERROR) or may already have landed in
-// Siesa without being reflected in the inventory read (SENDING, AMBIGUO). OK is already in the inventory and
-// CANCELADO will never be sent.
-const ESTADOS_CSA_RESERVAN_ORIGEN = new Set(['PLANNED', 'SENDING', 'ERROR', 'AMBIGUO']);
+// Only CSAs from earlier runs that WILL be resent automatically reserve origin stock (PLANNED, ERROR).
+// AMBIGUO is never resent automatically (and SENDING becomes AMBIGUO on resume): if it landed in Siesa, the live
+// inventory already reflects it, so reserving it would double-count and shrink origin availability (full CEI plus
+// partial CSA, i.e. inventory inflation); if it did not land, nothing will resend it. OK is already in the
+// inventory and CANCELADO will never be sent.
+const ESTADOS_CSA_RESERVAN_ORIGEN = new Set(['PLANNED', 'ERROR']);
 
 const comparadorNumerico = new Intl.Collator('en', { numeric: true });
 
@@ -181,7 +183,7 @@ function planificarTransformaciones({
             });
             continue;
         }
-        ledger.set(k, { dispCents: f.disp > 0 ? truncarCentavos(f.disp) : 0, costo: f.costo, um: f.um });
+        ledger.set(k, { dispCents: f.disp > 0 ? truncarCentavos(f.disp) : 0, reservadoCents: 0, costo: f.costo, um: f.um });
         if (f.disp < 0) negativos.push(f);
     }
 
@@ -197,7 +199,12 @@ function planificarTransformaciones({
         if (p.tipo_dto === 'CSA' && ESTADOS_CSA_RESERVAN_ORIGEN.has(p.status)) {
             const reservado = ledger.get(clave(p.co, p.bodega, p.item_origen));
             const cents = Number.isFinite(Number(p.cantidad)) ? aCentavos(p.cantidad) : 0;
-            if (reservado && cents > 0) reservado.dispCents = Math.max(0, reservado.dispCents - cents);
+            if (reservado && cents > 0) {
+                const antes = reservado.dispCents;
+                reservado.dispCents = Math.max(0, antes - cents);
+                // Tracked so the audit snapshot can stay pre-reservation.
+                reservado.reservadoCents += antes - reservado.dispCents;
+            }
         }
         const k = clave(p.co, p.bodega, p.item_destino);
         if (norm(p.fecha) === fecha) yaPlanificados.add(k);
@@ -308,7 +315,7 @@ function planificarTransformaciones({
                 entorno, fecha, ...base,
                 tipo_dto: DOC_SALIDA.tipoDto, item_origen: a.origen,
                 cantidad, costo_unitario: costo, um: a.entrada.um,
-                disponible_snapshot: a.entrada.dispCents / 100 + cantidad,
+                disponible_snapshot: (a.entrada.dispCents + a.entrada.reservadoCents) / 100 + cantidad,
                 payload: construirPayloadNegativo({
                     def: DOC_SALIDA, fecha, co: dest.co, bodega: dest.bodega, item: a.origen, um: a.entrada.um,
                     cantidad, costo, unidadNegocio,

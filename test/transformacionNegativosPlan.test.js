@@ -344,13 +344,37 @@ test('W1 a pending ERROR CSA from a previous day reduces origin availability; th
     assert.deepStrictEqual(csas(plan, 9).map(d => [d.item_origen, d.cantidad]), [[1, 4], [2, 4]]);
 });
 
-test('W1 AMBIGUO, PLANNED and SENDING CSAs reserve origin stock', () => {
+test('W1 PLANNED and ERROR CSAs (auto-resendable) reserve origin stock', () => {
     const r = reglas([[1, 9]], [1]);
-    for (const status of ['AMBIGUO', 'PLANNED', 'SENDING']) {
+    for (const status of ['PLANNED', 'ERROR']) {
         const plan = planificar([inv(9, -8), inv(1, 10)], r, { previos: [csaPrevio(status, 6)] });
         assert.strictEqual(csas(plan, 9)[0].cantidad, 4, status);
         assert.ok(plan.omitidos.some(o => o.motivo === 'SIN_STOCK' && o.cantidad === 4), status);
     }
+});
+
+test('W1 AMBIGUO and SENDING CSAs do NOT reserve origin stock (never resent automatically; live inventory already reflects them)', () => {
+    const r = reglas([[1, 9]], [1]);
+    for (const status of ['AMBIGUO', 'SENDING']) {
+        const plan = planificar([inv(9, -8), inv(1, 10)], r, { previos: [csaPrevio(status, 6)] });
+        assert.strictEqual(csas(plan, 9)[0].cantidad, 8, status);
+        assert.strictEqual(plan.omitidos.filter(o => o.motivo === 'SIN_STOCK').length, 0, status);
+    }
+});
+
+test('W1 disponible_snapshot records live availability, not the availability net of reservations', () => {
+    const r = reglas([[1, 9]], [1]);
+    const plan = planificar([inv(9, -3), inv(1, 10)], r, { previos: [csaPrevio('ERROR', 6)] });
+    assert.strictEqual(csas(plan, 9)[0].cantidad, 3);
+    assert.strictEqual(csas(plan, 9)[0].disponible_snapshot, 10);
+});
+
+test('W1 disponible_snapshot still reflects earlier allocations of the same run', () => {
+    const r = reglas([[1, 9], [1, 8]], [1]);
+    const plan = planificar([inv(9, -3), inv(8, -2), inv(1, 10)], r, { previos: [csaPrevio('ERROR', 1, { item_destino: 7 })] });
+    // Destination 8 (needs 2) is allocated before 9: its snapshot is the live 10, then 9 sees 10 - 2 = 8.
+    const snaps = [...csas(plan, 8), ...csas(plan, 9)].map(d => d.disponible_snapshot);
+    assert.deepStrictEqual(snaps, [10, 8]);
 });
 
 test('W1 OK and CANCELADO CSAs do not reserve origin stock', () => {
