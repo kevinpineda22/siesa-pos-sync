@@ -577,6 +577,7 @@ function buildTransformacionNegativosEmail(resultado) {
     const ref = (f) => `${escapeHtml(f.fecha)} CO ${escapeHtml(f.co)} ${escapeHtml(f.bodega)} item ${escapeHtml(f.item_destino)} ${escapeHtml(f.tipo_dto || '')}${f.item_origen ? ` origen ${escapeHtml(f.item_origen)}` : ''}`;
     const items = [];
 
+    if (a.fechaDesfasada) items.push(`<li><strong>FECHA DESFASADA</strong>: la corrida programada apuntó a ${escapeHtml(a.fechaDesfasada.fecha)} pero hoy (Bogotá) es ${escapeHtml(a.fechaDesfasada.hoy)}; solo se reanudó, no se planificó nada. Ejecutar manualmente para ${escapeHtml(a.fechaDesfasada.hoy)} después de las 21:30 COT.</li>`);
     (a.ambiguos || []).forEach(f => items.push(`<li><strong>AMBIGUO${f.previo ? ' (SENDING -> AMBIGUO al inicio)' : ''}</strong> ${ref(f)}: ${f.tipo_dto === 'CEI' ? 'CEI possibly sent, CSAs blocked, manual review. ' : 'CSA possibly sent, manual review. '}${escapeHtml(String(f.error || '').slice(0, 300))}</li>`));
     (a.bloqueados || []).forEach(f => items.push(`<li><strong>CSA bloqueada</strong> ${ref(f)} cantidad ${escapeHtml(f.cantidad)}: ${escapeHtml(f.motivo)}</li>`));
     (a.erroresSiesa || []).forEach(f => items.push(`<li><strong>Siesa rechazó</strong> ${ref(f)}: ${escapeHtml(String(f.error).slice(0, 400))}</li>`));

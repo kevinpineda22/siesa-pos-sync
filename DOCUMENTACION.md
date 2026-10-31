@@ -1754,7 +1754,7 @@ Cuando un ítem destino de carnes queda con **inventario negativo** en una bodeg
 |----------|---------|-------------|
 | `TRANSF_NEG_QUERY_INVENTARIO` | `merkahorro_items_inventario_costo_dev_transformaciones` | Query Connekta de inventario. Vacía = falla rápida |
 | `TRANSF_NEG_COLUMNAS` | (código) | JSON para sobreescribir nombres de columnas |
-| `TRANSF_NEG_ITEMS_EXCLUIDOS` | `15207` | Ítems que nunca se tratan como destino (lista separada por coma) |
+| `TRANSF_NEG_ITEMS_EXCLUIDOS` | `15207` | Ítems adicionales que nunca se tratan como destino (enteros separados por coma). **Se suman** al default: `15207` siempre queda excluido. Un token que no sea entero falla rápido con error de configuración |
 | `TRANSF_NEG_DIAS_REANUDAR` | `7` | Ventana (días) para reanudar documentos pendientes |
 | `TRANSF_NEG_UNIDAD_NEGOCIO` | `003` | Unidad de negocio |
 | `NOTIFY_TRANSF_NEG_EMAILS` | `NOTIFY_TRANSF_EMAILS`, luego `NOTIFY_EMAILS` | Destinatarios (los definitivos aún no están confirmados por negocio) |
@@ -1789,6 +1789,14 @@ La consulta de inventario de Connekta **no tiene `ORDER BY`**, por lo que la pag
 - Si la cantidad ya quedó cubierta por orígenes anteriores, los orígenes faltantes posteriores no importan y el plan sigue normal.
 - Una fila **presente** con stock 0 o negativo sí es información: se pasa al siguiente origen y, si ningún origen tiene stock, se envía solo la CEI. Los orígenes saltados por UM distinta mantienen su comportamiento.
 - **Recomendación:** agregar `ORDER BY IdBodega, CodigoItem` a la query de Connekta; con un orden estable, la ausencia de fila podría volver a tratarse como cero. Si el mismo par destino/origen se reporta de forma recurrente, la fila realmente no existe (cero real) y conviene revisar esa equivalencia.
+
+### Reserva de stock por CSA pendientes de corridas previas
+
+El ledger de orígenes parte del inventario vivo y **descuenta** la cantidad de toda CSA de corridas anteriores en estado `PLANNED`, `SENDING`, `ERROR` o `AMBIGUO` (puede enviarse todavía o puede haber llegado a Siesa sin reflejarse en el inventario leído). Las `OK` (ya están en el inventario) y las `CANCELADO` no descuentan. Se calcula con las filas posteriores a la cancelación de días previos, en centavos enteros y con piso en 0. Sin esto, una CSA fallida de ayer más otra CSA de hoy sobre el mismo origen lo dejarían sobregirado (Siesa no valida stock en salidas).
+
+### Corrida programada que cruza la medianoche de Bogotá
+
+Si la corrida disparada por `schedule` (`GITHUB_EVENT_NAME=schedule`) cae en una fecha ya pasada, el modo pasa a `SOLO_REANUDAR` y no se planifica nada. Ahora eso se reporta como alerta `FECHA DESFASADA` en el correo y cuenta como fallo (el job queda en **rojo**, `CON_FALLO`). La seguridad de solo-reanudar no cambia: no planifica ni envía documentos nuevos. El dispatch manual con fecha pasada sigue siendo legítimo y no alerta.
 
 ### Notificación
 

@@ -99,3 +99,14 @@ test('send: no recipients -> no send; transport failure does not throw', async (
         Object.assign(process.env, guardado);
     }
 });
+
+test('builder: W3 scheduled run on a past date is shown as a prominent alert', () => {
+    const m = notifier.buildTransformacionNegativosEmail(conAlertas({
+        fechaDesfasada: { fecha: '2026-10-28', hoy: '2026-10-29', motivo: 'Scheduled run targeted 2026-10-28 but today (Bogota) is 2026-10-29' }
+    }));
+    assert.match(m.html, /FECHA DESFASADA/);
+    assert.match(m.html, /2026-10-28/);
+    assert.match(m.html, /2026-10-29/);
+    assert.ok(m.nAlertas >= 1);
+    assert.match(m.subject, /ALERTA/);
+});
