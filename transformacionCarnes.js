@@ -22,6 +22,7 @@
 // ============================================================================
 const axios = require('axios');
 const notifier = require('./notifier');
+const { trazaCorrida, insertarTolerante } = require('./corridaTraza');
 require('dotenv').config();
 
 const CIA = process.env.CIA || '7375';
@@ -430,8 +431,11 @@ const TIMEOUT_REGISTRO_CORRIDA_MS = 10000;
 const INTENTOS_REGISTRO_CORRIDA = 2;
 
 async function insertarCorrida(fila) {
-    const { error } = await getSupabase().from(TABLA_CORRIDAS).insert(fila);
-    if (error) throw new Error(error.message);
+    // Tolerant to migration 009 not being applied yet (retries once without the trace columns).
+    await insertarTolerante(async (f) => {
+        const { error } = await getSupabase().from(TABLA_CORRIDAS).insert(f);
+        if (error) throw Object.assign(new Error(error.message), { code: error.code });
+    }, fila);
 }
 
 // Inserta la fila de la corrida. Best-effort: NUNCA lanza; ante cualquier error avisa y devuelve false.
@@ -721,7 +725,7 @@ async function transformacionCarnes(opciones = {}) {
                 diasDisponibles: [...new Set(unicas.map(f => soloFecha(f.FECHA_DOCTO)).filter(Boolean))].sort(),
                 origen: process.env.GITHUB_EVENT_NAME || 'local'
             };
-            await registrarCorrida(resumirCorrida(resultado, meta));
+            await registrarCorrida({ ...resumirCorrida(resultado, meta), ...trazaCorrida('tocino', resultado.alertas) });
         } catch (e) {
             console.warn(`⚠️ No se pudo armar el registro de la corrida: ${e.message}`);
         }

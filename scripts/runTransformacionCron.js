@@ -21,6 +21,7 @@
  */
 require('dotenv').config();
 const { transformacionCarnes, registrarCorrida, fechaBogota, ENTORNO } = require('../transformacionCarnes');
+const { trazaGithub } = require('../corridaTraza');
 
 // Registra una corrida ERROR_FATAL (best-effort): nunca lanza ni enmascara el error original.
 async function registrarErrorFatal(e) {
@@ -37,7 +38,8 @@ async function registrarErrorFatal(e) {
             entorno: ENTORNO,
             resultado: 'ERROR_FATAL',
             mensaje: String((e && e.message) || e).slice(0, 500),
-            origen: process.env.GITHUB_EVENT_NAME || 'local'
+            origen: process.env.GITHUB_EVENT_NAME || 'local',
+            ...trazaGithub(process.env)
         });
     } catch (err) {
         console.warn(`⚠️ No se pudo registrar el error fatal: ${err.message}`);

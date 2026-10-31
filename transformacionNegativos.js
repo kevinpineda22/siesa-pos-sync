@@ -14,6 +14,7 @@
 // ============================================================================
 const axios = require('axios');
 const notifier = require('./notifier');
+const { trazaCorrida, insertarTolerante } = require('./corridaTraza');
 const {
     fechaBogota, ahoraBogota, validarFechaObjetivo, clasificarErrorSiesa,
     guardarConReintento, registrarCorrida, ENTORNO
@@ -230,8 +231,11 @@ async function guardarLoteDefault(filas) {
 }
 
 async function insertarCorridaDefault(fila) {
-    const { error } = await getSupabase().from(TABLA_CORRIDAS).insert(fila);
-    if (error) throw new Error(error.message);
+    // Tolerant to migration 009 not being applied yet (retries once without the trace columns).
+    await insertarTolerante(async (f) => {
+        const { error } = await getSupabase().from(TABLA_CORRIDAS).insert(f);
+        if (error) throw Object.assign(new Error(error.message), { code: error.code });
+    }, fila);
 }
 
 async function fetchPagina(baseUrl, pagina) {
@@ -624,11 +628,14 @@ async function transformacionNegativos(opciones = {}, depsInyectadas = {}) {
             console.error(`Notification error: ${e.message}`);
         }
         try {
-            await registrarCorridaNegativos(resumirCorridaNegativos(resultado, {
-                filasInventario: inventarioStats ? inventarioStats.filas : null,
-                paginasInventario: inventarioStats ? inventarioStats.paginas : null,
-                origen: process.env.GITHUB_EVENT_NAME || 'local'
-            }), deps);
+            await registrarCorridaNegativos({
+                ...resumirCorridaNegativos(resultado, {
+                    filasInventario: inventarioStats ? inventarioStats.filas : null,
+                    paginasInventario: inventarioStats ? inventarioStats.paginas : null,
+                    origen: process.env.GITHUB_EVENT_NAME || 'local'
+                }),
+                ...trazaCorrida('negativos', resultado)
+            }, deps);
         } catch (e) {
             console.warn(`Could not build the run record: ${e.message}`);
         }
