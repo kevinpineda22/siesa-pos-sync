@@ -495,6 +495,19 @@ test('W1 a retryable prior-day CSA (CEI OK) reserves its origin stock for the ne
     assert.ok(r.alertas.omitidos.some(o => o.motivo === 'SIN_STOCK' && o.cantidad === 3));
 });
 
+test('W1 a prior-day AMBIGUO CSA does not reserve origin stock (never resent; live inventory already reflects it)', async () => {
+    const env = crearEntorno({
+        guardadas: [
+            filaGuardada(AYER, 'CEI', 0, 'OK', { intentos: 1 }),
+            filaGuardada(AYER, 'CSA', 15102, 'AMBIGUO', { intentos: 1, cantidad: 8 })
+        ],
+        inventario: INV_ORIGEN_UNICO
+    });
+    const r = await correr({ fecha: HOY }, env.deps);
+    assert.strictEqual(csaNuevaDe(env, 15102).cantidad, 5);
+    assert.strictEqual(r.alertas.omitidos.filter(o => o.motivo === 'SIN_STOCK').length, 0);
+});
+
 test('W1 prior-day rows cancelled at run start no longer reserve stock (cancel happens before planning)', async () => {
     const env = crearEntorno({
         guardadas: [
