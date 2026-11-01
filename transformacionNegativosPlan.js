@@ -328,7 +328,17 @@ function planificarTransformaciones({
     return { documentos, omitidos, errores };
 }
 
+// Same-day override for a manual early-close run (stores closing before 21:30 COT).
+// `opcion` (tests) wins over the env value; a scheduled run NEVER honours the flag, so the nightly cron
+// keeps the 21:30 COT guard even if the env var leaks into it.
+function resolverPermitirDiaEnCurso({ opcion, env, evento } = {}) {
+    if (evento === 'schedule') return false;
+    if (opcion !== undefined) return opcion === true;
+    return ['1', 'true'].includes(String(env || '').toLowerCase());
+}
+
 module.exports = {
+    resolverPermitirDiaEnCurso,
     aCentavos,
     truncarCentavos,
     planificarTransformaciones,

@@ -28,6 +28,12 @@ on:
         type: choice
         options: ['QA', 'PROD']
         default: 'QA'
+      solo_negativos:
+        description: 'Corre SOLO el job de negativos (sin tocino) y permite procesar el dia en curso antes de las 21:30 COT. Usar solo con cierre anticipado de tiendas.'
+        required: false
+        type: choice
+        options: ['false', 'true']
+        default: 'false'
 
 # Evita que dos corridas se solapen (no cancela la que esta en curso).
 concurrency:
@@ -36,6 +42,8 @@ concurrency:
 
 jobs:
   transformacion-carnes:
+    # En un dispatch manual con solo_negativos=true se omite el tocino. El cron (schedule) siempre lo corre.
+    if: github.event_name == 'schedule' || github.event.inputs.solo_negativos != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -97,12 +105,14 @@ jobs:
           NOTIFY_EMAILS: ${{ secrets.NOTIFY_EMAILS }}
 
   # Segundo job: limpia el inventario negativo de destinos (CEI + CSA por origen).
-  # Corre DESPUES del job de tocino (needs): si tocino falla este job se omite.
+  # Corre DESPUES del job de tocino (needs): si tocino falla o se omite este job se omite tambien,
+  # salvo en un dispatch manual con solo_negativos=true (tocino omitido a proposito).
   transformacion-negativos:
     needs: transformacion-carnes
     # Pausado: solo corre si la variable del repo TRANSF_NEG_HABILITADO vale 'true'
     # (Settings > Secrets and variables > Actions > Variables). Sin ella el job se omite.
-    if: vars.TRANSF_NEG_HABILITADO == 'true'
+    # !cancelled() evita el auto-skip por dependencia omitida; el resultado de tocino se valida a mano.
+    if: ${{ !cancelled() && vars.TRANSF_NEG_HABILITADO == 'true' && (needs.transformacion-carnes.result == 'success' || (needs.transformacion-carnes.result == 'skipped' && github.event_name == 'workflow_dispatch' && github.event.inputs.solo_negativos == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Grupo propio: nunca cancela una corrida en curso (puede haber documentos en vuelo hacia Siesa).
@@ -156,6 +166,8 @@ jobs:
           TRANSF_NEG_ITEMS_EXCLUIDOS: ${{ vars.TRANSF_NEG_ITEMS_EXCLUIDOS || '' }}
           TRANSF_NEG_DIAS_REANUDAR: ${{ vars.TRANSF_NEG_DIAS_REANUDAR || '' }}
           TRANSF_NEG_UNIDAD_NEGOCIO: ${{ vars.TRANSF_NEG_UNIDAD_NEGOCIO || '' }}
+          # Solo true en dispatch manual con solo_negativos=true: omite la guardia de las 21:30 COT (cierre anticipado).
+          TRANSF_NEG_PERMITIR_DIA_EN_CURSO: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.solo_negativos == 'true' && 'true' || 'false' }}
           # --- Notificaciones por correo (GitHub Secrets) ---
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}

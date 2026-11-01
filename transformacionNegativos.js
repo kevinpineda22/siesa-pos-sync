@@ -19,7 +19,7 @@ const {
     fechaBogota, ahoraBogota, validarFechaObjetivo, clasificarErrorSiesa,
     guardarConReintento, registrarCorrida, ENTORNO
 } = require('./transformacionCarnes');
-const { planificarTransformaciones, UNIDAD_NEGOCIO_POR_DEFECTO } = require('./transformacionNegativosPlan');
+const { planificarTransformaciones, UNIDAD_NEGOCIO_POR_DEFECTO, resolverPermitirDiaEnCurso } = require('./transformacionNegativosPlan');
 
 const CIA = process.env.CIA || '7375';
 const SIESA_DOMAIN = ENTORNO === 'QA' ? 'serviciosqa.siesacloud.com' : 'servicios.siesacloud.com';
@@ -403,8 +403,15 @@ async function transformacionNegativos(opciones = {}, depsInyectadas = {}) {
         ? opciones.dryRun === true
         : ['1', 'true'].includes((process.env.TRANSF_DRY_RUN || '').toLowerCase());
 
-    // 1) Date guard first: a rejection happens before any query or write.
-    validarFechaObjetivo(fecha, dryRun, ahora);
+    // Manual early-close override (negativos-only dispatch): skips ONLY the "today before 21:30 COT" guard.
+    // It is NOT a dry run (dryRun stays the real value) and never applies to scheduled runs.
+    const evento = opciones.evento !== undefined ? opciones.evento : process.env.GITHUB_EVENT_NAME;
+    const permitirDiaEnCurso = resolverPermitirDiaEnCurso({
+        opcion: opciones.permitirDiaEnCurso, env: process.env.TRANSF_NEG_PERMITIR_DIA_EN_CURSO, evento
+    });
+
+    // 1) Date guard first: a rejection happens before any query or write. Future dates are always rejected.
+    validarFechaObjetivo(fecha, dryRun || permitirDiaEnCurso, ahora);
     const modo = fecha === ahoraBogota(ahora).fecha ? 'PLANIFICAR' : 'SOLO_REANUDAR';
     const config = leerConfig(opciones);
     if (modo === 'PLANIFICAR' && !config.queryInventario) {
@@ -415,6 +422,7 @@ async function transformacionNegativos(opciones = {}, depsInyectadas = {}) {
     console.log('NEGATIVE INVENTORY TRANSFORMATION');
     console.log(`   Date=${fecha} | Entorno=${ENTORNO} | Mode=${modo} | DryRun=${dryRun ? 'YES' : 'no'}`);
     console.log('==========================================');
+    if (permitirDiaEnCurso) console.log('   Same-day override active (manual early-close run): 21:30 COT guard skipped.');
 
     const alertas = {
         erroresSiesa: [], ambiguos: [], erroresGuardado: [], bloqueados: [], cancelados: [],
@@ -422,7 +430,6 @@ async function transformacionNegativos(opciones = {}, depsInyectadas = {}) {
     };
     // A scheduled run must always target today's Bogota date. If it lands on a past date (GitHub delayed the
     // cron past Bogota midnight) it would silently degrade to resume-only and plan nothing: raise it as a failure.
-    const evento = opciones.evento !== undefined ? opciones.evento : process.env.GITHUB_EVENT_NAME;
     if (modo === 'SOLO_REANUDAR' && evento === 'schedule') {
         const hoy = ahoraBogota(ahora).fecha;
         alertas.fechaDesfasada = {

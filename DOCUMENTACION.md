@@ -1757,6 +1757,7 @@ Cuando un ítem destino de carnes queda con **inventario negativo** en una bodeg
 | `TRANSF_NEG_ITEMS_EXCLUIDOS` | `15207` | Ítems adicionales que nunca se tratan como destino (enteros separados por coma). **Se suman** al default: `15207` siempre queda excluido. Un token que no sea entero falla rápido con error de configuración |
 | `TRANSF_NEG_DIAS_REANUDAR` | `7` | Ventana (días) para reanudar documentos pendientes |
 | `TRANSF_NEG_UNIDAD_NEGOCIO` | `003` | Unidad de negocio |
+| `TRANSF_NEG_PERMITIR_DIA_EN_CURSO` | `false` | Omite la guardia de las 21:30 COT para el día en curso. Lo setea el workflow solo en `workflow_dispatch` con `solo_negativos=true` (cierre anticipado de tiendas); se ignora en `schedule` y las fechas futuras siguen rechazadas |
 | `NOTIFY_TRANSF_NEG_EMAILS` | `NOTIFY_TRANSF_EMAILS`, luego `NOTIFY_EMAILS` | Destinatarios (los definitivos aún no están confirmados por negocio) |
 
 Comparte `TRANSF_ID_DOCUMENTO`, `TRANSF_NOMBRE_DOCUMENTO`, `TRANSF_FECHA`, `TRANSF_DRY_RUN`, `ENTORNO_SIESA_TRANSF`, `CONNI_*`, `CIA`, `SUPABASE_*` y `SMTP_*` con el flujo de tocino.

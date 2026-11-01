@@ -16,6 +16,8 @@
  *   - TRANSF_NEG_ITEMS_EXCLUIDOS    comma separated items never treated as destinations (default 15207).
  *   - TRANSF_NEG_DIAS_REANUDAR      lookback window in days for resume (default 7).
  *   - TRANSF_NEG_UNIDAD_NEGOCIO     business unit (default 003).
+ *   - TRANSF_NEG_PERMITIR_DIA_EN_CURSO  'true' skips the 21:30 COT same-day guard (manual early-close run only;
+ *                                   ignored when GITHUB_EVENT_NAME is 'schedule'; future dates are still rejected).
  *   - TRANSF_ID_DOCUMENTO, TRANSF_NOMBRE_DOCUMENTO  connector (shared with the tocino job).
  *   - NOTIFY_TRANSF_EMAILS          (or NOTIFY_EMAILS) comma separated list.
  *
