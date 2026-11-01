@@ -1,13 +1,18 @@
-name: Sync POS -> Siesa (cada 1h)
+name: Sync POS -> Siesa (diario, tras transformaciones)
 
-# Ejecuta el flujo CNZ->CFZ de las facturas de HOY (zona America/Bogota) para el CO/Caja
-# configurados. Corre DENTRO del runner de GitHub Actions (node directo), no vía Vercel,
-# para no chocar con el límite de ejecución serverless.
+# Ejecuta el flujo CNZ->CFZ para el CO/Caja configurados. Corre DENTRO del runner de GitHub
+# Actions (node directo), no vía Vercel, para no chocar con el límite de ejecución serverless.
+#
+# Corre UNA vez por noche, apenas termina el workflow de transformaciones (10pm COT).
+# Solo se encadena si esas transformaciones vinieron del cron y terminaron en success:
+#  - una corrida manual de transformaciones (pruebas en QA) NO dispara este sync de PROD.
+#  - si las transformaciones fallan, esa noche no corre el sync.
 
 on:
-  schedule:
-    # Cada 1 hora. OJO: el cron de GitHub es en UTC y puede retrasarse minutos bajo carga.
-    - cron: '0 * * * *'
+  workflow_run:
+    # Debe coincidir EXACTO con el `name:` de transformacion-carnes.yml.
+    workflows: ['Transformaciones carnes (diario 10pm)']
+    types: [completed]
   workflow_dispatch:
     inputs:
       co:
@@ -36,8 +41,13 @@ concurrency:
 
 jobs:
   sync:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'schedule' &&
+       github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Una sola corrida procesa todo el día (antes eran corridas incrementales cada hora).
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,9 +80,12 @@ jobs:
           # --- Filtros CO/Caja: input manual del dispatch tiene prioridad; si no, default ---
           CO_FILTER: ${{ github.event.inputs.co || '001,011,003,007' }}
           CAJA_FILTER: ${{ github.event.inputs.caja || 'Z01,Z02' }}
-          # --- Modo prueba (solo aplica en "Run workflow"; el cron los deja vacíos = producción) ---
+          # --- Modo prueba (solo aplica en "Run workflow"; la corrida automática los deja vacíos = producción) ---
           CRON_LIMITE: ${{ github.event.inputs.limite || '' }}
-          CRON_SOLO_HOY: ${{ github.event.inputs.solo_hoy || 'true' }}
+          # La corrida automática NO filtra por "hoy": si GitHub la retrasa pasada la medianoche,
+          # "hoy" ya sería el día siguiente y se saltaría todo el día. Procesa la ventana de
+          # Connekta (~2 días); la idempotencia omite las OK y así se reintentan los FALLO de ayer.
+          CRON_SOLO_HOY: ${{ github.event_name == 'workflow_run' && 'false' || github.event.inputs.solo_hoy || 'true' }}
           # --- Notificaciones por correo (GitHub Secrets) ---
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}

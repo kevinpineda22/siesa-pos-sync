@@ -1,7 +1,7 @@
 /**
  * runSyncCron.js
  *
- * Punto de entrada del job automático (GitHub Actions, cada 1 hora).
+ * Punto de entrada del job automático (GitHub Actions, diario tras las transformaciones).
  * Ejecuta el flujo completo CNZ→CFZ para las facturas de HOY del CO/Caja configurados,
  * procesando TODAS las nuevas y omitiendo las ya procesadas (idempotencia en Supabase).
  *
@@ -49,7 +49,7 @@ const CAT_NO_CRITICAS = new Set([
     else opciones.todas = true;             // producción: todas las nuevas del día
 
     console.log('==================================================');
-    console.log(limite ? '🧪 JOB DE PRUEBA POS → Siesa' : '🤖 JOB AUTOMÁTICO POS → Siesa (cada 1h)');
+    console.log(limite ? '🧪 JOB DE PRUEBA POS → Siesa' : '🤖 JOB AUTOMÁTICO POS → Siesa (diario)');
     console.log(`   CO=${co || '(default .env)'} | Caja=${caja || '(default .env)'} | soloHoy=${soloHoy} | ${limite ? `limite=${limite}` : 'todas=true'}`);
     console.log(`   Entorno=${process.env.ENTORNO_SIESA || 'QA'}`);
     console.log('==================================================');
