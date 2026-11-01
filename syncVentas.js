@@ -230,7 +230,10 @@ async function getCostoCached() {
 }
 
 async function ajustarInventario(errores, itemsFactura, consecDocto) {
-    const fecha = new Date().toISOString().split('T')[0].replace(/-/g, '');
+    // El CPE va con la fecha de la factura que lo necesita: el sync corre de noche (10pm COT =
+    // día siguiente en UTC) y con la fecha de la corrida el ajuste quedaba un día después.
+    const fecha = formatDate(itemsFactura[0]?.FECHA_DOCTO)
+        || new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' }).replace(/-/g, '');
     // El CPE va en el mismo CO que la factura que lo necesita (ver coDocumento).
     const coDocCPE = coDocumento(itemsFactura[0]?.CoDoc, itemsFactura[0]?.FECHA_DOCTO);
     const baseConsec = parseInt(consecDocto) || 99999;
@@ -1527,7 +1530,10 @@ function groupDocsByCo(docs) {
 }
 
 async function guardarEstadisticasDiarias(totalSync) {
-    const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    // Día de Bogotá de hace 4 horas (misma regla que transformacion-carnes.yml): el sync corre
+    // tras las transformaciones de las 10pm y GitHub puede retrasarlo pasada la medianoche;
+    // con la fecha actual ese día quedaba sin estadísticas.
+    const hoy = new Date(Date.now() - 4 * 60 * 60 * 1000).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
     const datos = await fetchFromConnekta(URL_VENTAS_STATS);
     const delDia = (Array.isArray(datos) ? datos : []).filter(d =>
         (d.FECHA_DOCTO || '').split('T')[0] === hoy
