@@ -231,6 +231,8 @@ async function getCostoCached() {
 
 async function ajustarInventario(errores, itemsFactura, consecDocto) {
     const fecha = new Date().toISOString().split('T')[0].replace(/-/g, '');
+    // El CPE va en el mismo CO que la factura que lo necesita (ver coDocumento).
+    const coDocCPE = coDocumento(itemsFactura[0]?.CoDoc, itemsFactura[0]?.FECHA_DOCTO);
     const baseConsec = parseInt(consecDocto) || 99999;
     const itemsMap = {};
     itemsFactura.forEach(det => { itemsMap[det.id_item] = det; });
@@ -413,7 +415,7 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
         console.log(`🧾 [CPE movimiento] ITEM ${idItemStr.padStart(7, '0')} | BODEGA ${bodega} | inst ${instElegida} | costo crudo ${costo} | COSTO_PROMEDIO enviado ${formatDecimal(costoFinal)} (${costoFinal}) | CANTIDAD ${inyectarFinal} | UN ${un}`);
 
         movimientos.push({
-            "C.O.": "001",
+            "C.O.": coDocCPE,
             "f470_id_tipo_docto": "CPE",
             "f470_consec_docto": 0,
             "f470_nro_registro": nroRegistro,
@@ -434,7 +436,7 @@ async function ajustarInventario(errores, itemsFactura, consecDocto) {
 
     const payload = {
         "Documentos": [{
-            "f350_id_co": "001",
+            "f350_id_co": coDocCPE,
             "f350_id_tipo_docto": "CPE",
             "f350_id_clase_docto": 61,
             "f450_id_concepto": 601,
@@ -555,6 +557,21 @@ function describirResultadoSyncPOS(res, nits) {
 function formatDate(isoString) {
     if (!isoString) return "";
     return isoString.split('T')[0].replace(/-/g, '');
+}
+
+// CO con el que se crea el documento en Siesa (encabezado, movimientos, impuestos, descuentos,
+// caja e id_caja). Desde CO_DOCUMENTO_DESDE Siesa tiene tipos de documento, consecutivos y caja
+// contable configurados por CO (la caja usa el mismo código del CO), así que el documento va en
+// el CO de la venta. Los documentos con fecha anterior siguen en 001 para no mover a otro CO
+// los reintentos de ventas viejas (ej. el cierre de mes de octubre 2026).
+// Se decide por la FECHA DEL DOCUMENTO, no por la fecha de la corrida.
+const CO_DOCUMENTO_DESDE = (process.env.CO_DOCUMENTO_DESDE || '2026-11-01').trim();
+
+function coDocumento(coVenta, fechaDocto) {
+    const fecha = (fechaDocto || '').toString().split('T')[0];
+    const co = (coVenta ?? '').toString().trim();
+    if (!fecha || !co || fecha < CO_DOCUMENTO_DESDE) return '001';
+    return co.padStart(3, '0');
 }
 
 function formatDecimal(number, isQuantity = false) {
@@ -774,7 +791,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         const tipoDoctoSiesa = esSimulacionCNZ ? 'CNZ' : 'CFZ';
         // Para diferenciar las consecuciones y que Siesa no se confunda, a la simulacion le ponemos el mismo consecutivo
         // Ya que ID_TIPO_DOCTO es distinto, Siesa las agrupa por separado.
-        const consecDoc = enc.CONSEC_DOCTO; 
+        const consecDoc = enc.CONSEC_DOCTO;
+        const coDoc = coDocumento(enc.CoDoc, enc.FECHA_DOCTO);
 
         const absIfCNZ = (val) => {
             if (val === null || val === undefined) return val;
@@ -782,7 +800,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         };
 
         Docto_ventas_comercial.push({
-            "ID_CO": "001",
+            "ID_CO": coDoc,
             "ID_TIPO_DOCTO": tipoDoctoSiesa,
             "CONSEC_DOCTO": consecDoc,
             "FECHA_DOCTO": formatDate(enc.FECHA_DOCTO),
@@ -793,12 +811,12 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             "TERCERO_REM": enc.NitTercero,
             "F_CONSEC_AUTO_REG": "1",
             "id_cond_pago": enc.id_cond_pago ? enc.id_cond_pago.toString().trim().padStart(3, '0') : "000",
-            // id_caja: SIEMPRE "001" para TODOS los CO. Es el codigo de la caja contable
-            // en Siesa (auxiliar 001-001-COP), no el codigo del centro de operacion.
-            // OJO: merkahorro_cajas_pos_dev devuelve el codigo del CO (003->"03", 007->"007",
-            // 011->"011"), que NO tiene auxiliar configurado en Siesa; solo el 001 coincidia
-            // por casualidad. Por eso NO se usa esa query para esto.
-            "id_caja": "001"
+            // id_caja: código de la caja contable en Siesa. Desde CO_DOCUMENTO_DESDE cada CO
+            // tiene su caja con el mismo código del CO (003 → caja 003); antes todo iba a la
+            // caja 001 (auxiliar 001-001-COP). Por eso se usa coDoc.
+            // OJO: NO usar merkahorro_cajas_pos_dev para esto: devuelve el código sin padding
+            // uniforme (003->"03", 007->"007", 011->"011").
+            "id_caja": coDoc
         });
 
         fac.items.forEach((det, index) => {
@@ -808,7 +826,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             const precioUnit = Number(cant) > 0 ? vrBruto / cant : 0;
 
             Movimientos.push({
-                "id_co": "001",
+                "id_co": coDoc,
                 "id_tipo_docto": tipoDoctoSiesa,
                 "consec_docto": consecDoc,
                 "nro_registro": lineaItem,
@@ -845,7 +863,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 const tasaNum = parseFloat(imp.TASA || 0);
                 const vlrUniFinal = tasaNum > 0 ? 0 : unitarioImp;
                 Impuestos.push({
-                    "ID_CO": "001",
+                    "ID_CO": coDoc,
                     "TIPO_DOCTO": tipoDoctoSiesa,
                     "CONSEC_DOCTO": consecDoc,
                     "NRO_REGISTRO": lineaItem,
@@ -863,7 +881,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 const vlrUniDscto = (det.vlr_uni_dscto && Math.abs(parseFloat(det.vlr_uni_dscto)) > 0) ? parseFloat(det.vlr_uni_dscto) : (totalDescuentoItem / parseFloat(det.CANTIDAD || det.cant_1 || 1));
                 
                 Descuentos.push({
-                    "id_co": "001",
+                    "id_co": coDoc,
                     "id_tipo_docto": tipoDoctoSiesa,
                     "consec_docto": consecDoc,
                     "nro_registro": lineaItem,
@@ -1022,7 +1040,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             console.log(`💰 [${tipoDoctoSiesa} ${consecDoc}] Sin pagos POS detectados (DOM/domicilio). Creando EFE sintético por $${montoSintetico.toLocaleString('es-CO')}.`);
             conversiones.push(`pago_efe_sintetico:${montoSintetico}`);
             Caja.push({
-                "ID_CO": "001",
+                "ID_CO": coDoc,
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
                 "CONSEC_DOCTO": consecDoc,
                 "ID_MEDIOS_PAGO": "EFE",
@@ -1043,7 +1061,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 conversiones.push(`pago_${idMedioOriginal || 'SIN_MEDIO'}_a_EFE`);
             }
             Caja.push({
-                "ID_CO": "001",
+                "ID_CO": coDoc,
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
                 "CONSEC_DOCTO": consecDoc,
                 "ID_MEDIOS_PAGO": esSimulacionCNZ ? "EFE" : idMedioEfectivo,
@@ -1073,7 +1091,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             const plantillaEfe = cajaConsolidada["EFE"];
             const fechaVcto = plantillaEfe ? formatDate(plantillaEfe.FECHA_VCTO) : formatDate(enc.FECHA);
             Caja.push({
-                "ID_CO": "001",
+                "ID_CO": coDoc,
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
                 "CONSEC_DOCTO": consecDoc,
                 "ID_MEDIOS_PAGO": "EFE",
