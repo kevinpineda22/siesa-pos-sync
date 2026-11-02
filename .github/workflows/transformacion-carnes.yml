@@ -34,6 +34,12 @@ on:
         type: choice
         options: ['false', 'true']
         default: 'false'
+      cierre_anticipado:
+        description: 'Cierre anticipado: procesa el dia en curso antes de las 21:30 COT (tocino y negativos). Usar SOLO con todas las tiendas ya cerradas: ventas posteriores no se transforman despues.'
+        required: false
+        type: choice
+        options: ['false', 'true']
+        default: 'false'
 
 # Evita que dos corridas se solapen (no cancela la que esta en curso).
 concurrency:
@@ -94,6 +100,8 @@ jobs:
           ENTORNO_SIESA_TRANSF: ${{ github.event.inputs.entorno || 'PROD' }}
           TRANSF_FECHA: ${{ steps.fecha.outputs.fecha }}
           TRANSF_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          # Solo true en dispatch manual con cierre_anticipado=true: omite la guardia de las 21:30 COT.
+          TRANSF_PERMITIR_DIA_EN_CURSO: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.cierre_anticipado == 'true' && 'true' || 'false' }}
           # Opcional: JSON con el mapa de transformaciones (vacio = default en codigo).
           TRANSF_MAPA: ${{ vars.TRANSF_MAPA || '' }}
           # --- Notificaciones por correo (GitHub Secrets) ---
@@ -166,8 +174,9 @@ jobs:
           TRANSF_NEG_ITEMS_EXCLUIDOS: ${{ vars.TRANSF_NEG_ITEMS_EXCLUIDOS || '' }}
           TRANSF_NEG_DIAS_REANUDAR: ${{ vars.TRANSF_NEG_DIAS_REANUDAR || '' }}
           TRANSF_NEG_UNIDAD_NEGOCIO: ${{ vars.TRANSF_NEG_UNIDAD_NEGOCIO || '' }}
-          # Solo true en dispatch manual con solo_negativos=true: omite la guardia de las 21:30 COT (cierre anticipado).
-          TRANSF_NEG_PERMITIR_DIA_EN_CURSO: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.solo_negativos == 'true' && 'true' || 'false' }}
+          # Solo true en dispatch manual con solo_negativos=true o cierre_anticipado=true: omite la guardia
+          # de las 21:30 COT (cierre anticipado).
+          TRANSF_NEG_PERMITIR_DIA_EN_CURSO: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.solo_negativos == 'true' || github.event.inputs.cierre_anticipado == 'true') && 'true' || 'false' }}
           # --- Notificaciones por correo (GitHub Secrets) ---
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}

@@ -23,6 +23,7 @@
 const axios = require('axios');
 const notifier = require('./notifier');
 const { trazaCorrida, insertarTolerante } = require('./corridaTraza');
+const { resolverPermitirDiaEnCurso } = require('./transformacionNegativosPlan');
 require('dotenv').config();
 
 const CIA = process.env.CIA || '7375';
@@ -517,8 +518,16 @@ async function transformacionCarnes(opciones = {}) {
     const fecha = (opciones.fecha || process.env.TRANSF_FECHA || fechaBogota()).toString().trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) throw new Error(`Fecha inválida "${fecha}" (se espera YYYY-MM-DD).`);
     const dryRun = opciones.dryRun === true || ['1', 'true'].includes((process.env.TRANSF_DRY_RUN || '').toLowerCase());
+    // Cierre anticipado de tiendas (dispatch manual con cierre_anticipado=true): omite SOLO la guardia
+    // de las 21:30 COT del día en curso. No es dry-run y nunca aplica al cron (schedule).
+    const permitirDiaEnCurso = resolverPermitirDiaEnCurso({
+        opcion: opciones.permitirDiaEnCurso,
+        env: process.env.TRANSF_PERMITIR_DIA_EN_CURSO,
+        evento: opciones.evento !== undefined ? opciones.evento : process.env.GITHUB_EVENT_NAME
+    });
     // Guardia de fecha: antes de leer/enviar nada (opciones.ahora permite inyectar la hora en pruebas).
-    validarFechaObjetivo(fecha, dryRun, opciones.ahora || new Date());
+    validarFechaObjetivo(fecha, dryRun || permitirDiaEnCurso, opciones.ahora || new Date());
+    if (permitirDiaEnCurso) console.log('   Cierre anticipado activo (dispatch manual): se omite la guardia de las 21:30 COT.');
     const mapa = cargarMapa();
 
     console.log("==========================================");
