@@ -48,4 +48,45 @@ function ordenarNovedades(lista = []) {
         .map(x => x.n);
 }
 
-module.exports = { CODIGOS, SEVERIDADES, crearNovedad, ordenarNovedades };
+// ──────────────────────────────────────────────────────────
+// Email section (pure HTML string, Spanish, non-technical)
+// ──────────────────────────────────────────────────────────
+const ETIQUETA_SEVERIDAD = { ALTA: 'Alta', MEDIA: 'Media', INFO: 'Informativa' };
+const COLOR_SEVERIDAD = { ALTA: '#c0392b', MEDIA: '#e67e22', INFO: '#7f8c8d' };
+const ETIQUETA_DOCUMENTO = { CEI: 'Entrada (CEI)', CSA: 'Salida (CSA)' };
+
+function esc(valor) {
+    return String(valor ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Groups the novedades by store; stores with the most severe novedad come first, ALTA first inside each store.
+// Returns '' when there is nothing to report.
+function renderSeccionHtml(novedades = []) {
+    const lista = ordenarNovedades(Array.isArray(novedades) ? novedades : []);
+    if (lista.length === 0) return '';
+
+    const tiendas = new Map();
+    for (const n of lista) {
+        const k = `${n.co}|${n.bodega}`;
+        if (!tiendas.has(k)) tiendas.set(k, { co: n.co, bodega: n.bodega, items: [] });
+        tiendas.get(k).items.push(n);
+    }
+    // Map insertion order already follows the severity-sorted list, so the most severe store is first.
+    const bloques = [...tiendas.values()].map(t => {
+        const filas = t.items.map(n => {
+            const sev = ETIQUETA_SEVERIDAD[n.severidad] || esc(n.severidad);
+            const color = COLOR_SEVERIDAD[n.severidad] || '#555';
+            const doc = ETIQUETA_DOCUMENTO[n.tipo_dto] ? ` · ${ETIQUETA_DOCUMENTO[n.tipo_dto]}` : '';
+            return `<li><strong style="color: ${color};">${sev}</strong>${doc}: ${esc(n.mensaje)}</li>`;
+        }).join('');
+        return `<p style="margin: 10px 0 4px; font-weight: bold; color: #333;">CO ${esc(t.co)} · Bodega ${esc(t.bodega)}</p>`
+            + `<ul style="margin: 0; padding-left: 20px; color: #555; font-size: 13px; line-height: 1.6;">${filas}</ul>`;
+    }).join('');
+
+    return `<div style="margin-top: 20px; padding: 12px; background: #fdf2e9; border-left: 4px solid #e67e22; border-radius: 4px;">`
+        + `<p style="margin: 0 0 4px; font-weight: bold; color: #e67e22;">Novedades de la corrida (${lista.length}):</p>`
+        + `<p style="margin: 0; font-size: 12px; color: #777;">Situaciones que conviene revisar. No detienen el proceso.</p>`
+        + bloques + '</div>';
+}
+
+module.exports = { CODIGOS, SEVERIDADES, crearNovedad, ordenarNovedades, renderSeccionHtml };

@@ -1,7 +1,7 @@
 // Pure tests for the novedades catalog: no network, no env.
 const test = require('node:test');
 const assert = require('node:assert');
-const { CODIGOS, SEVERIDADES, crearNovedad, ordenarNovedades } = require('../negativosNovedades');
+const { CODIGOS, SEVERIDADES, crearNovedad, ordenarNovedades, renderSeccionHtml } = require('../negativosNovedades');
 
 const ctx = { co: '001', bodega: '00101', tipo_dto: 'CSA' };
 
@@ -62,4 +62,35 @@ test('ordenarNovedades sorts ALTA > MEDIA > INFO, stable inside a severity, with
     assert.deepStrictEqual(orden.map(n => n.codigo), ['CEI_RECHAZADO', 'SIN_STOCK', 'SIN_STOCK', 'UM_DISTINTA', 'LINEA_AJUSTADA']);
     assert.deepStrictEqual(orden.filter(n => n.codigo === 'SIN_STOCK').map(n => n.item_origen), [1, 2]);
     assert.deepStrictEqual(lista, copia);
+});
+
+// ---- email section (NV-4) ----
+test('renderSeccionHtml: empty list renders nothing', () => {
+    assert.strictEqual(renderSeccionHtml([]), '');
+    assert.strictEqual(renderSeccionHtml(undefined), '');
+});
+
+test('renderSeccionHtml: groups by store, ALTA first, Spanish non-technical copy and no raw codes', () => {
+    const lista = [
+        crearNovedad('LINEA_AJUSTADA', { co: '002', bodega: '00201', tipo_dto: 'CEI', item_destino: 9, anterior: 1, nueva: 2, ronda: 1 }),
+        crearNovedad('SIN_STOCK', { co: '001', bodega: '00101', tipo_dto: 'CSA', item_origen: 5, item_destino: 9 }),
+        crearNovedad('CSA_DESCARTADA_TOTAL', { co: '003', bodega: '00301', tipo_dto: 'CSA' })
+    ];
+    const html = renderSeccionHtml(lista);
+    assert.match(html, /Novedades/);
+    assert.match(html, /CO 003/);
+    assert.ok(html.indexOf('CO 003') < html.indexOf('CO 001'), 'store with ALTA first');
+    assert.ok(html.indexOf('CO 001') < html.indexOf('CO 002'), 'then MEDIA, then INFO');
+    assert.match(html, /Alta/);
+    assert.match(html, /Media/);
+    assert.match(html, /Informativa/);
+    assert.match(html, /No había suficiente 5 para cubrir la transformación completa de 9/);
+    assert.doesNotMatch(html, /CSA_DESCARTADA_TOTAL|SIN_STOCK|LINEA_AJUSTADA/);
+});
+
+test('renderSeccionHtml: escapes HTML in messages and shows the count', () => {
+    const html = renderSeccionHtml([{ codigo: 'SIN_STOCK', severidad: 'MEDIA', co: '1', bodega: '<b>', tipo_dto: 'CSA', mensaje: '<script>x</script>' }]);
+    assert.doesNotMatch(html, /<script>/);
+    assert.doesNotMatch(html, /<b>/);
+    assert.match(html, /(1)/);
 });

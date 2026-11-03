@@ -96,6 +96,17 @@ test('alertasNegativos includes ambiguos, abortada, fechaDesfasada and inventari
     assert.strictEqual(a.flags.inventarioDescartado, 3);
 });
 
+test('NV-2 alertasNegativos stores the novedades list and keeps ALTA first when capped', () => {
+    const media = Array.from({ length: 60 }, (_, i) => ({ codigo: 'SIN_STOCK', severidad: 'MEDIA', n: i }));
+    const alta = { codigo: 'CEI_RECHAZADO', severidad: 'ALTA' };
+    const a = alertasNegativos({ alertas: { novedades: [...media, alta] } });
+    assert.strictEqual(a.conteos.novedades, 61);
+    assert.strictEqual(a.listas.novedades.total, 61);
+    assert.strictEqual(a.listas.novedades.items.length, 50);
+    assert.strictEqual(a.listas.novedades.truncada, true);
+    assert.strictEqual(a.listas.novedades.items[0].severidad, 'ALTA');
+});
+
 test('alertasNegativos handles array descartadas and missing keys', () => {
     const a = alertasNegativos({ inventario: { descartadas: [1, 2] }, alertas: { omitidos: [1] } });
     assert.strictEqual(a.flags.inventarioDescartado, 2);

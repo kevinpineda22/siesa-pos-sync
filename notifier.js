@@ -1,4 +1,5 @@
 const nodemailer = require('nodemailer');
+const { renderSeccionHtml } = require('./negativosNovedades');
 require('dotenv').config();
 
 // ──────────────────────────────────────────────────────────
@@ -559,7 +560,7 @@ async function sendTransformacionNotification({ fecha, entorno, grupos, totalUni
 }
 
 // ──────────────────────────────────────────────────────────
-// Notificación de TRANSFORMACIÓN NEGATIVOS (CEI + CSA por destino con inventario negativo)
+// Notificación de TRANSFORMACIÓN NEGATIVOS (un CEI + un CSA por tienda con inventario negativo)
 // ──────────────────────────────────────────────────────────
 // Destinatarios: NOTIFY_TRANSF_NEG_EMAILS -> NOTIFY_TRANSF_EMAILS -> NOTIFY_EMAILS
 // (la lista propia aún no está confirmada por negocio).
@@ -574,12 +575,12 @@ function getNotifyTransfNegEmails() {
 function buildTransformacionNegativosEmail(resultado) {
     const r = resultado || {};
     const a = r.alertas || {};
-    const ref = (f) => `${escapeHtml(f.fecha)} CO ${escapeHtml(f.co)} ${escapeHtml(f.bodega)} item ${escapeHtml(f.item_destino)} ${escapeHtml(f.tipo_dto || '')}${f.item_origen ? ` origen ${escapeHtml(f.item_origen)}` : ''}`;
+    const ref = (f) => `${escapeHtml(f.fecha)} CO ${escapeHtml(f.co)} ${escapeHtml(f.bodega)}${f.item_destino ? ` item ${escapeHtml(f.item_destino)}` : ''} ${escapeHtml(f.tipo_dto || '')}${f.item_origen ? ` origen ${escapeHtml(f.item_origen)}` : ''}`;
     const items = [];
 
     if (a.fechaDesfasada) items.push(`<li><strong>FECHA DESFASADA</strong>: la corrida programada apuntó a ${escapeHtml(a.fechaDesfasada.fecha)} pero hoy (Bogotá) es ${escapeHtml(a.fechaDesfasada.hoy)}; solo se reanudó, no se planificó nada. Ejecutar manualmente para ${escapeHtml(a.fechaDesfasada.hoy)} después de las 21:30 COT.</li>`);
     (a.ambiguos || []).forEach(f => items.push(`<li><strong>AMBIGUO${f.previo ? ' (SENDING -> AMBIGUO al inicio)' : ''}</strong> ${ref(f)}: ${f.tipo_dto === 'CEI' ? 'CEI possibly sent, CSAs blocked, manual review. ' : 'CSA possibly sent, manual review. '}${escapeHtml(String(f.error || '').slice(0, 300))}</li>`));
-    (a.bloqueados || []).forEach(f => items.push(`<li><strong>CSA bloqueada</strong> ${ref(f)} cantidad ${escapeHtml(f.cantidad)}: ${escapeHtml(f.motivo)}</li>`));
+    (a.bloqueados || []).forEach(f => items.push(`<li><strong>CSA bloqueada</strong> ${ref(f)}${f.cantidad ? ` cantidad ${escapeHtml(f.cantidad)}` : ''}: ${escapeHtml(f.motivo)}</li>`));
     (a.erroresSiesa || []).forEach(f => items.push(`<li><strong>Siesa rechazó</strong> ${ref(f)}: ${escapeHtml(String(f.error).slice(0, 400))}</li>`));
     (a.erroresGuardado || []).forEach(f => items.push(`<li><strong>No se pudo registrar</strong> (${escapeHtml(f.fase)}) ${ref(f)}${f.ok ? ' — Siesa SÍ lo aceptó: no reenviar manualmente' : ''}: ${escapeHtml(f.error)}</li>`));
     (a.anomalias || []).forEach(f => items.push(`<li><strong>${escapeHtml(f.tipoAnomalia || 'ANOMALIA')}</strong> ${ref(f)}: ${escapeHtml(f.motivo)}</li>`));
@@ -590,19 +591,23 @@ function buildTransformacionNegativosEmail(resultado) {
     if (r.abortada) items.push('<li><strong>Corrida abortada</strong>: quedaron destinos sin procesar.</li>');
 
     const nAlertas = items.length;
+    const novedades = Array.isArray(a.novedades) ? a.novedades : [];
+    const hayAlta = novedades.some(n => n.severidad === 'ALTA');
+    const esAlerta = nAlertas > 0 || (r.fallos || 0) > 0 || hayAlta;
+    const seccionNovedades = renderSeccionHtml(novedades);
     const inv = r.inventario;
     const invTexto = inv ? `${Number(inv.filas).toLocaleString('es-CO')} filas en ${inv.paginas} page(s)` : 'sin consulta (solo reanudación)';
     const filas = (r.detalle || []).map((d, i) => `
         <tr${i % 2 === 0 ? '' : ' style="background: #f9f9f9;"'}>
             <td style="padding: 6px 8px;">${escapeHtml(d.co)}</td>
             <td style="padding: 6px 8px; text-align: center;">${escapeHtml(d.bodega)}</td>
-            <td style="padding: 6px 8px; text-align: center;">${escapeHtml(d.item_destino)}</td>
-            <td style="padding: 6px 8px; text-align: center;">${escapeHtml(d.tipo_dto)}${d.item_origen ? ` (${escapeHtml(d.item_origen)})` : ''}</td>
-            <td style="padding: 6px 8px; text-align: right;">${escapeHtml(d.cantidad)}</td>
+            <td style="padding: 6px 8px; text-align: center;">${escapeHtml(d.tipo_dto)}</td>
+            <td style="padding: 6px 8px; text-align: right;">${escapeHtml(d.lineas_activas)}</td>
+            <td style="padding: 6px 8px; text-align: right;">${escapeHtml(d.cantidad_total)}</td>
             <td style="padding: 6px 8px; text-align: center;">${escapeHtml(d.resultado)}</td>
         </tr>`).join('');
 
-    const color = nAlertas > 0 ? '#e67e22' : '#27ae60';
+    const color = esAlerta ? '#e67e22' : '#27ae60';
     const html = `
 <!DOCTYPE html>
 <html>
@@ -614,7 +619,7 @@ function buildTransformacionNegativosEmail(resultado) {
       <p style="margin: 5px 0 0; opacity: 0.9;">${escapeHtml(r.fecha)} · Entorno ${escapeHtml(r.entorno)} · Modo ${escapeHtml(r.modo)}</p>
     </div>
     <div style="padding: 20px;">
-      <p style="color: #555; font-size: 14px;">Destinos: <strong>${escapeHtml(r.destinos)}</strong> · Documentos enviados OK: <strong>${escapeHtml(r.documentos)}</strong> · Fallos: <strong>${escapeHtml(r.fallos)}</strong></p>
+      <p style="color: #555; font-size: 14px;">Líneas de destino: <strong>${escapeHtml(r.destinos)}</strong> · Documentos enviados OK: <strong>${escapeHtml(r.documentos)}</strong> · Fallos: <strong>${escapeHtml(r.fallos)}</strong></p>
       <p style="color: #555; font-size: 14px;">Consulta de inventario: ${invTexto}</p>
       ${filas ? `
       <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
@@ -622,14 +627,15 @@ function buildTransformacionNegativosEmail(resultado) {
           <tr style="background: #ecf0f1;">
             <th style="padding: 8px; text-align: left;">CO</th>
             <th style="padding: 8px; text-align: center;">Bodega</th>
-            <th style="padding: 8px; text-align: center;">Destino</th>
-            <th style="padding: 8px; text-align: center;">Doc</th>
-            <th style="padding: 8px; text-align: right;">Cantidad</th>
+            <th style="padding: 8px; text-align: center;">Documento</th>
+            <th style="padding: 8px; text-align: right;">Líneas</th>
+            <th style="padding: 8px; text-align: right;">Cantidad total</th>
             <th style="padding: 8px; text-align: center;">Resultado</th>
           </tr>
         </thead>
         <tbody>${filas}</tbody>
       </table>` : '<p style="color: #999;">Sin documentos enviados.</p>'}
+      ${seccionNovedades}
       ${items.length > 0 ? `
       <div style="margin-top: 20px; padding: 12px; background: #fff8e1; border-left: 4px solid #e67e22; border-radius: 4px;">
         <p style="margin: 0 0 8px; font-weight: bold; color: #e67e22;">Alertas (${items.length}):</p>
@@ -643,8 +649,8 @@ function buildTransformacionNegativosEmail(resultado) {
 </body>
 </html>`;
 
-    const subject = `${nAlertas > 0 ? '[ALERTA]' : '[OK]'} [SiesaPOS] Transformación negativos ${r.fecha} (${r.documentos} doc${nAlertas > 0 ? `, ${nAlertas} alerta(s)` : ''})`;
-    return { subject, html, nAlertas };
+    const subject = `${esAlerta ? '[ALERTA]' : '[OK]'} [SiesaPOS] Transformación negativos ${r.fecha} (${r.documentos} doc${nAlertas > 0 ? `, ${nAlertas} alerta(s)` : ''}${novedades.length > 0 ? `, ${novedades.length} novedad(es)` : ''})`;
+    return { subject, html, nAlertas, nNovedades: novedades.length, hayAlta };
 }
 
 // `deps.transport` permite inyectar un transporte en pruebas (nunca enviar correo real).

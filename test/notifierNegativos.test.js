@@ -1,15 +1,18 @@
+// NOTE: requires ../notifier (dotenv + SMTP transport at load). Do not run it casually: not part of the safe list.
 const test = require('node:test');
 const assert = require('node:assert');
 const notifier = require('../notifier');
+const { crearNovedad } = require('../negativosNovedades');
 
 const id = { fecha: '2026-10-29', co: '001', bodega: '00101', item_destino: 15251, tipo_dto: 'CSA', item_origen: 15202 };
+const doc = { fecha: '2026-10-29', co: '001', bodega: '00101', tipo_dto: 'CEI', lineas_activas: 3, cantidad_total: 4.5, rondas: 1, resultado: 'OK', error: null };
 const base = {
     fecha: '2026-10-29', entorno: 'QA', modo: 'NORMAL', destinos: 2, documentos: 3, fallos: 0, abortada: false,
     inventario: { filas: 1200, paginas: 2, descartadas: 0 },
-    detalle: [{ ...id, tipo_dto: 'CEI', item_origen: 0, cantidad: 4.5, resultado: 'OK', error: null }],
+    detalle: [doc],
     alertas: {
         erroresSiesa: [], ambiguos: [], erroresGuardado: [], bloqueados: [], cancelados: [],
-        anomalias: [], omitidos: [], errores: [], reintentosDiasPrevios: []
+        anomalias: [], omitidos: [], errores: [], reintentosDiasPrevios: [], novedades: []
     }
 };
 const conAlertas = (a) => ({ ...base, alertas: { ...base.alertas, ...a } });
@@ -109,4 +112,30 @@ test('builder: W3 scheduled run on a past date is shown as a prominent alert', (
     assert.match(m.html, /2026-10-29/);
     assert.ok(m.nAlertas >= 1);
     assert.match(m.subject, /ALERTA/);
+});
+
+const novCei = () => crearNovedad('CEI_RECHAZADO', { co: '001', bodega: '00101', tipo_dto: 'CEI' });
+const novSinStock = () => crearNovedad('SIN_STOCK', { co: '002', bodega: '00201', tipo_dto: 'CSA', item_origen: 15101, item_destino: 15202 });
+
+test('NV-4 builder: lists the per-document detail table (store, document, lines, total, result)', () => {
+    const m = notifier.buildTransformacionNegativosEmail(base);
+    assert.match(m.html, /Documento/);
+    assert.match(m.html, />00101</);
+    assert.match(m.html, />CEI</);
+    assert.match(m.html, />4.5</);
+});
+
+test('NV-4 builder: novedades section in Spanish, ALTA store first, no raw codes', () => {
+    const m = notifier.buildTransformacionNegativosEmail(conAlertas({ novedades: [novSinStock(), novCei()] }));
+    assert.match(m.html, /Novedades de la corrida (2)/);
+    assert.ok(m.html.indexOf('CO 001') < m.html.indexOf('CO 002'));
+    assert.match(m.html, /No había suficiente 15101/);
+    assert.doesNotMatch(m.html, /CEI_RECHAZADO|SIN_STOCK/);
+    assert.strictEqual(m.nNovedades, 2);
+});
+
+test('NV-4 builder: subject is [ALERTA] with an ALTA novedad or with fallos, [OK] with only MEDIA/INFO novedades', () => {
+    assert.match(notifier.buildTransformacionNegativosEmail(conAlertas({ novedades: [novCei()] })).subject, /^[ALERTA]/);
+    assert.match(notifier.buildTransformacionNegativosEmail({ ...base, fallos: 1 }).subject, /^[ALERTA]/);
+    assert.match(notifier.buildTransformacionNegativosEmail(conAlertas({ novedades: [novSinStock()] })).subject, /^[OK]/);
 });
