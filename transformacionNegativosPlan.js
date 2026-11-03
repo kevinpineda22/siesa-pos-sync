@@ -1,6 +1,8 @@
 // Pure planner for the negative inventory transformation job.
 // No I/O, no env access, no network: everything comes in through arguments so it can be tested in isolation.
-// Quantities are handled as integer cents end-to-end to avoid float drift in the origin ledger.
+// Quantities are handled as integers of 1e-4 end-to-end to avoid float drift in the origin ledger.
+
+const { crearNovedad, ordenarNovedades } = require('./negativosNovedades');
 
 const DOC_ENTRADA = { tipoDto: 'CEI', claseDto: '61', concepto: '601', motivo: '06' };
 const DOC_SALIDA = { tipoDto: 'CSA', claseDto: '62', concepto: '602', motivo: '10' };
@@ -12,31 +14,41 @@ const UNIDAD_NEGOCIO_POR_DEFECTO = '003';
 const POLITICA_COSTO_CSA_POR_DEFECTO = 'origen';
 
 // ──────────────────────────────────────────────────────────
-// Decimal-safe cents
+// Decimal-safe 1e-4 units
 // ──────────────────────────────────────────────────────────
+const UNIDADES = 10000;
 
-// Splits |v| into integer cents plus the third decimal digit, using the 15 significant digits
-// representation so binary noise (e.g. 0.515 stored as 0.51499999...) does not change the result.
-function descomponer(v) {
+// Splits |v| into integer 1e-4 units, the fifth digit and whether anything non-zero follows the fourth digit.
+// Uses the 15 significant digits representation so binary noise (0.30000000000000004) does not change the result.
+function descomponerUnidades(v) {
     const x = Math.abs(Number(v));
-    if (!Number.isFinite(x)) return { centavos: 0, tercer: 0 };
-    if (x < 1e-6) return { centavos: 0, tercer: 0 };
+    if (!Number.isFinite(x) || x < 1e-6) return { unidades: 0, quinto: 0, resto: false };
     let s = x.toPrecision(15);
-    if (/e/i.test(s)) s = x.toFixed(3); // very large magnitudes: exponent notation is not parseable below
+    if (/e/i.test(s)) s = x.toFixed(6); // very large magnitudes: exponent notation is not parseable below
     const [ent, frac = ''] = s.split('.');
-    const f = (frac + '000').slice(0, 3);
-    return { centavos: Number(ent) * 100 + Number(f.slice(0, 2)), tercer: Number(f[2]) };
+    const f = (frac + '00000').slice(0, 5);
+    return {
+        unidades: Number(ent) * UNIDADES + Number(f.slice(0, 4)),
+        quinto: Number(f[4]),
+        resto: /[1-9]/.test(frac.slice(4))
+    };
 }
 
-// Half-up rounding of |v| to 2 decimals, returned as integer cents.
-function aCentavos(v) {
-    const { centavos, tercer } = descomponer(v);
-    return centavos + (tercer >= 5 ? 1 : 0);
+// |v| rounded UP to 4 decimals: CEI quantity, so the destination never ends with a residual negative.
+function aUnidadesCeil(v) {
+    const { unidades, resto } = descomponerUnidades(v);
+    return unidades + (resto ? 1 : 0);
 }
 
-// Truncation (floor) of |v| to cents: used for origin availability so we never promise stock we do not have.
-function truncarCentavos(v) {
-    return descomponer(v).centavos;
+// |v| truncated to 4 decimals: origin availability and anything that must not promise stock we do not have.
+function truncarUnidades(v) {
+    return descomponerUnidades(v).unidades;
+}
+
+// |v| rounded half-up to 4 decimals (stored quantities, which already carry at most 4 decimals).
+function aUnidades(v) {
+    const { unidades, quinto } = descomponerUnidades(v);
+    return unidades + (quinto >= 5 ? 1 : 0);
 }
 
 // ──────────────────────────────────────────────────────────
@@ -49,10 +61,6 @@ function formatDecimal(number) {
 
 function padItem(id) {
     return String(id).trim().padStart(7, '0');
-}
-
-function limpiarNumero(n) {
-    return String(Number(Number(n).toFixed(4)));
 }
 
 function norm(v) {
@@ -83,19 +91,38 @@ function construirExcluidos(extra) {
     return set;
 }
 
-// Only CSAs from earlier runs that WILL be resent automatically reserve origin stock (PLANNED, ERROR).
-// AMBIGUO is never resent automatically (and SENDING becomes AMBIGUO on resume): if it landed in Siesa, the live
-// inventory already reflects it, so reserving it would double-count and shrink origin availability (full CEI plus
-// partial CSA, i.e. inventory inflation); if it did not land, nothing will resend it. OK is already in the
-// inventory and CANCELADO will never be sent.
-const ESTADOS_CSA_RESERVAN_ORIGEN = new Set(['PLANNED', 'ERROR']);
-
 const comparadorNumerico = new Intl.Collator('en', { numeric: true });
 
 // ──────────────────────────────────────────────────────────
-// Payload
+// Per-store planner: one CEI document and one CSA document per store (co, bodega)
 // ──────────────────────────────────────────────────────────
-function construirPayloadNegativo({ def, fecha, co, bodega, item, um, cantidad, costo, nota, unidadNegocio }) {
+
+// A CSA that is still pending OR may already be posted in Siesa reserves its origin stock (conservative):
+// a SENDING/AMBIGUO document may have landed, so its stock may already be gone.
+const ESTADOS_DOC_CSA_RESERVAN_ORIGEN = new Set(['PLANNED', 'ERROR', 'SENDING', 'AMBIGUO']);
+const ESTADOS_LINEA_ACTIVA = new Set(['ACTIVA', 'AJUSTADA']);
+
+function normCo(v) {
+    const t = norm(v);
+    return /^\d+$/.test(t) ? (t.replace(/^0+/, '') || '0') : t;
+}
+
+// CO filter (env TRANSF_NEG_COS): comma list or array of CO ids, empty = all stores.
+function parsearCosFiltro(valor) {
+    const lista = Array.isArray(valor) ? valor : String(valor ?? '').split(',');
+    return lista.map(norm).filter(Boolean);
+}
+
+// Totals of a document's lines: only ACTIVA/AJUSTADA lines count. Exact, summed in 1e-4 integer units.
+function resumenLineas(lineas = []) {
+    const activas = lineas.filter(l => ESTADOS_LINEA_ACTIVA.has(l.estado));
+    const unidades = activas.reduce((acc, l) => acc + aUnidades(l.cantidad), 0);
+    return { cantidad_total: unidades / UNIDADES, lineas_activas: activas.length };
+}
+
+// Multi-line payload for one document. NRO_REGISTRO is renumbered on every build (dropped lines leave no gaps).
+function construirPayloadDocumento({ def, fecha, co, bodega, lineas, unidadNegocio, nota }) {
+    const activas = lineas.filter(l => ESTADOS_LINEA_ACTIVA.has(l.estado));
     return {
         Documentos: [{
             'TIPO_DTO': def.tipoDto,
@@ -104,35 +131,51 @@ function construirPayloadNegativo({ def, fecha, co, bodega, item, um, cantidad, 
             'NOTA': nota,
             'CONCEPTO': def.concepto
         }],
-        Movimientos: [{
+        Movimientos: activas.map((l, i) => ({
             'TIPO_DTO': def.tipoDto,
             'CONSECUTIVO': '0',
-            'NRO_REGISTRO': '1',
+            'NRO_REGISTRO': String(i + 1),
             'BODEGA': bodega,
             'CONCEPTO': def.concepto,
             'MOTIVO': def.motivo,
             'CENTRO_OPERA_MOVIMIENTO': co,
-            'UNIDAD_MEDIDA': um,
-            'CANTIDAD': formatDecimal(cantidad),
-            'ITEM': padItem(item),
+            'UNIDAD_MEDIDA': l.um,
+            'CANTIDAD': formatDecimal(aUnidades(l.cantidad) / UNIDADES),
+            'ITEM': padItem(l.item),
             'UNIDAD_NEGOCIO': unidadNegocio,
-            'COSTO_PROMEDIO_UNITARIO': formatDecimal(costo)
-        }]
+            'COSTO_PROMEDIO_UNITARIO': formatDecimal(l.costo)
+        }))
     };
 }
 
-// ──────────────────────────────────────────────────────────
-// Planner
-// ──────────────────────────────────────────────────────────
-// inventario: [{ co, bodega, item, disponible, costo, um }]   (already normalized by the caller)
-// reglas:     { equivalencias: [{item_origen,item_destino,activo}], prioridad: [{item_origen,orden,activo}], excluidos? }
-// previos:    stored rows [{ fecha, co, bodega, item_destino, tipo_dto, status }] for the same entorno
+function notaDocumento(def, fecha, co, bodega) {
+    return `Transformacion negativos ${fecha} CO ${co} BOD ${bodega} - ${def.tipoDto}`;
+}
+
+function ensamblarDocumento({ def, entorno, fecha, co, bodega, lineas, novedades, unidadNegocio }) {
+    return {
+        entorno, fecha, co, bodega, tipo_dto: def.tipoDto,
+        lineas,
+        novedades: ordenarNovedades(novedades.map(n => crearNovedad(n.codigo, { ...n, co, bodega, tipo_dto: def.tipoDto }))),
+        ...resumenLineas(lineas),
+        payload: construirPayloadDocumento({ def, fecha, co, bodega, lineas, unidadNegocio, nota: notaDocumento(def, fecha, co, bodega) })
+    };
+}
+
+// inventario: [{ co, bodega, item, disponible, costo, um }]
+// reglas:     { equivalencias, prioridad, excluidos? }
+// previos:    { docs: rows of the new table (same entorno), legado: rows of the legacy per-destination table }
+// cos:        optional CO filter (array or comma string); empty = all stores
 // Returns { documentos, omitidos, errores }. Never mutates its inputs.
-function planificarTransformaciones({
-    inventario = [], reglas = {}, previos = [], fecha, entorno,
+function planificarNegativosPorTienda({
+    inventario = [], reglas = {}, previos = {}, fecha, entorno,
     unidadNegocio = UNIDAD_NEGOCIO_POR_DEFECTO,
-    politicaCostoCsa = POLITICA_COSTO_CSA_POR_DEFECTO
+    politicaCostoCsa = POLITICA_COSTO_CSA_POR_DEFECTO,
+    cos
 } = {}) {
+    const docsPrevios = previos.docs || [];
+    const legado = previos.legado || [];
+    const cosPermitidos = new Set(parsearCosFiltro(cos).map(normCo));
     const excluidos = construirExcluidos(reglas.excluidos);
     const equivalencias = (reglas.equivalencias || []).filter(e => e.activo !== false);
     const ordenPrioridad = new Map(
@@ -155,9 +198,8 @@ function planificarTransformaciones({
         });
     }
 
-    // Deduplicate inventory rows per co|bodega|item. Identical duplicates collapse to one row; conflicting
-    // duplicates (different stock, cost or UM) make the key an anomaly: it is neither planned nor used as an
-    // origin, and it is reported (fail safe).
+    // Deduplicate inventory rows per co|bodega|item: identical duplicates collapse, conflicting ones are an
+    // anomaly (neither planned nor used as origin) and are reported (fail safe).
     const filas = new Map();
     const conflictivos = new Map();
     for (const r of inventario) {
@@ -171,10 +213,11 @@ function planificarTransformaciones({
         if (!igual) conflictivos.set(k, fila);
     }
 
-    // Ledger: availability in cents (truncated), cost and UM per co|bodega|item.
+    // Ledger: availability in 1e-4 units (truncated), cost and UM per co|bodega|item.
     const ledger = new Map();
     const negativos = [];
     const omitidos = [];
+    const errores = [];
     for (const [k, f] of filas) {
         if (conflictivos.has(k)) {
             omitidos.push({
@@ -183,7 +226,7 @@ function planificarTransformaciones({
             });
             continue;
         }
-        ledger.set(k, { dispCents: f.disp > 0 ? truncarCentavos(f.disp) : 0, reservadoCents: 0, costo: f.costo, um: f.um });
+        ledger.set(k, { dispU: f.disp > 0 ? truncarUnidades(f.disp) : 0, reservadoU: 0, costo: f.costo, um: f.um });
         if (f.disp < 0) negativos.push(f);
     }
 
@@ -191,138 +234,173 @@ function planificarTransformaciones({
     // in the same run (its CEI only brings it to ~0).
     const esDestinoEstaCorrida = new Set(negativos.map(n => clave(n.co, n.bodega, n.item)));
 
-    const yaPlanificados = new Set();
-    const bloqueados = new Set();
-    for (const p of previos) {
-        // Reserve origin stock for pending CSAs of earlier runs: Siesa does not validate stock on exits, so
-        // planning the same stock again would overdraw the origin once both CSAs are sent.
-        if (p.tipo_dto === 'CSA' && ESTADOS_CSA_RESERVAN_ORIGEN.has(p.status)) {
-            const reservado = ledger.get(clave(p.co, p.bodega, p.item_origen));
-            const cents = Number.isFinite(Number(p.cantidad)) ? aCentavos(p.cantidad) : 0;
-            if (reservado && cents > 0) {
-                const antes = reservado.dispCents;
-                reservado.dispCents = Math.max(0, antes - cents);
-                // Tracked so the audit snapshot can stay pre-reservation.
-                reservado.reservadoCents += antes - reservado.dispCents;
-            }
+    // Reservation from the new table: non-DESCARTADA lines of CSA documents that are pending or possibly posted.
+    const tiendasYaPlanificadas = new Set();
+    for (const d of docsPrevios) {
+        if (norm(d.fecha) === fecha) tiendasYaPlanificadas.add(`${norm(d.co)}|${norm(d.bodega)}`);
+        if (d.tipo_dto !== 'CSA' || !ESTADOS_DOC_CSA_RESERVAN_ORIGEN.has(d.status)) continue;
+        for (const l of d.lineas || []) {
+            if (l.estado === 'DESCARTADA') continue;
+            const entrada = ledger.get(clave(d.co, d.bodega, l.item));
+            const u = aUnidades(l.cantidad);
+            if (!entrada || u <= 0) continue;
+            const antes = entrada.dispU;
+            entrada.dispU = Math.max(0, antes - u);
+            // Tracked so the audit snapshot can stay pre-reservation.
+            entrada.reservadoU += antes - entrada.dispU;
         }
-        const k = clave(p.co, p.bodega, p.item_destino);
-        if (norm(p.fecha) === fecha) yaPlanificados.add(k);
-        if (p.tipo_dto === 'CEI' && (p.status === 'SENDING' || p.status === 'AMBIGUO')) bloqueados.add(k);
+    }
+
+    // Cutover: the legacy table is read-only history. A destination the legacy flow already owns for this fecha is
+    // never planned here (exactly one path per store/fecha/destination); legacy leftovers are only reported.
+    const propiosLegado = new Set();
+    const bloqueadosLegado = new Set();
+    for (const r of legado) {
+        const kd = clave(r.co, r.bodega, r.item_destino);
+        if (norm(r.fecha) === fecha) propiosLegado.add(kd);
+        if (r.tipo_dto === 'CEI' && (r.status === 'SENDING' || r.status === 'AMBIGUO')) bloqueadosLegado.add(kd);
+        if (r.tipo_dto === 'CSA' && (r.status === 'PLANNED' || r.status === 'ERROR')) {
+            omitidos.push({
+                co: norm(r.co), bodega: norm(r.bodega), item_destino: Number(r.item_destino), item_origen: Number(r.item_origen),
+                motivo: 'LEGADO_PENDIENTE', cantidad: Number(r.cantidad),
+                detalle: 'Legacy CSA still pending; it is never resent by the per-store flow. Manual review required.'
+            });
+        }
     }
 
     negativos.sort((a, b) =>
         comparadorNumerico.compare(a.co, b.co) || comparadorNumerico.compare(a.bodega, b.bodega) || a.item - b.item
     );
+    const tiendas = new Map();
+    for (const n of negativos) {
+        const k = `${n.co}|${n.bodega}`;
+        if (!tiendas.has(k)) tiendas.set(k, []);
+        tiendas.get(k).push(n);
+    }
 
     const documentos = [];
-    const errores = [];
+    for (const [kTienda, destinos] of tiendas) {
+        const { co, bodega } = destinos[0];
+        if (cosPermitidos.size > 0 && !cosPermitidos.has(normCo(co))) continue;
+        if (tiendasYaPlanificadas.has(kTienda)) continue;
 
-    for (const dest of negativos) {
-        if (excluidos.has(dest.item)) continue;
-        const origenes = origenesPorDestino.get(dest.item);
-        if (!origenes || origenes.length === 0) continue;
+        const lineasCei = [];
+        const csaPorOrigen = new Map();
+        const pendientes = [];   // novedades without tipo_dto yet: attached to the CSA doc, else to the CEI doc
+        let orden = 0;
 
-        const kDest = clave(dest.co, dest.bodega, dest.item);
-        if (yaPlanificados.has(kDest)) continue;
+        for (const dest of destinos) {
+            if (excluidos.has(dest.item)) continue;
+            const origenes = origenesPorDestino.get(dest.item);
+            if (!origenes || origenes.length === 0) continue;
 
-        const base = { co: dest.co, bodega: dest.bodega, item_destino: dest.item };
-        if (bloqueados.has(kDest)) {
-            omitidos.push({ ...base, motivo: 'BLOQUEADO', detalle: 'Prior CEI is SENDING/AMBIGUO; manual review required.' });
-            continue;
-        }
-
-        const q = aCentavos(dest.disp);
-        if (q === 0) continue;
-
-        if (!costoValido(dest.costo)) {
-            errores.push({ ...base, cantidad: q / 100, error: 'Destination unit cost is missing or zero; nothing sent.' });
-            continue;
-        }
-
-        // A destination without UM cannot produce a valid CEI nor be matched against origins: fail safe.
-        if (!dest.um) {
-            errores.push({ ...base, cantidad: q / 100, error: 'Destination UM is missing; nothing sent.' });
-            continue;
-        }
-
-        // Tentative allocation: the ledger is only committed when the whole destination is accepted.
-        let restante = q;
-        const asignaciones = [];
-        const omitidosDest = [];
-        let errorCosto = null;
-        let origenSinDato = null;
-        for (const origen of origenes) {
-            if (restante <= 0) break;
-            const kOrig = clave(dest.co, dest.bodega, origen);
-            if (esDestinoEstaCorrida.has(kOrig)) continue;
-            // Conflicting duplicates are already reported as INVENTARIO_DUPLICADO and the origin stays unusable.
-            if (conflictivos.has(kOrig)) continue;
-            const entrada = ledger.get(kOrig);
-            // The inventory query has no ORDER BY, so paging can skip rows: an origin with no row is UNKNOWN
-            // stock, not zero. Reaching it before the quantity is covered means we cannot trust the plan.
-            if (!entrada) { origenSinDato = origen; break; }
-            if (entrada.dispCents <= 0) continue;
-            // An origin without UM is unknown, never a match.
-            if (!entrada.um || entrada.um.toUpperCase() !== dest.um.toUpperCase()) {
-                omitidosDest.push({ ...base, item_origen: origen, motivo: 'UM', detalle: `Origin UM ${entrada.um || '?'} differs from destination UM ${dest.um || '?'}.` });
+            const kDest = clave(dest.co, dest.bodega, dest.item);
+            const base = { co: dest.co, bodega: dest.bodega, item_destino: dest.item };
+            if (bloqueadosLegado.has(kDest)) {
+                omitidos.push({ ...base, motivo: 'BLOQUEADO_LEGADO', detalle: 'Legacy CEI is SENDING/AMBIGUO; manual review required.' });
                 continue;
             }
-            if (politicaCostoCsa === 'origen' && !costoValido(entrada.costo)) {
-                errorCosto = `Origin ${origen} unit cost is missing or zero; nothing sent.`;
-                break;
+            if (propiosLegado.has(kDest)) continue;
+
+            const q = aUnidadesCeil(dest.disp);
+            if (q === 0) continue;
+
+            if (!costoValido(dest.costo)) {
+                errores.push({ ...base, cantidad: q / UNIDADES, error: 'Destination unit cost is missing or zero; nothing sent.' });
+                continue;
             }
-            const toma = Math.min(entrada.dispCents, restante);
-            restante -= toma;
-            asignaciones.push({ origen, toma, entrada });
-        }
+            // A destination without UM cannot produce a valid CEI nor be matched against origins: fail safe.
+            if (!dest.um) {
+                errores.push({ ...base, cantidad: q / UNIDADES, error: 'Destination UM is missing; nothing sent.' });
+                continue;
+            }
 
-        if (origenSinDato !== null) {
-            omitidos.push({
-                ...base, item_origen: origenSinDato, motivo: 'ORIGEN_SIN_DATO',
-                detalle: `No inventory row for origin ${origenSinDato} in bodega ${dest.bodega}; stock unknown, destination skipped and retried next run.`
+            // Tentative allocation: the ledger is only committed when the whole destination is accepted.
+            let restante = q;
+            const asignaciones = [];
+            const omitidosDest = [];
+            let errorCosto = null;
+            let origenSinDato = null;
+            let ultimoOrigen = origenes[0];
+            for (const origen of origenes) {
+                if (restante <= 0) break;
+                const kOrig = clave(dest.co, dest.bodega, origen);
+                if (esDestinoEstaCorrida.has(kOrig)) continue;
+                if (conflictivos.has(kOrig)) continue;
+                const entrada = ledger.get(kOrig);
+                // The inventory query has no ORDER BY, so paging can skip rows: an origin with no row is UNKNOWN
+                // stock, not zero. Reaching it before the quantity is covered means we cannot trust the plan.
+                if (!entrada) { origenSinDato = origen; break; }
+                ultimoOrigen = origen;
+                if (entrada.dispU <= 0) continue;
+                // An origin without UM is unknown, never a match.
+                if (!entrada.um || entrada.um.toUpperCase() !== dest.um.toUpperCase()) {
+                    omitidosDest.push({ ...base, item_origen: origen, motivo: 'UM', detalle: `Origin UM ${entrada.um || '?'} differs from destination UM ${dest.um || '?'}.` });
+                    continue;
+                }
+                if (politicaCostoCsa === 'origen' && !costoValido(entrada.costo)) {
+                    errorCosto = `Origin ${origen} unit cost is missing or zero; nothing sent.`;
+                    break;
+                }
+                const toma = Math.min(entrada.dispU, restante);
+                restante -= toma;
+                asignaciones.push({ origen, toma, entrada });
+            }
+
+            if (origenSinDato !== null) {
+                omitidos.push({
+                    ...base, item_origen: origenSinDato, motivo: 'ORIGEN_SIN_DATO',
+                    detalle: `No inventory row for origin ${origenSinDato} in bodega ${dest.bodega}; stock unknown, destination skipped and retried next run.`
+                });
+                continue;
+            }
+            if (errorCosto) {
+                errores.push({ ...base, cantidad: q / UNIDADES, error: errorCosto });
+                continue;
+            }
+
+            omitidos.push(...omitidosDest);
+            for (const o of omitidosDest) pendientes.push({ codigo: 'UM_DISTINTA', item_destino: dest.item, item_origen: o.item_origen });
+            orden += 1;
+            for (const a of asignaciones) {
+                let linea = csaPorOrigen.get(a.origen);
+                if (!linea) {
+                    linea = {
+                        item: a.origen, um: a.entrada.um,
+                        costo: politicaCostoCsa === 'origen' ? Number(a.entrada.costo) : 0,
+                        // Pre-reservation live availability at the moment of the first allocation.
+                        disponible_snapshot: (a.entrada.dispU + a.entrada.reservadoU) / UNIDADES,
+                        unidades: 0, atribucion: []
+                    };
+                    csaPorOrigen.set(a.origen, linea);
+                }
+                linea.unidades += a.toma;
+                linea.atribucion.push({ item_destino: dest.item, cantidad: a.toma / UNIDADES, orden });
+                a.entrada.dispU -= a.toma;
+            }
+            if (restante > 0) {
+                omitidos.push({ ...base, motivo: 'SIN_STOCK', cantidad: restante / UNIDADES, detalle: 'Origins cannot cover the full quantity.' });
+                pendientes.push({ codigo: 'SIN_STOCK', item_destino: dest.item, item_origen: ultimoOrigen, cantidad: restante / UNIDADES });
+            }
+            lineasCei.push({
+                nro: lineasCei.length + 1, item: dest.item, um: dest.um, costo: Number(dest.costo),
+                disponible_snapshot: dest.disp, cantidad_plan: q / UNIDADES, cantidad: q / UNIDADES,
+                estado: 'ACTIVA', ajustes: [],
+                origenes: asignaciones.map(a => ({ item: a.origen, cantidad: a.toma / UNIDADES }))
             });
-            continue;
         }
 
-        if (errorCosto) {
-            errores.push({ ...base, cantidad: q / 100, error: errorCosto });
-            continue;
-        }
+        if (lineasCei.length === 0) continue;
 
-        omitidos.push(...omitidosDest);
-        for (const a of asignaciones) a.entrada.dispCents -= a.toma;
-        if (restante > 0) {
-            omitidos.push({ ...base, motivo: 'SIN_STOCK', cantidad: restante / 100, detalle: 'Origins cannot cover the full quantity.' });
-        }
-
-        const nota = `Transformacion negativos ${fecha} CO ${dest.co}`;
-        documentos.push({
-            entorno, fecha, ...base,
-            tipo_dto: DOC_ENTRADA.tipoDto, item_origen: 0,
-            cantidad: q / 100, costo_unitario: Number(dest.costo), um: dest.um,
-            disponible_snapshot: dest.disp,
-            payload: construirPayloadNegativo({
-                def: DOC_ENTRADA, fecha, co: dest.co, bodega: dest.bodega, item: dest.item, um: dest.um,
-                cantidad: q / 100, costo: Number(dest.costo), unidadNegocio,
-                nota: `${nota} - CEI ${limpiarNumero(q / 100)} ${dest.um.toLowerCase()}`
-            })
-        });
-        for (const a of asignaciones) {
-            const cantidad = a.toma / 100;
-            const costo = politicaCostoCsa === 'origen' ? Number(a.entrada.costo) : 0;
-            documentos.push({
-                entorno, fecha, ...base,
-                tipo_dto: DOC_SALIDA.tipoDto, item_origen: a.origen,
-                cantidad, costo_unitario: costo, um: a.entrada.um,
-                disponible_snapshot: (a.entrada.dispCents + a.entrada.reservadoCents) / 100 + cantidad,
-                payload: construirPayloadNegativo({
-                    def: DOC_SALIDA, fecha, co: dest.co, bodega: dest.bodega, item: a.origen, um: a.entrada.um,
-                    cantidad, costo, unidadNegocio,
-                    nota: `${nota} - CSA ${a.origen} ${limpiarNumero(cantidad)} ${a.entrada.um.toLowerCase()}`
-                })
-            });
-        }
+        const lineasCsa = [...csaPorOrigen.values()].map((l, i) => ({
+            nro: i + 1, item: l.item, um: l.um, costo: l.costo, disponible_snapshot: l.disponible_snapshot,
+            cantidad_plan: l.unidades / UNIDADES, cantidad: l.unidades / UNIDADES,
+            estado: 'ACTIVA', ajustes: [], atribucion: l.atribucion
+        }));
+        const hayCsa = lineasCsa.length > 0;
+        const comunes = { entorno, fecha, co, bodega, unidadNegocio };
+        documentos.push(ensamblarDocumento({ ...comunes, def: DOC_ENTRADA, lineas: lineasCei, novedades: hayCsa ? [] : pendientes }));
+        if (hayCsa) documentos.push(ensamblarDocumento({ ...comunes, def: DOC_SALIDA, lineas: lineasCsa, novedades: pendientes }));
     }
 
     return { documentos, omitidos, errores };
@@ -339,10 +417,18 @@ function resolverPermitirDiaEnCurso({ opcion, env, evento } = {}) {
 
 module.exports = {
     resolverPermitirDiaEnCurso,
-    aCentavos,
-    truncarCentavos,
-    planificarTransformaciones,
-    construirPayloadNegativo,
+    UNIDADES,
+    aUnidades,
+    aUnidadesCeil,
+    truncarUnidades,
+    resumenLineas,
+    parsearCosFiltro,
+    normCo,
+    planificarNegativosPorTienda,
+    construirPayloadDocumento,
+    notaDocumento,
+    DOC_ENTRADA,
+    DOC_SALIDA,
     ITEMS_EXCLUIDOS_POR_DEFECTO,
     UNIDAD_NEGOCIO_POR_DEFECTO,
     POLITICA_COSTO_CSA_POR_DEFECTO

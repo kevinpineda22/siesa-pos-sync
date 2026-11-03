@@ -1733,20 +1733,26 @@ Cada corrida **no dry-run** deja una fila en la tabla `sps_transformaciones_corr
 
 ### Propósito
 
-Cuando un ítem destino de carnes queda con **inventario negativo** en una bodega, el flujo lo normaliza con una transformación en Siesa: una **ENTRADA (CEI)** del destino por la cantidad negativa y una o varias **SALIDAS (CSA)**, una por cada ítem origen con stock, según la tabla de equivalencias y prioridades. El costo del destino se toma de la consulta de inventario; si falta costo o unidad de medida (UM), el destino no se envía y se reporta.
+Cuando un ítem destino de carnes queda con **inventario negativo** en una bodega, el flujo lo normaliza con una transformación en Siesa. Por cada **tienda** (CO + bodega) con destinos negativos se envían como máximo **dos documentos**:
+
+- **un CEI (entrada)** con una línea por cada destino negativo, por la cantidad negativa completa (redondeada hacia arriba a 4 decimales para que el destino quede en 0 o más);
+- **un CSA (salida)** con una línea por cada ítem origen, **agregando** lo que varios destinos de la misma tienda toman del mismo origen (la atribución por destino queda guardada dentro de la línea).
+
+Los orígenes se eligen según la tabla de equivalencias y prioridades, limitados por la disponibilidad (truncada a 4 decimales). El costo del destino sale de la consulta de inventario; si a un destino le falta costo o unidad de medida (UM), ese destino se omite y se reporta, **sin bloquear al resto de la tienda**. Las cantidades se manejan como enteros en unidades de 1e-4.
 
 ### Ejecución y orden
 
 | Dato | Valor |
 |------|-------|
-| Módulo | `transformacionNegativos.js` (planificador puro: `transformacionNegativosPlan.js`) |
+| Módulo | `transformacionNegativos.js` (orquestador con I/O). Lógica pura: `transformacionNegativosPlan.js` (planificador por tienda y payload), `transformacionNegativosEnvio.js` (envío por documento con reintentos de faltante), `transformacionNegativosFlujo.js` (reanudación, lotes, color del job), `siesaFaltantes.js` (parser), `negativosNovedades.js` (catálogo y sección HTML) |
 | Runner | `scripts/runTransformacionNegativosCron.js` |
 | Workflow | `.github/workflows/transformacion-carnes.yml`, job `transformacion-negativos` |
 | Orden | corre **después** del job de tocino (`needs: transformacion-carnes`); si tocino falla, este job se omite |
 | Concurrencia | grupo propio `transformacion-negativos`, `cancel-in-progress: false` |
-| Entradas | las mismas del workflow manual: `fecha`, `dry_run`, `entorno` (default QA; el cron escribe a PROD) |
+| Entradas | `fecha`, `dry_run`, `entorno` (default QA; el cron escribe a PROD), `solo_negativos`, `cierre_anticipado` y `cos` |
+| Habilitación | el job solo corre si la variable del repo `TRANSF_NEG_HABILITADO` vale `true` |
 
-**Reglas de fecha:** el día en curso solo se procesa desde las 21:30 COT; una fecha futura se rechaza sin escribir nada; una **fecha pasada solo reanuda** documentos pendientes (no consulta inventario ni planifica nuevos destinos).
+**Reglas de fecha:** el día en curso solo se procesa desde las 21:30 COT; una fecha futura se rechaza sin escribir nada; una **fecha pasada solo reanuda** documentos pendientes (no consulta inventario ni planifica nuevos).
 
 ### Variables de entorno
 
@@ -1757,74 +1763,143 @@ Cuando un ítem destino de carnes queda con **inventario negativo** en una bodeg
 | `TRANSF_NEG_ITEMS_EXCLUIDOS` | `15207` | Ítems adicionales que nunca se tratan como destino (enteros separados por coma). **Se suman** al default: `15207` siempre queda excluido. Un token que no sea entero falla rápido con error de configuración |
 | `TRANSF_NEG_DIAS_REANUDAR` | `7` | Ventana (días) para reanudar documentos pendientes |
 | `TRANSF_NEG_UNIDAD_NEGOCIO` | `003` | Unidad de negocio |
-| `TRANSF_NEG_PERMITIR_DIA_EN_CURSO` | `false` | Omite la guardia de las 21:30 COT para el día en curso. Lo setea el workflow solo en `workflow_dispatch` con `solo_negativos=true` (cierre anticipado de tiendas); se ignora en `schedule` y las fechas futuras siguen rechazadas |
+| `TRANSF_NEG_COS` | (vacío = todas) | CO(s) a procesar, separados por coma (`005` o `001,005`; se toleran ceros a la izquierda). Limita **planificación y envío**: las demás tiendas no se tocan. Pensada para el **primer envío limitado**. En el workflow se pasa desde el input manual `cos`; el cron (`schedule`) siempre va vacío |
+| `TRANSF_NEG_PERMITIR_DIA_EN_CURSO` | `false` | Omite la guardia de las 21:30 COT para el día en curso. Lo setea el workflow solo en `workflow_dispatch` con `solo_negativos=true` o `cierre_anticipado=true`; se ignora en `schedule` y las fechas futuras siguen rechazadas |
 | `NOTIFY_TRANSF_NEG_EMAILS` | `NOTIFY_TRANSF_EMAILS`, luego `NOTIFY_EMAILS` | Destinatarios (los definitivos aún no están confirmados por negocio) |
 
 Comparte `TRANSF_ID_DOCUMENTO`, `TRANSF_NOMBRE_DOCUMENTO`, `TRANSF_FECHA`, `TRANSF_DRY_RUN`, `ENTORNO_SIESA_TRANSF`, `CONNI_*`, `CIA`, `SUPABASE_*` y `SMTP_*` con el flujo de tocino.
 
-### Tablas (migraciones 007 y 008, **se ejecutan a mano** en Supabase)
+### Tablas (migraciones 007, 008 y **010**, se ejecutan a mano en Supabase)
 
 - `sps_transformaciones_equivalencias`: origen -> destino, factor y UM (semilla de la migración 008).
 - `sps_transformaciones_prioridad`: orden de consumo de orígenes por destino.
-- `sps_transformaciones_negativos`: un documento por fila (CEI/CSA), con `status`.
+- `sps_transformaciones_negativos_docs` (**migración 010**): **un documento por fila** (CEI o CSA de una tienda). Clave única `entorno, fecha, co, bodega, tipo_dto`. Guarda `status`, `lineas` y `novedades` (JSONB), `cantidad_total` NUMERIC(18,4), `lineas_activas`, `payload`, `respuesta`, `intentos` y `rondas`.
+- `sps_transformaciones_negativos` (legado): historial **de solo lectura** del flujo anterior (una fila por destino/origen). El flujo nuevo nunca escribe, reenvía ni cancela esas filas; solo las lee para el corte (ver más abajo).
 - `sps_transformaciones_negativos_corridas`: una fila por corrida (`PROCESADO`, `SIN_NEGATIVOS`, `CON_FALLO`, `ERROR_FATAL`).
+
+> **La migración 010 debe estar aplicada antes de habilitar el flujo** (y antes de desplegar la API y el panel). Si la tabla no existe, la corrida real falla de inmediato con el mensaje "apply migration 010", **antes de enviar nada**. La API y el panel toleran la tabla vacía o ausente.
 
 ### Estados de un documento
 
 | Estado | Significado |
 |--------|-------------|
 | `PLANNED` | Planificado y guardado; aún no enviado |
-| `SENDING` | Marcado **antes** del POST a Siesa. Si la corrida muere en este punto, al iniciar la siguiente pasa a `AMBIGUO` |
+| `SENDING` | Marcado **antes** de cada POST a Siesa, junto con el payload exacto. Si la corrida muere en este punto, al iniciar la siguiente pasa a `AMBIGUO` |
 | `OK` | Siesa lo aceptó |
-| `ERROR` | Siesa lo rechazó; se reintenta en la siguiente corrida |
+| `ERROR` | Siesa lo rechazó de forma definitiva; se reintenta en la siguiente corrida |
 | `AMBIGUO` | No se sabe si Siesa lo recibió. **Nunca se reenvía automáticamente** |
-| `CANCELADO` | Documento de un día previo no enviado (`PLANNED` con 0 intentos o `ERROR`), cancelado al iniciar antes de planificar los nuevos destinos |
+| `CANCELADO` | Documento de un día previo no enviado (`PLANNED` con 0 intentos o `ERROR`) cuyo CEI no quedó OK; o documento sin líneas activas tras los descartes |
 
-Secuencia: se guarda **todo el plan** antes de enviar; la CEI se envía antes que las CSA; si la CEI falla o queda `AMBIGUO`, las CSA quedan **bloqueadas**. Si el guardado del plan quedó incompleto (la CEI espera N CSA y hay otro número guardado) se reporta `PLAN_INCOMPLETO`, no se envía nada y se cuenta como fallo.
+Secuencia por tienda:
+
+1. Se guarda **todo el plan** antes de enviar. Cada par CEI+CSA de una tienda viaja **completo** en la misma llamada de upsert (nunca se parte), y los lotes se reducen a la mitad si una llamada supera el límite de tamaño, hasta una tienda por llamada.
+2. Se envía el CEI. El CSA solo se envía **después de que el CEI quedó OK** (en la misma corrida o al reanudar).
+3. Antes de enviar el CSA se quita la atribución de los destinos cuya línea de CEI quedó descartada (solo su parte; la línea de origen se elimina únicamente si llega a 0).
+4. Si el CEI queda `ERROR`/`CANCELADO`, el CSA queda bloqueado y se reporta (el job sigue en verde). Si queda `AMBIGUO`, el CSA bloqueado cuenta como fallo (rojo).
+
+### Reintento por "Faltante Inv." (Siesa valida stock en las salidas)
+
+Cuando Siesa rechaza un documento con detalle `Faltante Inv.: -X` (y `Item:... Bodega:...`), el flujo lo corrige y reenvía **el mismo documento**:
+
+- **Fase de ajuste (hasta 5 rondas):** línea de CEI `+= ceil(X)`; línea de CSA `-= ceil(X)` con piso en 0 (una línea en 0 queda `DESCARTADA`). El recorte del CSA se toma de la atribución de menor prioridad (mayor `orden`) y se reporta `SIN_STOCK` por destino.
+- **Fase de descarte (hasta 5 rondas):** las líneas que Siesa sigue rechazando se descartan y el documento se reenvía sin ellas.
+- **Tope duro: 11 POST por documento** (1 inicial + 5 + 5). Agotado el tope, o ante un rechazo que no se puede corregir (autenticación, conector, forma del payload), el documento queda `ERROR`.
+- Cada reintento guarda `SENDING` con el payload **ajustado** antes de enviarlo. Un `AMBIGUO` detiene ese documento sin reintentar. El guardado del resultado se reintenta 3 veces; si aun así falla es un fallo de persistencia (rojo).
+- La numeración `NRO_REGISTRO` se recalcula en cada envío (sin huecos al descartar líneas).
+
+### Novedades
+
+Una **novedad** es un hecho de negocio que conviene revisar. Se guarda por documento (`novedades`), en las alertas de la corrida (`alertas.novedades`, ordenadas con `ALTA` primero y acotadas a 50) y en una sección del correo.
+
+| Código | Severidad | Cuándo |
+|--------|-----------|--------|
+| `SIN_STOCK` | MEDIA | "No había suficiente <origen> para cubrir la transformación completa de <destino>" (faltante del planificador o recorte del CSA) |
+| `UM_DISTINTA` | INFO | El origen y el destino tienen UM distinta; esa línea no se planificó |
+| `LINEA_AJUSTADA` | INFO | Una línea cambió de cantidad por un faltante de Siesa |
+| `LINEA_DESCARTADA` | MEDIA | Una línea fue descartada porque Siesa la siguió rechazando |
+| `CEI_RECHAZADO` | ALTA | Siesa rechazó el CEI completo de la tienda (no se contabilizó) |
+| `CSA_RECHAZADO` | ALTA | Siesa rechazó el CSA completo de la tienda |
+| `CSA_DESCARTADA_TOTAL` | ALTA | Se descartaron todas las líneas del CSA; solo se contabilizó el CEI |
+
+`BLOQUEADO_LEGADO` y `LEGADO_PENDIENTE` **no** son novedades: son marcas de omitido/anomalía del corte con el flujo anterior.
+
+### Color del job (verde / rojo)
+
+| Color | Situación |
+|-------|-----------|
+| Verde (exit 0) | Corrida normal, **con o sin novedades**, incluidas las ALTA: CEI rechazado por faltante, CSA descartado o rechazado, CSA bloqueado detrás de un CEI `ERROR`/`CANCELADO`, destinos omitidos, `LEGADO_PENDIENTE` |
+| Rojo (exit 1) | `AMBIGUO` (nuevo o `SENDING` que pasó a `AMBIGUO`); CSA bloqueado detrás de un CEI `AMBIGUO`; fallo al guardar (plan, `SENDING` o resultado); corrida abortada; `PLAN_INCOMPLETO`; `FECHA DESFASADA`; **fallo sistémico** |
+
+**Fallo sistémico:** se envió al menos un documento en la corrida y **todos** los enviados terminaron `ERROR` por motivos que no son de faltante (autenticación, conector, forma del payload). Una mezcla con al menos un documento `OK`, o `ERROR` por agotar el tope de faltante, **no** es sistémico. Motivo: `sync-pos.yml` solo corre si este job termina en verde, así que un problema general de Siesa debe frenar la sincronización de ventas.
+
+### Corte con el flujo anterior (por destino)
+
+Las filas de la tabla legada son historial de solo lectura. Dentro de la ventana de reanudación:
+
+- Un destino que ya tiene fila legada para la misma fecha/tienda se **excluye** de los documentos nuevos; los demás destinos de esa tienda se planifican normal. Un destino se procesa por **un solo camino** (legado o nuevo), nunca por ambos.
+- CEI legado en `SENDING`/`AMBIGUO`: ese destino queda bloqueado (`BLOQUEADO_LEGADO`).
+- CSA legado todavía `PLANNED`/`ERROR`: se reporta `LEGADO_PENDIENTE` (verde, no reserva stock, **nunca se reenvía**).
+
+**Checklist previo al corte:** antes de habilitar `TRANSF_NEG_HABILITADO`, consultar las filas legadas `PLANNED`, `ERROR`, `SENDING` o `AMBIGUO` de los últimos 7 días y resolverlas a mano (ver "Resolución manual de un AMBIGUO").
 
 ### Ítem origen sin fila de inventario (stock desconocido)
 
 La consulta de inventario de Connekta **no tiene `ORDER BY`**, por lo que la paginación puede **omitir filas**. Por eso un ítem origen que no aparece en la consulta para esa bodega se trata como **stock desconocido, no como cero**:
 
-- Al recorrer los orígenes de un destino por prioridad, si se llega a un origen **sin fila** antes de cubrir la cantidad negativa, se **omite el destino completo** (ni CEI ni CSA) y se reporta como omitido `ORIGEN_SIN_DATO` (bodega, destino y código del origen faltante). Se reintenta de forma natural en la corrida de la noche siguiente.
+- Al recorrer los orígenes de un destino por prioridad, si se llega a un origen **sin fila** antes de cubrir la cantidad negativa, se **omite ese destino** (no entra al CEI ni al CSA de la tienda) y se reporta como omitido `ORIGEN_SIN_DATO` (bodega, destino y código del origen faltante). Se reintenta de forma natural en la corrida de la noche siguiente.
 - Si la cantidad ya quedó cubierta por orígenes anteriores, los orígenes faltantes posteriores no importan y el plan sigue normal.
-- Una fila **presente** con stock 0 o negativo sí es información: se pasa al siguiente origen y, si ningún origen tiene stock, se envía solo la CEI. Los orígenes saltados por UM distinta mantienen su comportamiento.
+- Una fila **presente** con stock 0 o negativo sí es información: se pasa al siguiente origen y, si ningún origen tiene stock, el destino va solo en el CEI con la novedad `SIN_STOCK`. Los orígenes saltados por UM distinta generan la novedad `UM_DISTINTA`.
 - **Recomendación:** agregar `ORDER BY IdBodega, CodigoItem` a la query de Connekta; con un orden estable, la ausencia de fila podría volver a tratarse como cero. Si el mismo par destino/origen se reporta de forma recurrente, la fila realmente no existe (cero real) y conviene revisar esa equivalencia.
 
-### Reserva de stock por CSA pendientes de corridas previas
+### Reserva de stock por CSA pendientes o en vuelo
 
-El ledger de orígenes parte del inventario vivo y **descuenta** la cantidad de toda CSA de corridas anteriores en estado `PLANNED` o `ERROR`, es decir, las que todavía se reenviarán automáticamente. Las `AMBIGUO` y `SENDING` (que pasa a `AMBIGUO` al reanudar) **no** descuentan: nunca se reenvían solas, y si llegaron a Siesa el inventario vivo ya las refleja; descontarlas contaría dos veces, achicaría el origen disponible y produciría CEI completa con CSA parcial (inflado de inventario). Las `OK` (ya están en el inventario) y las `CANCELADO` tampoco descuentan. `disponible_snapshot` de cada CSA registra la disponibilidad viva del origen (descontando solo las asignaciones previas de la misma corrida), sin la reserva. Se calcula con las filas posteriores a la cancelación de días previos, en centavos enteros y con piso en 0. Sin esto, una CSA fallida de ayer más otra CSA de hoy sobre el mismo origen lo dejarían sobregirado (Siesa no valida stock en salidas).
+El ledger de orígenes parte del inventario vivo y **descuenta** las líneas (no descartadas) de todo CSA del mismo entorno en estado `PLANNED`, `ERROR`, `SENDING` o `AMBIGUO`. Criterio conservador: un documento `SENDING`/`AMBIGUO` pudo haber llegado a Siesa y su stock ya no estar disponible; Siesa **sí valida stock en las salidas** (`Faltante Inv.`), por eso no conviene prometer stock que está comprometido. Los `OK` (ya reflejados en el inventario) y `CANCELADO` no descuentan. `disponible_snapshot` de cada línea registra la disponibilidad viva del origen sin la reserva. Todo se calcula con los documentos posteriores a la cancelación de días previos, en unidades de 1e-4 y con piso en 0.
 
 ### Corrida programada que cruza la medianoche de Bogotá
 
-Si la corrida disparada por `schedule` (`GITHUB_EVENT_NAME=schedule`) cae en una fecha ya pasada, el modo pasa a `SOLO_REANUDAR` y no se planifica nada. Ahora eso se reporta como alerta `FECHA DESFASADA` en el correo y cuenta como fallo (el job queda en **rojo**, `CON_FALLO`). La seguridad de solo-reanudar no cambia: no planifica ni envía documentos nuevos. El dispatch manual con fecha pasada sigue siendo legítimo y no alerta.
+Si la corrida disparada por `schedule` (`GITHUB_EVENT_NAME=schedule`) cae en una fecha ya pasada, el modo pasa a `SOLO_REANUDAR` y no se planifica nada. Eso se reporta como alerta `FECHA DESFASADA` en el correo y cuenta como fallo (el job queda en **rojo**, `CON_FALLO`). La seguridad de solo-reanudar no cambia: no planifica ni envía documentos nuevos. El dispatch manual con fecha pasada sigue siendo legítimo y no alerta.
 
 ### Notificación
 
-`notifier.sendTransformacionNegativosNotification` envía un correo por corrida no dry-run con: documentos procesados, errores (sin costo/UM, filas de inventario duplicadas y conflictivas), `AMBIGUO` ("CEI possibly sent, CSAs blocked, manual review"), anomalías `PLAN_INCOMPLETO`, reintentos de CSA de días previos, omitidos (UM distinta, sin stock, bloqueado, `ORIGEN_SIN_DATO`) y las páginas/filas leídas de la consulta. El job queda en **rojo** ante fallos de Siesa, `AMBIGUO`, destinos bloqueados, `PLAN_INCOMPLETO` o errores al guardar.
+`notifier.sendTransformacionNegativosNotification` envía un correo por corrida no dry-run con: tabla de documentos por tienda (CO, bodega, CEI/CSA, líneas, cantidad total, resultado), una **sección de novedades** en español (agrupadas por tienda, `ALTA` primero), errores de planeación (sin costo/UM, inventario duplicado), `AMBIGUO`, `PLAN_INCOMPLETO`, reintentos de CSA de días previos, omitidos y las páginas/filas leídas de la consulta. El asunto lleva `[ALERTA]` cuando hay fallos o alguna novedad `ALTA`.
 
 ### Resolución manual de un AMBIGUO
 
-1. Buscar en Siesa si el documento (CEI o CSA) existe, con la nota `Transformacion negativos <fecha> CO <co>` y el ítem/bodega de la alerta.
-2. Si **existe**: actualizar la fila a `status = 'OK'` en `sps_transformaciones_negativos`.
+1. Buscar en Siesa si el documento (CEI o CSA) existe, con la nota `Transformacion negativos <fecha> CO <co> BOD <bodega> - <CEI|CSA>`.
+2. Si **existe**: actualizar la fila a `status = 'OK'` en `sps_transformaciones_negativos_docs`.
 3. Si **no existe**: actualizar la fila a `status = 'ERROR'`; la siguiente corrida la reintenta.
-4. Si el AMBIGUO es una **CEI**, las CSA de ese destino siguen bloqueadas hasta resolverla.
-5. Nunca borrar la fila ni reenviar a mano un documento que Siesa sí aceptó.
+4. Si el AMBIGUO es un **CEI**, el CSA de esa tienda sigue bloqueado hasta resolverlo.
+5. Nunca borrar la fila ni reenviar a mano un documento que Siesa sí aceptó. El `payload` guardado en la fila es el exacto del último intento.
 
 ### Dry run
 
 ```bash
-# Muestra el plan y los payloads; no envía, no escribe en Supabase, no manda correo (NO ejecutar contra PROD sin revisar)
-TRANSF_DRY_RUN=1 TRANSF_FECHA=2026-10-29 ENTORNO_SIESA_TRANSF=QA node scripts/runTransformacionNegativosCron.js
+# Muestra por tienda los documentos que se enviarían (líneas, atribución por destino, novedades y payload exacto).
+# No envía, no escribe en Supabase y no manda correo.
+TRANSF_DRY_RUN=1 TRANSF_FECHA=2026-10-29 node scripts/runTransformacionNegativosCron.js
 ```
 
-### Checklist de QA (manual)
+En GitHub: `workflow_dispatch` con `dry_run=true` (opcionalmente `cos=005`). La salida imprime, por cada documento, el resumen, las líneas con sus orígenes/destinos, las novedades y el JSON del payload, y al final el listado de novedades para revisión. Con la migración 010 sin aplicar, el dry run lo tolera (asume que no hay documentos guardados).
 
-- [ ] Ejecutar las migraciones 007 y 008 en Supabase.
-- [ ] Dry run en QA; revisar el plan y el correo/log.
-- [ ] Corrida real en QA: verificar que el conector acepta una CSA con costo distinto de cero y documentos reanudados con fecha pasada.
-- [ ] Confirmar columnas de la query de inventario y la política cuando la UM de origen y destino difieren.
-- [ ] PROD: confirmar `TRANSF_NEG_QUERY_INVENTARIO` y los destinatarios antes del primer cron.
+### Puesta en marcha (en orden)
+
+1. Aplicar la migración **010** en Supabase (antes de la API, el panel y cualquier envío real).
+2. **Dry run en PROD** (`dry_run=true`, `entorno=PROD`) y revisión de los documentos y novedades impresos.
+3. Revisar el **checklist previo al corte** (filas legadas pendientes de los últimos 7 días).
+4. Fusionar los PR del sync, luego desplegar la API y después el panel.
+5. **Primer envío real limitado:** `workflow_dispatch` con `entorno=PROD`, `dry_run=false` y `cos=<CO elegido>`. Observar en ese envío: aceptación de CEI/CSA con varias líneas, rechazo atómico del documento completo, la semántica de `Faltante` (CEI `+= X`) y el formato de `NRO_REGISTRO`; si algo contradice el diseño, detenerse y revisar.
+6. Ampliar a más COs (lista) y por último dejar `cos` vacío (todas las tiendas). El cron nocturno siempre corre con `TRANSF_NEG_COS` vacío.
+
+**Rollback:** `TRANSF_NEG_HABILITADO=false` (el job no corre); si hace falta, revertir los PR del sync (vuelve el flujo por destino sobre la tabla legada). La tabla nueva puede quedar: la API y el panel toleran tabla vacía o ausente.
+
+### Checklist
+
+- [ ] Migraciones 007, 008 y **010** aplicadas en Supabase.
+- [ ] Dry run en PROD revisado (documentos por tienda, atribución, novedades).
+- [ ] Filas legadas pendientes de los últimos 7 días resueltas.
+- [ ] Primer envío real limitado con `cos` y resultados observados.
+- [ ] Confirmar columnas de la query de inventario y la política de costo del CSA (costo del origen).
+- [ ] PROD: confirmar `TRANSF_NEG_QUERY_INVENTARIO` y los destinatarios antes de dejar el cron con todas las tiendas.
 
 ---
 

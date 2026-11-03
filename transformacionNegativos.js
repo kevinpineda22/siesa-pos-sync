@@ -1,25 +1,36 @@
 // ============================================================================
 //  transformacionNegativos.js - NEGATIVE INVENTORY TRANSFORMATION (I/O orchestrator)
 // ============================================================================
-//  Clears negative stock of destination meat items: for every negative destination it sends a CEI
-//  (entry, destination) and one CSA (exit) per origin chosen by the pure planner
-//  (transformacionNegativosPlan.js). Documents go to the same Siesa connector as the tocino job.
+//  Clears negative stock of destination meat items. For every STORE (co, bodega) with negative destination items it
+//  sends ONE CEI document (entry, one line per negative destination) and ONE CSA document (exit, one line per origin
+//  item, aggregated across the destinations of the store). Both are built by the pure per-store planner
+//  (transformacionNegativosPlan.js) and sent by the per-document sender (transformacionNegativosEnvio.js), which
+//  corrects Siesa "Faltante Inv." rejections (adjust, then drop lines). Documents go to the same Siesa connector as
+//  the tocino job.
 //
-//  All I/O goes through the injectable `deps` argument so the state machine can be tested with fakes.
-//  The tocino job (transformacionCarnes.js) is NOT modified: only its exported helpers are reused and
-//  they are pointed at the new tables through injected writers.
+//  All I/O goes through the injectable `deps` argument so the state machine can be tested with fakes; the pure
+//  decisions (resume, batching, colour of the job) live in transformacionNegativosFlujo.js.
+//  The tocino job (transformacionCarnes.js) is NOT modified: only its exported helpers are reused.
 //
-//  State machine per row: PLANNED -> SENDING -> OK | ERROR | AMBIGUO (+ CANCELADO for stale prior-day rows).
-//  See the SDD design (inventory-negative-transformations) for the full rules.
+//  State machine per document row (table sps_transformaciones_negativos_docs, migration 010):
+//  PLANNED -> SENDING -> OK | ERROR | AMBIGUO (+ CANCELADO for stale prior-day documents).
+//  The legacy per-destination table (sps_transformaciones_negativos) is read-only history: it is only read to
+//  skip/block destinations the legacy flow already owns (cutover), never written.
 // ============================================================================
 const axios = require('axios');
 const notifier = require('./notifier');
 const { trazaCorrida, insertarTolerante } = require('./corridaTraza');
 const {
-    fechaBogota, ahoraBogota, validarFechaObjetivo, clasificarErrorSiesa,
-    guardarConReintento, registrarCorrida, ENTORNO
+    fechaBogota, ahoraBogota, validarFechaObjetivo, clasificarErrorSiesa, registrarCorrida, ENTORNO
 } = require('./transformacionCarnes');
-const { planificarTransformaciones, UNIDAD_NEGOCIO_POR_DEFECTO, resolverPermitirDiaEnCurso } = require('./transformacionNegativosPlan');
+const {
+    planificarNegativosPorTienda, UNIDAD_NEGOCIO_POR_DEFECTO, resolverPermitirDiaEnCurso, parsearCosFiltro
+} = require('./transformacionNegativosPlan');
+const { enviarTienda, falloSistemico, guardarConReintento } = require('./transformacionNegativosEnvio');
+const {
+    INSTRUCCION_AMBIGUO, agruparPorTienda, coPermitido, esTablaFaltante, guardarPlanPorPares, planificarReanudacion,
+    detectarPlanIncompleto, calcularFallos, recolectarNovedades, describirDocumento, filaDetalle, idDoc
+} = require('./transformacionNegativosFlujo');
 
 const CIA = process.env.CIA || '7375';
 const SIESA_DOMAIN = ENTORNO === 'QA' ? 'serviciosqa.siesacloud.com' : 'servicios.siesacloud.com';
@@ -37,14 +48,13 @@ const DIAS_REANUDAR_POR_DEFECTO = 7;
 const TAM_PAGINA = parseInt(process.env.TRANSF_TAM_PAGINA || '1000');
 const TOPE_PAGINAS = 2000;
 
-const TABLA = 'sps_transformaciones_negativos';
+const TABLA_LEGADO = 'sps_transformaciones_negativos';          // read-only history (legacy per-destination rows)
+const TABLA_DOCS = 'sps_transformaciones_negativos_docs';       // per-store documents (migration 010)
 const TABLA_CORRIDAS = 'sps_transformaciones_negativos_corridas';
-const CONFLICTO = 'entorno,fecha,co,bodega,item_destino,tipo_dto,item_origen';
+const CONFLICTO_DOCS = 'entorno,fecha,co,bodega,tipo_dto';
 
 const MOTIVO_CEI_POSIBLEMENTE_ENVIADO = 'CEI possibly sent, CSAs blocked, manual review';
-const INSTRUCCION_AMBIGUO = 'verify manually in Siesa whether the document exists before resending';
-
-const ESTADOS_REINTENTABLES = ['PLANNED', 'ERROR'];
+const ESTADOS_ENVIABLES = ['PLANNED', 'ERROR'];
 
 // ──────────────────────────────────────────────────────────
 // Pure helpers
@@ -83,17 +93,6 @@ function restarDias(fecha, dias) {
     return d.toISOString().slice(0, 10);
 }
 
-function claveDestino(f) {
-    return `${f.fecha}|${f.co}|${f.bodega}|${f.item_destino}`;
-}
-
-function claveFila(f) {
-    return `${f.fecha}|${f.co}|${f.bodega}|${f.item_destino}|${f.tipo_dto}|${f.item_origen}`;
-}
-
-function idFila(f) {
-    return { fecha: f.fecha, co: f.co, bodega: f.bodega, item_destino: f.item_destino, tipo_dto: f.tipo_dto, item_origen: f.item_origen };
-}
 
 // TRANSF_NEG_ITEMS_EXCLUIDOS: comma separated integer item codes that ADD to the default exclusions.
 // A token that is not an integer item code is a configuration error (fail fast, never silently dropped).
@@ -131,7 +130,9 @@ function leerConfig(opciones) {
         columnas: columnas || {},
         excluidos: opciones.excluidos !== undefined ? opciones.excluidos : parseLista(process.env.TRANSF_NEG_ITEMS_EXCLUIDOS),
         diasReanudar: Number.isFinite(dias) && dias >= 0 ? dias : DIAS_REANUDAR_POR_DEFECTO,
-        unidadNegocio: opciones.unidadNegocio || process.env.TRANSF_NEG_UNIDAD_NEGOCIO || UNIDAD_NEGOCIO_POR_DEFECTO
+        unidadNegocio: opciones.unidadNegocio || process.env.TRANSF_NEG_UNIDAD_NEGOCIO || UNIDAD_NEGOCIO_POR_DEFECTO,
+        // TRANSF_NEG_COS: comma separated CO ids to process (empty = every store). Used for the first limited send.
+        cos: parsearCosFiltro(opciones.cos !== undefined ? opciones.cos : process.env.TRANSF_NEG_COS)
     };
 }
 
@@ -144,7 +145,7 @@ function resumirCorridaNegativos(resultado, meta = {}) {
     else if ((resultado.destinos || 0) === 0 && (resultado.documentos || 0) === 0) estado = 'SIN_NEGATIVOS';
     else estado = 'PROCESADO';
 
-    const partes = [`mode=${resultado.modo}`, `destinations=${resultado.destinos}`, `documents_ok=${resultado.documentos}`, `failures=${resultado.fallos}`];
+    const partes = [`mode=${resultado.modo}`, `destinations=${resultado.destinos}`, `documents_ok=${resultado.documentos}`, `failures=${resultado.fallos}`, `novedades=${(a.novedades || []).length}`];
     if (meta.filasInventario !== undefined && meta.filasInventario !== null) {
         partes.push(`inventory_rows=${meta.filasInventario}`, `inventory_pages=${meta.paginasInventario}`);
     }
@@ -170,8 +171,9 @@ function getSupabase() {
     return require('./logger').supabase;
 }
 
+// Server-managed and in-memory-only fields never travel in an upsert.
 function sinCamposDeServidor(fila) {
-    const { id, created_at, ...resto } = fila;
+    const { id, created_at, posiblementeEnviado, ...resto } = fila;
     return resto;
 }
 
@@ -184,51 +186,35 @@ async function cargarReglasDefault() {
     return { equivalencias: eq.data || [], prioridad: pr.data || [] };
 }
 
-async function cargarFilasDefault({ entorno, desde, hasta }) {
+async function leerVentanaPaginada(tabla, { entorno, desde, hasta }) {
     const sb = getSupabase();
     const TAM = 1000;
     const todas = [];
     for (let desdeFila = 0; ; desdeFila += TAM) {
-        const { data, error } = await sb.from(TABLA).select('*')
+        const { data, error } = await sb.from(tabla).select('*')
             .eq('entorno', entorno).gte('fecha', desde).lte('fecha', hasta)
             .order('id', { ascending: true }).range(desdeFila, desdeFila + TAM - 1);
-        if (error) throw new Error(`Could not read ${TABLA}: ${error.message}`);
+        if (error) throw Object.assign(new Error(`Could not read ${tabla}: ${error.message}`), { code: error.code });
         todas.push(...(data || []));
         if (!data || data.length < TAM) break;
     }
     return todas;
 }
 
-async function guardarFilaDefault(fila) {
-    const { error } = await getSupabase().from(TABLA).upsert(sinCamposDeServidor(fila), { onConflict: CONFLICTO });
-    if (error) throw new Error(`Could not save to ${TABLA}: ${error.message}`);
+const cargarDocsDefault = (ventana) => leerVentanaPaginada(TABLA_DOCS, ventana);
+// Legacy per-destination rows: read-only, used only for the cutover rules.
+const cargarLegadoDefault = (ventana) => leerVentanaPaginada(TABLA_LEGADO, ventana);
+
+async function upsertDocs(filas) {
+    const { error, status } = await getSupabase().from(TABLA_DOCS).upsert(filas.map(sinCamposDeServidor), { onConflict: CONFLICTO_DOCS });
+    if (error) throw Object.assign(new Error(`Could not save to ${TABLA_DOCS}: ${error.message}`), { code: error.code, status });
 }
 
-// Splits rows into batches on destination boundaries: all rows of one destination (its CEI and CSAs) always
-// travel in the same batch, i.e. in the same atomic upsert. A destination larger than `tam` gets its own batch.
-function construirLotes(filas, tam) {
-    const porDestino = new Map();
-    for (const f of filas) {
-        const k = claveDestino(f);
-        if (!porDestino.has(k)) porDestino.set(k, []);
-        porDestino.get(k).push(f);
-    }
-    const lotes = [];
-    let actual = [];
-    for (const grupo of porDestino.values()) {
-        if (actual.length > 0 && actual.length + grupo.length > tam) { lotes.push(actual); actual = []; }
-        actual.push(...grupo);
-    }
-    if (actual.length > 0) lotes.push(actual);
-    return lotes;
-}
+// One document row (state changes during the send loop).
+const guardarDocDefault = (fila) => upsertDocs([fila]);
 
-async function guardarLoteDefault(filas) {
-    for (const lote of construirLotes(filas, 500)) {
-        const { error } = await getSupabase().from(TABLA).upsert(lote.map(sinCamposDeServidor), { onConflict: CONFLICTO });
-        if (error) throw new Error(`Could not save plan to ${TABLA}: ${error.message}`);
-    }
-}
+// One upsert call with a batch of whole store pairs; batching/halving is done by guardarPlanPorPares.
+const guardarLoteDefault = (filas) => upsertDocs(filas);
 
 async function insertarCorridaDefault(fila) {
     // Tolerant to migration 009 not being applied yet (retries once without the trace columns).
@@ -306,8 +292,9 @@ async function notificarDefault(resultado) {
 const DEPS_POR_DEFECTO = {
     cargarReglas: cargarReglasDefault,
     leerInventario: leerInventarioDefault,
-    cargarFilas: cargarFilasDefault,
-    guardarFila: guardarFilaDefault,
+    cargarDocs: cargarDocsDefault,
+    cargarLegado: cargarLegadoDefault,
+    guardarDoc: guardarDocDefault,
     guardarLote: guardarLoteDefault,
     insertarCorrida: insertarCorridaDefault,
     enviar: enviarDefault,
@@ -324,76 +311,34 @@ function registrarCorridaNegativos(fila, deps = {}) {
 }
 
 // ──────────────────────────────────────────────────────────
-// Sending of one stored row (SENDING is persisted BEFORE the POST)
+// Main flow
 // ──────────────────────────────────────────────────────────
-// Returns { status, abortada }. `abortada` = persistence failed and the whole run must stop.
-async function enviarFila(row, ctx) {
-    const { deps, dryRun, detalle, alertas } = ctx;
-    const id = idFila(row);
-    const etiqueta = `${row.tipo_dto} CO ${row.co} ${row.bodega} dest ${row.item_destino}${row.tipo_dto === 'CSA' ? ` orig ${row.item_origen}` : ''}`;
+const ordenTiendas = (a, b) =>
+    a.fecha.localeCompare(b.fecha) ||
+    a.co.localeCompare(b.co, 'en', { numeric: true }) ||
+    a.bodega.localeCompare(b.bodega, 'en', { numeric: true });
 
-    if (dryRun) {
-        console.log(`   [dry-run] ${etiqueta} qty=${row.cantidad}\n${JSON.stringify(row.payload, null, 2)}`);
-        detalle.push({ ...id, cantidad: row.cantidad, resultado: 'DRY_RUN', error: null });
-        return { status: 'DRY_RUN', abortada: false };
-    }
+const MENSAJE_MIGRACION = 'Table sps_transformaciones_negativos_docs is missing: apply migration 010 before running.';
 
-    // Pre-send marker: if this cannot be persisted, nothing is posted and the run stops.
-    const sending = { ...row, status: 'SENDING', intentos: (row.intentos || 0) + 1, updated_at: new Date().toISOString() };
-    try {
-        await guardarConReintento(sending, deps.guardarFila, deps.esperar);
-    } catch (e) {
-        console.error(`   Could not persist SENDING for ${etiqueta}: ${e.message}. Nothing was sent; aborting the run.`);
-        alertas.erroresGuardado.push({ ...id, fase: 'SENDING', ok: false, error: e.message });
-        return { status: row.status, abortada: true, enviado: false };
-    }
-    Object.assign(row, sending);
+function sumarCeiLineas(docs) {
+    return docs.filter(d => d.tipo_dto === 'CEI').reduce((acc, d) => acc + (d.lineas_activas || 0), 0);
+}
 
-    console.log(`   Sending ${etiqueta} qty=${row.cantidad}`);
-    let res;
-    try {
-        res = await deps.enviar(row.payload);
-    } catch (e) {
-        res = { ok: false, ambiguo: true, respuesta: null, mensaje: e.message };
-    }
-    const status = res.ok ? 'OK' : (res.ambiguo ? 'AMBIGUO' : 'ERROR');
-    const error = res.ok ? null : (res.ambiguo ? `AMBIGUO: ${res.mensaje}` : res.mensaje);
-    const final = { ...row, status, respuesta: res.respuesta ?? null, error, updated_at: new Date().toISOString() };
-
-    // Backup in the log BEFORE saving: allows manual reconciliation from CI logs if Supabase fails.
-    console.log(`   [BACKUP ${etiqueta}] row to save: ${JSON.stringify({ ...final, payload: undefined })}`);
-    console.log(`   [BACKUP ${etiqueta}] Siesa response: ${JSON.stringify(res.respuesta)}`);
-
-    if (status === 'ERROR') {
-        console.error(`   ${row.tipo_dto} rejected by Siesa: ${res.mensaje}`);
-        alertas.erroresSiesa.push({ ...id, tipo: row.tipo_dto, error: res.mensaje });
-    } else if (status === 'AMBIGUO') {
-        console.error(`   ${row.tipo_dto} outcome AMBIGUO: ${res.mensaje}. ${INSTRUCCION_AMBIGUO}.`);
-        alertas.ambiguos.push({ ...id, tipo: row.tipo_dto, error, previo: false });
-    } else {
-        console.log(`   ${row.tipo_dto} OK: ${res.mensaje}`);
-    }
-    detalle.push({ ...id, cantidad: row.cantidad, resultado: status, error });
-
-    try {
-        await guardarConReintento(final, deps.guardarFila, deps.esperar);
-        Object.assign(row, final);
-        return { status, abortada: false, enviado: true };
-    } catch (e) {
-        // The row stays SENDING in storage (it becomes AMBIGUO on the next run). In memory it is AMBIGUO
-        // whenever Siesa may have created the document, so nothing depending on it is sent.
-        console.error(`   ${e.message}${res.ok ? ' - Siesa DID accept the document: do NOT resend by hand.' : ''}`);
-        alertas.erroresGuardado.push({ ...id, fase: 'RESULTADO', ok: res.ok, error: e.message });
-        row.status = res.ok || res.ambiguo ? 'AMBIGUO' : status;
-        row.posiblementeEnviado = !!(res.ok || res.ambiguo);
-        console.error('   Aborting the rest of the run (no further documents). Reconcile with the BACKUP log lines.');
-        return { status: row.status, abortada: true, enviado: true };
+// Dry-run review: prints, per store, the documents that WOULD be sent (summary, lines, attribution, novedades and the
+// exact payload). Nothing is sent or written.
+function imprimirDryRun(tienda, esDiaPrevio, detalle) {
+    const enviables = (d) => d && ESTADOS_ENVIABLES.includes(d.status);
+    const ceiOk = tienda.cei.status === 'OK';
+    const aEnviar = [];
+    if (!esDiaPrevio && enviables(tienda.cei)) aEnviar.push(tienda.cei);
+    if (enviables(tienda.csa) && (ceiOk || (!esDiaPrevio && enviables(tienda.cei)))) aEnviar.push(tienda.csa);
+    for (const d of aEnviar) {
+        for (const linea of describirDocumento(d)) console.log(`   [dry-run] ${linea}`);
+        console.log(`   [dry-run] payload ${d.tipo_dto} CO ${d.co} ${d.bodega}:\n${JSON.stringify(d.payload, null, 2)}`);
+        detalle.push(filaDetalle(d, 'DRY_RUN'));
     }
 }
 
-// ──────────────────────────────────────────────────────────
-// Main flow
-// ──────────────────────────────────────────────────────────
 async function transformacionNegativos(opciones = {}, depsInyectadas = {}) {
     const deps = { ...DEPS_POR_DEFECTO, ...depsInyectadas };
     const ahora = opciones.ahora || new Date();
@@ -419,14 +364,15 @@ async function transformacionNegativos(opciones = {}, depsInyectadas = {}) {
     }
 
     console.log('==========================================');
-    console.log('NEGATIVE INVENTORY TRANSFORMATION');
+    console.log('NEGATIVE INVENTORY TRANSFORMATION (one CEI + one CSA per store)');
     console.log(`   Date=${fecha} | Entorno=${ENTORNO} | Mode=${modo} | DryRun=${dryRun ? 'YES' : 'no'}`);
     console.log('==========================================');
     if (permitirDiaEnCurso) console.log('   Same-day override active (manual early-close run): 21:30 COT guard skipped.');
+    if (config.cos.length > 0) console.log(`   CO filter active (TRANSF_NEG_COS): only CO ${config.cos.join(', ')} are planned and sent.`);
 
     const alertas = {
         erroresSiesa: [], ambiguos: [], erroresGuardado: [], bloqueados: [], cancelados: [],
-        anomalias: [], omitidos: [], errores: [], reintentosDiasPrevios: []
+        anomalias: [], omitidos: [], errores: [], reintentosDiasPrevios: [], novedades: []
     };
     // A scheduled run must always target today's Bogota date. If it lands on a past date (GitHub delayed the
     // cron past Bogota midnight) it would silently degrade to resume-only and plan nothing: raise it as a failure.
@@ -439,70 +385,39 @@ async function transformacionNegativos(opciones = {}, depsInyectadas = {}) {
         console.error(`   ${alertas.fechaDesfasada.motivo}`);
     }
     const detalle = [];
-    const ctx = { deps, dryRun, detalle, alertas };
-
-    // 2) Load stored rows within the lookback window (never beyond the target date).
-    const desde = restarDias(fecha, config.diasReanudar);
-    let cargadas = [];
-    try {
-        cargadas = await deps.cargarFilas({ entorno: ENTORNO, desde, hasta: fecha });
-    } catch (e) {
-        if (!dryRun) throw e; // never send without knowing what was already sent
-        console.warn(`[dry-run] Could not read stored rows (${e.message}). Assuming none.`);
-    }
-    const filas = new Map();
-    for (const f of cargadas) {
-        const fila = { ...f, fecha: String(f.fecha).slice(0, 10) };
-        if (fila.fecha > fecha || fila.fecha < desde) continue;
-        filas.set(claveFila(fila), fila);
-    }
 
     const guardar = async (fila) => {
         if (dryRun) return;
-        await guardarConReintento(fila, deps.guardarFila, deps.esperar);
+        await guardarConReintento(fila, deps.guardarDoc, deps.esperar);
     };
 
-    // 3) Rows left in SENDING by a crashed/failed run become AMBIGUO: never resent, never cancelled.
-    for (const fila of filas.values()) {
-        if (fila.status !== 'SENDING') continue;
-        const nueva = {
-            ...fila, status: 'AMBIGUO', updated_at: new Date().toISOString(),
-            error: `AMBIGUO: left in SENDING by a previous run (crash or failed save). ${INSTRUCCION_AMBIGUO}.`
-        };
-        await guardar(nueva); // a persistence failure here aborts before anything is sent
-        filas.set(claveFila(nueva), nueva);
-        alertas.ambiguos.push({ ...idFila(nueva), tipo: nueva.tipo_dto, error: nueva.error, previo: true });
-        console.error(`   ${nueva.tipo_dto} CO ${nueva.co} ${nueva.bodega} dest ${nueva.item_destino} was SENDING: now AMBIGUO (not resent).`);
+    // 2) Load stored documents within the lookback window (never beyond the target date).
+    const desde = restarDias(fecha, config.diasReanudar);
+    let cargados = [];
+    try {
+        cargados = await deps.cargarDocs({ entorno: ENTORNO, desde, hasta: fecha });
+    } catch (e) {
+        if (!dryRun) throw esTablaFaltante(e) ? Object.assign(new Error(MENSAJE_MIGRACION), { code: 'MIGRACION_010' }) : e; // never send without knowing what was already sent
+        console.warn(`[dry-run] Could not read stored documents (${e.message}). Assuming none.`);
     }
+    const enVentana = cargados
+        .map(d => ({ ...d, fecha: String(d.fecha).slice(0, 10) }))
+        .filter(d => d.fecha <= fecha && d.fecha >= desde);
 
-    // 4) Cancel stale prior-day destinations BEFORE planning new ones.
-    const porDestino = new Map();
-    for (const f of filas.values()) {
-        const k = claveDestino(f);
-        if (!porDestino.has(k)) porDestino.set(k, []);
-        porDestino.get(k).push(f);
-    }
-    for (const grupo of porDestino.values()) {
-        const cei = grupo.find(f => f.tipo_dto === 'CEI');
-        if (!cei || cei.fecha >= fecha || cei.status === 'OK') continue;
-        const cancelable = (f) => f.status === 'ERROR' || (f.status === 'PLANNED' && (f.intentos || 0) === 0);
-        if (!cancelable(cei)) {
-            if (cei.status === 'PLANNED') {
-                alertas.anomalias.push({ ...idFila(cei), motivo: 'Prior-day CEI is PLANNED with attempts > 0; not cancelled, manual review.' });
-            }
-            continue; // SENDING/AMBIGUO/CANCELADO: never cancelled
-        }
-        for (const f of grupo.filter(cancelable)) {
-            const nueva = { ...f, status: 'CANCELADO', updated_at: new Date().toISOString(), error: 'CANCELADO: prior-day row not sent and CEI not OK.' };
-            await guardar(nueva);
-            filas.set(claveFila(nueva), nueva);
-            alertas.cancelados.push({ ...idFila(nueva), estadoPrevio: f.status });
-        }
-    }
+    // 3) Resume decisions: SENDING -> AMBIGUO (never resent), prior-day stores with a CEI not OK -> CANCELADO.
+    //    A persistence failure here throws before anything is sent.
+    const reanudacion = planificarReanudacion({ docs: enVentana, fecha, ahora: new Date() });
+    for (const fila of reanudacion.cambios) await guardar(fila);
+    alertas.ambiguos.push(...reanudacion.ambiguos);
+    alertas.cancelados.push(...reanudacion.cancelados);
+    alertas.anomalias.push(...reanudacion.anomalias);
+    for (const a of reanudacion.ambiguos) console.error(`   ${a.tipo_dto} CO ${a.co} ${a.bodega} was SENDING: now AMBIGUO (not resent).`);
+    for (const c of reanudacion.cancelados) console.log(`   ${c.tipo_dto} CO ${c.co} ${c.bodega} (${c.fecha}) CANCELADO (was ${c.estadoPrevio}).`);
+    let actuales = reanudacion.docs;
 
-    // 5) Plan new destinations (only when the target date is today; a past date is resume-only).
-    let destinos = 0;
+    // 4) Plan new stores (only when the target date is today; a past date is resume-only).
     let inventarioStats = null;
+    let nuevos = [];
     if (modo === 'PLANIFICAR') {
         const reglas = await deps.cargarReglas();
         if (config.excluidos !== undefined) reglas.excluidos = config.excluidos;
@@ -511,122 +426,142 @@ async function transformacionNegativos(opciones = {}, depsInyectadas = {}) {
         inventarioStats = { filas: inv.filas.length, paginas: inv.paginas, descartadas };
         console.log(`   Inventory: ${inv.filas.length} rows in ${inv.paginas} page(s) (${descartadas} discarded as unparseable).`);
 
-        const plan = planificarTransformaciones({
-            inventario, reglas, previos: [...filas.values()], fecha, entorno: ENTORNO, unidadNegocio: config.unidadNegocio
+        // Legacy per-destination history (read-only) drives the cutover rules inside the planner.
+        let legado = [];
+        try {
+            legado = (await deps.cargarLegado({ entorno: ENTORNO, desde, hasta: fecha }))
+                .map(r => ({ ...r, fecha: String(r.fecha).slice(0, 10) }));
+        } catch (e) {
+            if (!dryRun) throw e; // planning without knowing the legacy rows could process a destination twice
+            console.warn(`[dry-run] Could not read legacy rows (${e.message}). Assuming none.`);
+        }
+
+        const plan = planificarNegativosPorTienda({
+            inventario, reglas, previos: { docs: actuales, legado }, fecha, entorno: ENTORNO,
+            unidadNegocio: config.unidadNegocio, cos: config.cos
         });
         alertas.omitidos = plan.omitidos;
         alertas.errores = plan.errores;
-        const csasPorDestino = new Map();
-        for (const d of plan.documentos) {
-            if (d.tipo_dto === 'CSA') csasPorDestino.set(claveDestino(d), (csasPorDestino.get(claveDestino(d)) || 0) + 1);
-        }
-        // The CEI row carries the number of CSAs planned (in `respuesta`, unused until the first send) so a
-        // partially saved plan can be detected before the CEI is sent. It never reaches the Siesa payload.
-        const nuevas = plan.documentos.map(d => ({
-            ...d, status: 'PLANNED', intentos: 0,
-            respuesta: d.tipo_dto === 'CEI' ? { plan: { csas_planificadas: csasPorDestino.get(claveDestino(d)) || 0 } } : null,
-            error: null, updated_at: new Date().toISOString()
+        const iso = new Date().toISOString();
+        nuevos = plan.documentos.map(d => ({
+            ...d, status: 'PLANNED', intentos: 0, rondas: 0, respuesta: null, error: null, updated_at: iso
         }));
-        destinos = nuevas.filter(d => d.tipo_dto === 'CEI').length;
-        console.log(`   Plan: ${destinos} destination(s), ${nuevas.length} document(s), ${plan.omitidos.length} skipped, ${plan.errores.length} error(s).`);
+        const nTiendas = new Set(nuevos.map(d => `${d.co}|${d.bodega}`)).size;
+        console.log(`   Plan: ${nTiendas} store(s), ${nuevos.length} document(s), ${sumarCeiLineas(nuevos)} destination line(s), ${plan.omitidos.length} skipped, ${plan.errores.length} error(s).`);
 
-        // The whole plan is persisted BEFORE any send. A failure here throws: nothing has been sent.
-        if (!dryRun && nuevas.length > 0) await guardarConReintento(nuevas, deps.guardarLote, deps.esperar);
-        for (const n of nuevas) filas.set(claveFila(n), n);
+        // The whole plan is persisted BEFORE any send, whole CEI+CSA pairs per call. A failure throws: nothing sent.
+        if (!dryRun && nuevos.length > 0) await guardarPlanPorPares(nuevos, deps.guardarLote, { esperar: deps.esperar });
+        actuales = [...actuales, ...nuevos];
     } else {
         console.log('   Resume-only mode (past date): inventory is not queried and nothing new is planned.');
     }
+    const destinos = sumarCeiLineas(nuevos);
 
-    // 6) Send / resume, destination by destination (CEI first, CSAs only after CEI OK).
-    const grupos = new Map();
-    for (const f of filas.values()) {
-        const k = claveDestino(f);
-        if (!grupos.has(k)) grupos.set(k, []);
-        grupos.get(k).push(f);
-    }
-    const ordenados = [...grupos.values()].sort((a, b) =>
-        a[0].fecha.localeCompare(b[0].fecha) ||
-        a[0].co.localeCompare(b[0].co, 'en', { numeric: true }) ||
-        a[0].bodega.localeCompare(b[0].bodega, 'en', { numeric: true }) ||
-        a[0].item_destino - b[0].item_destino
-    );
+    // Defensive: a CEI with origins and no CSA row means a partial plan save; that store is never sent.
+    const incompleto = detectarPlanIncompleto(actuales);
+    for (const a of incompleto.anomalias) console.error(`   PLAN_INCOMPLETO CO ${a.co} ${a.bodega}: ${a.motivo}`);
+    alertas.anomalias.push(...incompleto.anomalias);
+
+    // 5) Send / resume store by store (CEI first, CSA only after the CEI is OK).
+    const depsEnvio = {
+        guardar: deps.guardarDoc, enviar: deps.enviar, esperar: deps.esperar,
+        unidadNegocio: config.unidadNegocio, log: (m) => console.log(`   ${m}`)
+    };
+    const tiendas = [...agruparPorTienda(actuales).entries()]
+        .map(([k, t]) => ({ k, ...t }))
+        .filter(t => coPermitido(t.co, config.cos))
+        .sort(ordenTiendas);
+    const resultados = [];
+    const procesados = [];
+    const bloquear = (csa, motivo, causa) => {
+        if (csa && ESTADOS_ENVIABLES.includes(csa.status)) {
+            alertas.bloqueados.push({ ...idDoc(csa), cantidad: csa.cantidad_total, motivo, causa });
+        }
+    };
 
     let abortada = false;
-    for (const grupo of ordenados) {
+    for (const t of tiendas) {
         if (abortada) break;
-        const cei = grupo.find(f => f.tipo_dto === 'CEI');
-        const csas = grupo.filter(f => f.tipo_dto === 'CSA').sort((a, b) => a.item_origen - b.item_origen);
-        if (!cei) {
-            alertas.anomalias.push({ ...idFila(grupo[0]), motivo: 'CSA rows without a CEI row; skipped.' });
+        if (!t.cei) {
+            alertas.anomalias.push({ ...idDoc(t.csa), motivo: 'CSA document without a CEI document; skipped.' });
             continue;
         }
-        const esDiaPrevio = cei.fecha < fecha;
-        const csasPendientes = () => csas.filter(c => ESTADOS_REINTENTABLES.includes(c.status));
-        const bloquear = (motivo) => csasPendientes().forEach(c =>
-            alertas.bloqueados.push({ ...idFila(c), cantidad: c.cantidad, motivo }));
+        if (incompleto.tiendas.has(t.k)) { bloquear(t.csa, 'plan incompleto; CSA not sent.', 'PLAN_INCOMPLETO'); continue; }
+        const esDiaPrevio = t.fecha < fecha;
 
-        // CEI: only the target-date destinations send their CEI; prior-day CEIs are cancelled or left alone.
-        let ceiListo = cei.status === 'OK';
-        if (!ceiListo && !esDiaPrevio && cei.status === 'PLANNED' && (cei.intentos || 0) === 0) {
-            // First send: the stored CSA rows must match the count planned with the CEI. A missing marker or a
-            // mismatch means the plan save was partial: nothing is sent (a CEI without its CSAs inflates stock).
-            const esperado = cei.respuesta && cei.respuesta.plan ? cei.respuesta.plan.csas_planificadas : undefined;
-            if (!Number.isInteger(esperado) || esperado !== csas.length) {
-                alertas.anomalias.push({
-                    ...idFila(cei), tipoAnomalia: 'PLAN_INCOMPLETO',
-                    motivo: `plan incompleto: CEI expects ${Number.isInteger(esperado) ? esperado : 'unknown'} CSA row(s) but ${csas.length} stored; not sent, manual review.`
-                });
-                bloquear('plan incompleto; CSAs not sent.');
-                continue;
-            }
-        }
-        if (!ceiListo && !esDiaPrevio && ESTADOS_REINTENTABLES.includes(cei.status)) {
-            const r = await enviarFila(cei, ctx);
-            ceiListo = r.status === 'OK' || r.status === 'DRY_RUN';
-            if (r.abortada) {
-                abortada = true;
-                bloquear(cei.posiblementeEnviado ? MOTIVO_CEI_POSIBLEMENTE_ENVIADO : 'Run aborted after a persistence failure; CSAs not sent.');
-                break;
-            }
-        }
+        if (dryRun) { imprimirDryRun(t, esDiaPrevio, detalle); continue; }
 
-        if (!ceiListo) {
-            if (cei.status === 'AMBIGUO') bloquear(MOTIVO_CEI_POSIBLEMENTE_ENVIADO);
-            else if (cei.status === 'ERROR') bloquear('CEI failed; CSAs not sent.');
-            else if (cei.status !== 'CANCELADO' && csasPendientes().length > 0) bloquear(`CEI is ${cei.status}; CSAs not sent.`);
+        // A prior-day CEI that is not OK is never sent again (it was cancelled or needs manual review).
+        if (esDiaPrevio && t.cei.status !== 'OK') {
+            if (t.cei.status === 'AMBIGUO') bloquear(t.csa, MOTIVO_CEI_POSIBLEMENTE_ENVIADO, 'CEI_AMBIGUO');
+            else bloquear(t.csa, `Prior-day CEI is ${t.cei.status}; CSA not sent.`, `CEI_${t.cei.status}`);
             continue;
         }
 
-        for (const csa of csas) {
-            if (!ESTADOS_REINTENTABLES.includes(csa.status)) continue; // OK, AMBIGUO (already reported), CANCELADO
-            const intentosPrevios = csa.intentos || 0;
-            const r = await enviarFila(csa, ctx);
-            if (esDiaPrevio) {
+        const ceiEnviable = ESTADOS_ENVIABLES.includes(t.cei.status);
+        const csaEnviable = !!t.csa && ESTADOS_ENVIABLES.includes(t.csa.status);
+        const intentosPreviosCsa = t.csa ? (t.csa.intentos || 0) : 0;
+        console.log(`   Store CO ${t.co} bodega ${t.bodega} (${t.fecha}): CEI ${t.cei.status}${t.csa ? `, CSA ${t.csa.status}` : ''}`);
+        const r = await enviarTienda({ cei: t.cei, csa: t.csa }, depsEnvio);
+
+        for (const [res, enviable] of [[r.cei, ceiEnviable], [r.csa, csaEnviable]]) {
+            if (!res || !enviable) continue;
+            const d = res.doc;
+            procesados.push(d);
+            resultados.push({ status: res.status, causa: res.causa, posts: res.posts });
+            const id = idDoc(d);
+            for (const e of res.erroresGuardado) alertas.erroresGuardado.push({ ...id, ...e });
+            if (res.status === 'ERROR') {
+                console.error(`   ${d.tipo_dto} CO ${d.co} ${d.bodega} rejected by Siesa: ${d.error}`);
+                alertas.erroresSiesa.push({ ...id, tipo: d.tipo_dto, error: d.error });
+            } else if (res.status === 'AMBIGUO') {
+                const motivo = d.error || 'POST accepted but its result could not be saved';
+                console.error(`   ${d.tipo_dto} CO ${d.co} ${d.bodega} outcome AMBIGUO: ${motivo}. ${INSTRUCCION_AMBIGUO}.`);
+                alertas.ambiguos.push({ ...id, tipo: d.tipo_dto, error: motivo, previo: false });
+            } else {
+                console.log(`   ${d.tipo_dto} CO ${d.co} ${d.bodega} ${res.status} (${res.posts} POST(s), ${d.lineas_activas} line(s)).`);
+            }
+            detalle.push(filaDetalle(d, res.status));
+            if (esDiaPrevio && d.tipo_dto === 'CSA') {
                 alertas.reintentosDiasPrevios.push({
-                    ...idFila(csa), cantidad: csa.cantidad, intentosPrevios, resultado: r.abortada && !r.enviado ? 'NO_ENVIADO' : r.status
+                    ...id, cantidad: d.cantidad_total, intentosPrevios: intentosPreviosCsa, resultado: res.status
                 });
             }
-            if (r.abortada) { abortada = true; break; }
+        }
+
+        if (r.bloqueo && csaEnviable) {
+            const motivo = r.bloqueo === 'CEI_AMBIGUO' ? MOTIVO_CEI_POSIBLEMENTE_ENVIADO : `CEI ${r.bloqueo.replace('CEI_', '')}; CSA not sent.`;
+            bloquear(t.csa, motivo, r.bloqueo);
+        }
+        if (r.abortada) {
+            abortada = true;
+            if (!r.csa) bloquear(t.csa, 'Run aborted after a persistence failure; CSA not sent.', 'ABORTADA');
         }
     }
-    if (abortada) console.error('Run aborted: remaining destinations were not processed.');
+    if (abortada) console.error('Run aborted: remaining stores were not processed.');
 
-    // 7) Summary.
+    // 6) Summary and job colour.
+    const sistemico = falloSistemico(resultados);
+    if (sistemico) {
+        console.error('SYSTEMIC FAILURE: every document sent in this run ended in ERROR for a non-Faltante reason (auth, connector or payload). The job is RED.');
+    }
+    alertas.novedades = recolectarNovedades([...nuevos, ...procesados]);
     const documentos = detalle.filter(d => d.resultado === 'OK').length;
-    const fallos = detalle.filter(d => d.resultado === 'ERROR' || d.resultado === 'AMBIGUO').length
-        + alertas.ambiguos.filter(a => a.previo).length + alertas.bloqueados.length
-        + alertas.anomalias.filter(a => a.tipoAnomalia === 'PLAN_INCOMPLETO').length
-        + (alertas.fechaDesfasada ? 1 : 0);
+    const fallos = calcularFallos({ alertas, sistemico });
     console.log('\n==========================================');
-    console.log(`SUMMARY ${fecha}: destinations=${destinos} | sent OK=${documentos} | failures=${fallos} | skipped=${alertas.omitidos.length} | cancelled=${alertas.cancelados.length}`);
+    console.log(`SUMMARY ${fecha}: destination lines=${destinos} | docs sent OK=${documentos} | failures=${fallos} | novedades=${alertas.novedades.length} | skipped=${alertas.omitidos.length} | cancelled=${alertas.cancelados.length}`);
     console.log('==========================================\n');
 
     const resultado = {
         fecha, entorno: ENTORNO, dryRun, modo, destinos, documentos, fallos, abortada,
-        inventario: inventarioStats, detalle, alertas
+        sistemico, inventario: inventarioStats, detalle, alertas
     };
 
     if (dryRun) {
+        if (alertas.novedades.length > 0) {
+            console.log('[dry-run] NOVEDADES (review before the first real send):');
+            for (const n of alertas.novedades) console.log(`   [dry-run] [${n.severidad}] CO ${n.co} bodega ${n.bodega} ${n.tipo_dto}: ${n.mensaje}`);
+        }
         console.log('DRY-RUN: nothing was sent to Siesa, nothing was written to Supabase and no email is sent.');
     } else {
         try {
@@ -655,7 +590,6 @@ module.exports = {
     registrarCorridaNegativos,
     resumirCorridaNegativos,
     mapearInventario,
-    construirLotes,
     QUERY_INVENTARIO_POR_DEFECTO,
     COLUMNAS_POR_DEFECTO,
     MOTIVO_CEI_POSIBLEMENTE_ENVIADO,

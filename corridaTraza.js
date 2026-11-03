@@ -10,6 +10,8 @@
 //  Everything here is best-effort: building the trace never throws into the Siesa flow.
 // ============================================================================
 
+const { ordenarNovedades } = require('./negativosNovedades');
+
 const TRAZA_COLUMNAS = ['github_run_id', 'github_run_attempt', 'github_job', 'github_run_url', 'alertas'];
 
 const MAX_ITEMS = 50;
@@ -22,7 +24,7 @@ const LISTAS_TOCINO = [
 ];
 const LISTAS_NEGATIVOS = [
     'omitidos', 'errores', 'anomalias', 'cancelados', 'bloqueados',
-    'reintentosDiasPrevios', 'erroresSiesa', 'erroresGuardado', 'ambiguos'
+    'reintentosDiasPrevios', 'erroresSiesa', 'erroresGuardado', 'ambiguos', 'novedades'
 ];
 
 const GITHUB_NULO = Object.freeze({
@@ -107,7 +109,9 @@ function alertasNegativos(resultado) {
     };
     if (Array.isArray(descartadas)) flags.inventarioDescartado = descartadas.length;
     else if (typeof descartadas === 'number') flags.inventarioDescartado = descartadas;
-    return armarAlertas('negativos', a, LISTAS_NEGATIVOS, flags);
+    // novedades are capped like any list: sort first so the cap keeps the ALTA ones.
+    const fuente = Array.isArray(a.novedades) ? { ...a, novedades: ordenarNovedades(a.novedades) } : a;
+    return armarAlertas('negativos', fuente, LISTAS_NEGATIVOS, flags);
 }
 
 // Columns to spread into the run row. NEVER throws: if building alertas fails the github

@@ -40,6 +40,10 @@ on:
         type: choice
         options: ['false', 'true']
         default: 'false'
+      cos:
+        description: 'CO(s) a procesar en negativos (ej. 005 o 001,005). Vacio = todas.'
+        required: false
+        default: ''
 
 # Evita que dos corridas se solapen (no cancela la que esta en curso).
 concurrency:
@@ -174,6 +178,8 @@ jobs:
           TRANSF_NEG_ITEMS_EXCLUIDOS: ${{ vars.TRANSF_NEG_ITEMS_EXCLUIDOS || '' }}
           TRANSF_NEG_DIAS_REANUDAR: ${{ vars.TRANSF_NEG_DIAS_REANUDAR || '' }}
           TRANSF_NEG_UNIDAD_NEGOCIO: ${{ vars.TRANSF_NEG_UNIDAD_NEGOCIO || '' }}
+          # Filtro de CO (solo dispatch manual): primer envio limitado. Vacio = todas las tiendas. El cron (schedule) siempre va vacio.
+          TRANSF_NEG_COS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.cos || '' }}
           # Solo true en dispatch manual con solo_negativos=true o cierre_anticipado=true: omite la guardia
           # de las 21:30 COT (cierre anticipado).
           TRANSF_NEG_PERMITIR_DIA_EN_CURSO: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.solo_negativos == 'true' || github.event.inputs.cierre_anticipado == 'true') && 'true' || 'false' }}
