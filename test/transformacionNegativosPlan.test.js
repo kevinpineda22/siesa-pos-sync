@@ -427,3 +427,42 @@ test('S1 an invalid excluded token throws a clear config error', () => {
     const r2 = reglas([[1, 9]], [1], { excluidos: [1.5] });
     assert.throws(() => planificar([inv(9, -2), inv(1, 5)], r2), /excluded item/i);
 });
+
+// =====================================================================
+// Per-store planner (1e-4 units). The legacy per-destination planner above stays until the cron is rewired.
+// =====================================================================
+const {
+    aUnidades, aUnidadesCeil, truncarUnidades, UNIDADES,
+    planificarNegativosPorTienda, construirPayloadDocumento, parsearCosFiltro
+} = require('../transformacionNegativosPlan');
+
+// ---- units helpers ----
+test('U1 aUnidadesCeil rounds the magnitude UP to 4 decimals, decimal-safe', () => {
+    assert.strictEqual(UNIDADES, 10000);
+    assert.strictEqual(aUnidadesCeil(-0.0004), 4);
+    assert.strictEqual(aUnidadesCeil(-0.00041), 5);
+    assert.strictEqual(aUnidadesCeil(-0.001), 10);
+    assert.strictEqual(aUnidadesCeil(-5.84), 58400);
+    assert.strictEqual(aUnidadesCeil(-0.30000000000000004), 3000);
+    assert.strictEqual(aUnidadesCeil(22.02), 220200);
+    assert.strictEqual(aUnidadesCeil('3.1'), 31000);
+    assert.strictEqual(aUnidadesCeil(1e-7), 0);
+    assert.strictEqual(aUnidadesCeil(0), 0);
+    assert.strictEqual(aUnidadesCeil(null), 0);
+});
+
+test('U2 truncarUnidades floors the magnitude to 4 decimals (never promises stock we do not have)', () => {
+    assert.strictEqual(truncarUnidades(0.00019), 1);
+    assert.strictEqual(truncarUnidades(10.3), 103000);
+    assert.strictEqual(truncarUnidades(0.019), 190);
+    assert.strictEqual(truncarUnidades(0.3), 3000);
+    assert.strictEqual(truncarUnidades(1e-7), 0);
+});
+
+test('U3 aUnidades rounds half-up to 4 decimals', () => {
+    assert.strictEqual(aUnidades(0.00005), 1);
+    assert.strictEqual(aUnidades(0.00004), 0);
+    assert.strictEqual(aUnidades(123.95), 1239500);
+    assert.strictEqual(aUnidades(-2.675), 26750);
+    assert.strictEqual(aUnidades(undefined), 0);
+});

@@ -40,6 +40,44 @@ function truncarCentavos(v) {
 }
 
 // ──────────────────────────────────────────────────────────
+// Decimal-safe 1e-4 units (per-store planner)
+// ──────────────────────────────────────────────────────────
+const UNIDADES = 10000;
+
+// Splits |v| into integer 1e-4 units, the fifth digit and whether anything non-zero follows the fourth digit.
+// Uses the 15 significant digits representation so binary noise (0.30000000000000004) does not change the result.
+function descomponerUnidades(v) {
+    const x = Math.abs(Number(v));
+    if (!Number.isFinite(x) || x < 1e-6) return { unidades: 0, quinto: 0, resto: false };
+    let s = x.toPrecision(15);
+    if (/e/i.test(s)) s = x.toFixed(6); // very large magnitudes: exponent notation is not parseable below
+    const [ent, frac = ''] = s.split('.');
+    const f = (frac + '00000').slice(0, 5);
+    return {
+        unidades: Number(ent) * UNIDADES + Number(f.slice(0, 4)),
+        quinto: Number(f[4]),
+        resto: /[1-9]/.test(frac.slice(4))
+    };
+}
+
+// |v| rounded UP to 4 decimals: CEI quantity, so the destination never ends with a residual negative.
+function aUnidadesCeil(v) {
+    const { unidades, resto } = descomponerUnidades(v);
+    return unidades + (resto ? 1 : 0);
+}
+
+// |v| truncated to 4 decimals: origin availability and anything that must not promise stock we do not have.
+function truncarUnidades(v) {
+    return descomponerUnidades(v).unidades;
+}
+
+// |v| rounded half-up to 4 decimals (stored quantities, which already carry at most 4 decimals).
+function aUnidades(v) {
+    const { unidades, quinto } = descomponerUnidades(v);
+    return unidades + (quinto >= 5 ? 1 : 0);
+}
+
+// ──────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────
 function formatDecimal(number) {
@@ -339,6 +377,10 @@ function resolverPermitirDiaEnCurso({ opcion, env, evento } = {}) {
 
 module.exports = {
     resolverPermitirDiaEnCurso,
+    UNIDADES,
+    aUnidades,
+    aUnidadesCeil,
+    truncarUnidades,
     aCentavos,
     truncarCentavos,
     planificarTransformaciones,
