@@ -1451,7 +1451,7 @@ Verificar con `GET /api/diagnostico/env` que las variables SMTP y NOTIFY estén 
 
 Flujo **independiente y adicional** al normal. Procesa las facturas de **clientes genéricos** (`222222222222`) de los COs de `GEN_COS` (default **011** caja Z01 y **012** cajas Z01 y Z02), tomando una **muestra del 10%** de las del día **por CO**, una vez al día a las **8:30 pm (COT)**. Los COs corren en secuencia y un fallo en uno no impide correr el otro.
 
-> ℹ️ **CO 012 (sede Machado):** se maneja igual que el 011. Los documentos hacia Siesa salen con **CO `001` fijo** (ID_CO, id_caja, movimientos, caja, descuentos, CPE) para ambos COs; el CO real solo identifica la query y la clave de idempotencia.
+> ℹ️ **CO 012 (sede Machado):** se maneja igual que el 011. Desde `CO_DOCUMENTO_DESDE` (2026-11-01, por fecha del documento) cada CO va en **su propio CO** en Siesa (ID_CO, id_caja, movimientos, impuestos, caja, descuentos, CPE): 011 → CO/caja `011`, 012 → CO/caja `012`, con la misma regla que el flujo normal (`coDocumento` / `cajaSiesa`). Los documentos con fecha anterior siguen en `001`.
 
 > ⚠️ **El horario es crítico: el job DEBE correr ANTES del cierre del POS.** Las queries leen las tablas **vivas** (`t9820_pdv_d_*`, prefijo **"d"**), que **solo conservan el día en curso**: cuando el POS cierra el día, mueve los documentos a las tablas de **acumulados** (`t9920_pdv_a_*`) y la tabla viva queda vacía. El 21 y 22-ago-2026 el flujo corría a las 10pm y procesó **0 facturas** por esa razón (el 19-ago a las 10:17pm sí funcionó: ese día el cierre fue más tarde). Se bajó a las 8:30pm para tener margen. Ver [sección 23](#23-resolución-de-problemas-comunes).
 
