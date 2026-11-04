@@ -1,6 +1,7 @@
-name: Sync 011 Genericos -> Siesa (diario 8:30pm)
+name: Sync 011/012 Genericos -> Siesa (diario 8:30pm)
 
-# Flujo EXCLUSIVO del CO 011 / caja Z01 / clientes genericos (222222222222).
+# Flujo de clientes genericos (222222222222) por CO: 011 (caja Z01) y 012 (cajas Z01 y Z02).
+# Los COs salen de GEN_COS (default 011,012) y corren en secuencia.
 # Toma las genericas del dia, muestrea el 10% (determinista distribuido) y las procesa
 # con la mecanica CNZ->CFZ (igual que el flujo normal). NO toca el flujo normal ni las
 # estadisticas. Corre DENTRO del runner de GitHub Actions (node directo), no via Vercel.
@@ -55,7 +56,7 @@ concurrency:
 jobs:
   sync-011-gen:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,9 +71,11 @@ jobs:
       - name: Instalar dependencias
         run: npm ci
 
-      - name: Ejecutar sincronizacion 011-genericos
+      - name: Ejecutar sincronizacion genericos (011, 012)
         run: node scripts/runSync011GenCron.js
         env:
+          # COs genericos a procesar (separados por coma). Default: 011,012.
+          GEN_COS: ${{ vars.GEN_COS || '011,012' }}
           # --- Credenciales / conexion (GitHub Secrets) ---
           CONNI_KEY: ${{ secrets.CONNI_KEY }}
           CONNI_TOKEN: ${{ secrets.CONNI_TOKEN }}

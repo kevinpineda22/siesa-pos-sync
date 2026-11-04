@@ -1,14 +1,14 @@
 // ============================================================================
-//  sync011Gen.js — FLUJO EXCLUSIVO CO 011 / CAJA Z01 / CLIENTES GENÉRICOS
+//  sync011Gen.js — FLUJO CLIENTES GENÉRICOS POR CO (011 / Z01 y 012 / Z01+Z02)
 // ============================================================================
-//  Corre 1 vez al día (9pm COT). Toma las facturas GENÉRICAS (222222222222) del
-//  día del CO 011 / caja Z01 y procesa un MUESTREO del 10% (determinista
+//  Corre 1 vez al día (8:30pm COT), un CO a la vez (opciones.co, default '011').
+//  Toma las facturas GENÉRICAS (222222222222) del día del CO y procesa un MUESTREO del 10% (determinista
 //  distribuido) con la MISMA mecánica que el flujo normal: CNZ primero, CFZ
 //  después, auto-corrección (cliente/inventario/CxC), conversión DOM→EFE, etc.
 //
 //  ⚠️ FORK de syncVentas.js (decisión explícita: NO tocar el original).
 //     Este archivo es una COPIA adaptada. Diferencias respecto al original:
-//       1. Queries Connekta → *_011_gen (solo genéricos del 011/Z01).
+//       1. Queries Connekta → *_<co>_gen (solo genéricos del CO: 011/Z01, 012/Z01+Z02).
 //       2. Fetch paginado completo (no solo la 1ª página de 100).
 //       3. Muestreo 10% determinista distribuido, compartido por CNZ y CFZ.
 //       4. NO guarda estadísticas diarias (eso lo mantiene el flujo normal).
@@ -44,10 +44,12 @@ const ENTORNO = (process.env.ENTORNO_SIESA_011 || 'QA').toUpperCase();
 const SIESA_DOMAIN = ENTORNO === 'QA' ? 'serviciosqa.siesacloud.com' : 'servicios.siesacloud.com';
 const CONNEKTA_DOMAIN = 'servicios.siesacloud.com'; // siempre PROD para lectura POS
 
-console.log(`🌍 [011-gen] ENTORNO_SIESA_011=${ENTORNO} | Connekta=${CONNEKTA_DOMAIN} (lectura PROD) | Siesa=${SIESA_DOMAIN} (escritura)`);
+console.log(`🌍 [gen] ENTORNO_SIESA_011=${ENTORNO} | Connekta=${CONNEKTA_DOMAIN} (lectura PROD) | Siesa=${SIESA_DOMAIN} (escritura)`);
 
 // URLs de Connekta (lectura — siempre PROD)
-// Queries EXCLUSIVAS del flujo 011-genérico (solo cliente 222222222222, CO 011, caja Z01).
+// Queries EXCLUSIVAS del flujo genérico por CO (solo cliente 222222222222):
+//   011 → caja Z01 | 012 → cajas Z01 y Z02.
+// Para agregar otro CO genérico: crear sus 3 queries `_<co>_gen` en Connekta y sumarlo acá.
 //
 // ⚠️ IMPORTANTE — HORARIO: estas queries leen las tablas VIVAS del POS (t9820/t9830...),
 //    que SOLO conservan el DÍA EN CURSO: cuando el POS cierra el día, los documentos se mueven
@@ -56,9 +58,23 @@ console.log(`🌍 [011-gen] ENTORNO_SIESA_011=${ENTORNO} | Connekta=${CONNEKTA_D
 //    a las 10pm y procesó 0 facturas porque el cierre ya había ocurrido (el 19-ago a las
 //    10:17pm sí funcionó: ese día el cierre fue más tarde). Se bajó a las 8:30pm para tener margen.
 //    Si algún día vuelve a dar 0, revisar a qué hora está cerrando el POS.
-const URL_VENTAS_DETALLE = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_venta_pos_011_gen`;
-const URL_VENTAS_PAGOS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_pagos_pos_011_gen`;
-const URL_VENTAS_IMPUESTOS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_imptos_pos_011_gen`;
+const CONFIG_GEN = {
+    '011': { label: '011', queries: { ventas: 'merkahorro_venta_pos_011_gen', pagos: 'merkahorro_pagos_pos_011_gen', impuestos: 'merkahorro_imptos_pos_011_gen' } },
+    '012': { label: '012', queries: { ventas: 'merkahorro_venta_pos_012_gen', pagos: 'merkahorro_pagos_pos_012_gen', impuestos: 'merkahorro_imptos_pos_012_gen' } },
+};
+const urlConnekta = (descripcion) => `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=${descripcion}`;
+// Contexto de un CO (URLs y etiquetas). Se arma por corrida: nada del CO queda fijo a nivel de módulo.
+function contextoGen(co) {
+    const cfg = CONFIG_GEN[co];
+    if (!cfg) throw new Error(`CO genérico no soportado: "${co}". Soportados: ${Object.keys(CONFIG_GEN).join(', ')}`);
+    return {
+        co,
+        label: cfg.label,
+        urlDetalle: urlConnekta(cfg.queries.ventas),
+        urlPagos: urlConnekta(cfg.queries.pagos),
+        urlImpuestos: urlConnekta(cfg.queries.impuestos),
+    };
+}
 const URL_CONSULTA_INVENTARIO_BASE = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_consulta_inventario`;
 // OJO: el costo promedio se lee de PRODUCCIÓN (servicios, no serviciosqa) a propósito: solo se
 // CONSULTA (GET, no escribe nada) para tener el costo real.
@@ -613,26 +629,33 @@ function parseFilterParam(val, envKey, fallback = '') {
     return raw.split(',').map(s => s.trim()).filter(Boolean);
 }
 
-async function ejecutarPaso(pasoActual, muestraConsecs) {
+// Clave de muestreo de una factura: CAJA|CONSEC. El consecutivo solo NO alcanza cuando el CO tiene
+// varias cajas (ej. 012: Z01 y Z02 pueden repetir el mismo consecutivo). Misma normalización de caja
+// que `buildKey` (trim, vacío -> '000').
+const claveMuestra = (d) => `${String(d.ID_TIPO_DOCTO ?? '').trim() || '000'}|${String(d.CONSEC_DOCTO ?? '').trim()}`;
+// Etiqueta legible de una clave de muestreo: "Z01|10234" -> "Z01-10234".
+const etiquetaMuestra = (clave) => clave.replace('|', '-');
+
+async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
     console.log("==========================================");
-    console.log("🚀 Iniciando Sincronización 011-GENÉRICOS");
+    console.log(`🚀 Iniciando Sincronización ${ctx.label}-GENÉRICOS`);
     console.log("==========================================");
 
-    // Fork 011-gen: paginación completa (tamPag=1000) en vez de fetchFromConnekta (que solo
+    // Fork gen: paginación completa (tamPag=1000) en vez de fetchFromConnekta (que solo
     // trae la 1ª página de 100). Así ninguna línea de la muestra se pierde si el día tiene
     // más de 100 líneas de detalle / impuestos / pagos.
-    const detallesRaw = await fetchPaginadoCompleto(URL_VENTAS_DETALLE, 'Ventas011');
-    const pagosRaw = await fetchPaginadoCompleto(URL_VENTAS_PAGOS, 'Pagos011');
-    const impuestosRaw = await fetchPaginadoCompleto(URL_VENTAS_IMPUESTOS, 'Impuestos011');
+    const detallesRaw = await fetchPaginadoCompleto(ctx.urlDetalle, `Ventas${ctx.label}`);
+    const pagosRaw = await fetchPaginadoCompleto(ctx.urlPagos, `Pagos${ctx.label}`);
+    const impuestosRaw = await fetchPaginadoCompleto(ctx.urlImpuestos, `Impuestos${ctx.label}`);
 
     // --- FILTRO A LA MUESTRA DEL 10% ---
-    // La query _011_gen ya restringe a CO 011 / caja Z01 / cliente 222222222222 / últimos ~2 días.
-    // Acá nos quedamos SOLO con los consecutivos que entraron en la muestra del día (calculada
-    // una vez en sync011Gen y compartida entre CNZ y CFZ, para que ambos pasos procesen
+    // La query _<co>_gen ya restringe al CO / cajas / cliente 222222222222 / últimos ~2 días.
+    // Acá nos quedamos SOLO con las facturas (caja|consec) que entraron en la muestra del día
+    // (calculada una vez en sync011Gen y compartida entre CNZ y CFZ, para que ambos pasos procesen
     // EXACTAMENTE las mismas facturas).
-    const setMuestra = muestraConsecs instanceof Set ? muestraConsecs : new Set(muestraConsecs || []);
-    const detalles = detallesRaw.filter(d => setMuestra.has(String(d.CONSEC_DOCTO ?? '').trim()));
-    console.log(`🎯 Muestra 011-gen: ${setMuestra.size} consec(s) objetivo → ${detalles.length} líneas de detalle.`);
+    const setMuestra = muestraClaves instanceof Set ? muestraClaves : new Set(muestraClaves || []);
+    const detalles = detallesRaw.filter(d => setMuestra.has(claveMuestra(d)));
+    console.log(`🎯 Muestra ${ctx.label}-gen: ${setMuestra.size} factura(s) objetivo → ${detalles.length} líneas de detalle.`);
     if (detalles.length === 0) {
         console.log("⚠️ No hay facturas de la muestra para este paso.");
         return [];
@@ -712,7 +735,7 @@ async function ejecutarPaso(pasoActual, muestraConsecs) {
     // MOSTRAR LISTADO DE FACTURAS DE LA MUESTRA (solo en CFZ para no duplicar log).
     if (pasoActual === 3) {
         console.log("\n==========================================");
-        console.log(`📋 FACTURAS DE LA MUESTRA 011-GEN (${facturasOrdenadas.length})`);
+        console.log(`📋 FACTURAS DE LA MUESTRA ${ctx.label}-GEN (${facturasOrdenadas.length})`);
         console.log("==========================================");
         facturasOrdenadas.forEach((key, i) => {
             const { co, caja, consec } = parseKey(key);
@@ -1391,8 +1414,18 @@ function muestreoDistribuido(ordenados, porcentaje) {
     return [...new Set(elegidos)]; // dedup defensivo si dos índices colapsan (target ≈ total)
 }
 
-module.exports = { sync011Gen: async (opciones = {}) => {
-    // Resetear caché de inventario y costos al inicio de cada corrida.
+// CO(s) genéricos soportados (para validar GEN_COS en el cron).
+const COS_GEN_SOPORTADOS = Object.keys(CONFIG_GEN);
+
+// Corre el flujo genérico de UN CO (opciones.co, default '011').
+async function syncGen(opciones = {}) {
+    const co = String(opciones.co || '011').trim();
+    const ctx = contextoGen(co); // lanza si el CO no está soportado
+    const L = ctx.label;
+
+    // Resetear caché de inventario y costos al inicio de cada corrida (también entre COs del mismo
+    // proceso): el CO anterior pudo inyectar ajustes de inventario en Siesa, y la caché tiene TTL de
+    // solo 5 min, así que reutilizarla arriesga datos viejos. El costo es una descarga de minutos.
     _inventarioPromise = null;
     _inventarioData = null;
     _inventarioTimestamp = 0;
@@ -1414,26 +1447,34 @@ module.exports = { sync011Gen: async (opciones = {}) => {
         : 10;
 
     console.log("==========================================");
-    console.log("🌙 FLUJO 011 GENÉRICOS (muestreo diario)");
+    console.log(`🌙 FLUJO ${L} GENÉRICOS (muestreo diario)`);
     console.log(`   Fecha objetivo=${fechaObjetivo} | Muestreo=${porcentaje}% | Entorno=${ENTORNO}`);
     console.log("==========================================");
 
     // 1) CALCULAR LA MUESTRA una sola vez (compartida por CNZ y CFZ). Traemos el detalle
-    //    (query _011_gen: 011 / Z01 / genéricos / últimos ~2 días, PAGINADO completo), nos
+    //    (query _<co>_gen: CO / cajas / genéricos / últimos ~2 días, PAGINADO completo), nos
     //    quedamos con las facturas del día objetivo y tomamos el 10% distribuido.
-    const detalleRaw = await fetchPaginadoCompleto(URL_VENTAS_DETALLE, 'Ventas011');
+    //    Las facturas se identifican por CAJA|CONSEC (no solo consec): con varias cajas el mismo
+    //    consecutivo puede existir en cada una. Orden: caja asc, luego consec numérico asc.
+    const detalleRaw = await fetchPaginadoCompleto(ctx.urlDetalle, `Ventas${L}`);
     const consecsDelDia = [...new Set(
         (Array.isArray(detalleRaw) ? detalleRaw : [])
             .filter(d => (d.FECHA_DOCTO || '').toString().split('T')[0] === fechaObjetivo)
-            .map(d => String(d.CONSEC_DOCTO ?? '').trim())
-            .filter(Boolean)
-    )].sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
+            .filter(d => String(d.CONSEC_DOCTO ?? '').trim())
+            .map(claveMuestra)
+    )].sort((a, b) => {
+        const [cajaA, consecA] = a.split('|');
+        const [cajaB, consecB] = b.split('|');
+        if (cajaA !== cajaB) return cajaA < cajaB ? -1 : 1;
+        return (parseInt(consecA, 10) || 0) - (parseInt(consecB, 10) || 0);
+    });
 
     const muestra = muestreoDistribuido(consecsDelDia, porcentaje);
-    const muestraConsecs = new Set(muestra);
+    const muestraClaves = new Set(muestra);
+    const muestraEtiquetas = muestra.map(etiquetaMuestra);
 
     console.log(`📊 Genéricas del día ${fechaObjetivo}: ${consecsDelDia.length} factura(s)`);
-    console.log(`🎯 Muestra (${porcentaje}% distribuido, mín 1): ${muestra.length} → [${muestra.join(', ')}]`);
+    console.log(`🎯 Muestra (${porcentaje}% distribuido, mín 1): ${muestra.length} → [${muestraEtiquetas.join(', ')}]`);
 
     if (muestra.length === 0) {
         // Diagnóstico: si la query trajo datos pero NINGUNO del día objetivo, mostramos qué días
@@ -1453,7 +1494,7 @@ module.exports = { sync011Gen: async (opciones = {}) => {
             console.warn('   que son las que lee este flujo. Los documentos ya están en los acumulados (t9920/t9930).');
             console.warn('   👉 Hay que correr el job MÁS TEMPRANO (antes del cierre de la tienda).');
         }
-        return { total: 0, ok: 0, fail: 0, detalle: [], muestra: 0, genericasDia: consecsDelDia.length };
+        return { total: 0, ok: 0, fail: 0, detalle: [], muestra: 0, genericasDia: consecsDelDia.length, co };
     }
 
     // DRY-RUN: solo muestra qué consecutivos se procesarían y sale SIN enviar nada a Siesa.
@@ -1462,19 +1503,19 @@ module.exports = { sync011Gen: async (opciones = {}) => {
         console.log("🧪 DRY-RUN activado — NO se envía nada a Siesa. Muestra calculada arriba. Fin.");
         return {
             total: 0, ok: 0, fail: 0, detalle: [], dryRun: true,
-            muestra: muestra.length, genericasDia: consecsDelDia.length, consecs: muestra,
+            muestra: muestra.length, genericasDia: consecsDelDia.length, consecs: muestraEtiquetas, co,
         };
     }
 
     // 2) EJECUTAR el flujo CNZ→CFZ SOLO sobre la muestra (misma mecánica que el flujo normal).
-    //    Ambos pasos reciben el MISMO muestraConsecs → procesan exactamente las mismas facturas.
+    //    Ambos pasos reciben el MISMO muestraClaves → procesan exactamente las mismas facturas.
     //    MUESTRA_SOLO_CNZ=true corta en CNZ (para pruebas).
     console.log("   Ejecutando primero Notas Crédito (CNZ) y luego Facturas (CFZ)...");
     const soloCNZ = (process.env.MUESTRA_SOLO_CNZ || 'false').toLowerCase() === 'true';
-    const resCNZ = (await ejecutarPaso(1, muestraConsecs)) || [];
+    const resCNZ = (await ejecutarPaso(1, muestraClaves, ctx)) || [];
     let resCFZ = [];
     if (!soloCNZ) {
-        resCFZ = (await ejecutarPaso(3, muestraConsecs)) || [];
+        resCFZ = (await ejecutarPaso(3, muestraClaves, ctx)) || [];
     } else {
         console.log("🧪 Modo SOLO CNZ activado — se omite el paso CFZ.");
     }
@@ -1484,7 +1525,7 @@ module.exports = { sync011Gen: async (opciones = {}) => {
     const failCount = todos.length - okCount;
 
     console.log("\n==========================================");
-    console.log("📊 RESUMEN FINAL (011 GENÉRICOS)");
+    console.log(`📊 RESUMEN FINAL (${L} GENÉRICOS)`);
     console.log("==========================================");
     console.log(`Muestra=${muestra.length}/${consecsDelDia.length} facturas | Total docs=${todos.length}  |  ✅ OK: ${okCount}  |  ❌ Fallidas: ${failCount}`);
     todos.forEach(r => {
@@ -1496,7 +1537,7 @@ module.exports = { sync011Gen: async (opciones = {}) => {
 
     // Snapshot de la corrida + maestras faltantes (mismas tablas que el flujo normal).
     // NOTA: NO se llama guardarEstadisticasDiarias — las estadísticas POS las mantiene el
-    // flujo normal; este flujo solo ENVÍA documentos genéricos del 011, no toca stats.
+    // flujo normal; este flujo solo ENVÍA documentos genéricos del CO, no toca stats.
     try {
         const idCorrida = await logger.guardarCorrida({
             total: todos.length,
@@ -1512,7 +1553,14 @@ module.exports = { sync011Gen: async (opciones = {}) => {
 
     return {
         total: todos.length, ok: okCount, fail: failCount, detalle: todos,
-        muestra: muestra.length, genericasDia: consecsDelDia.length,
+        muestra: muestra.length, genericasDia: consecsDelDia.length, co,
     };
-}};
+}
+
+module.exports = {
+    syncGen,
+    // Alias retrocompatible: sync011Gen({}) sigue corriendo el CO 011 por default.
+    sync011Gen: syncGen,
+    COS_GEN_SOPORTADOS,
+};
 

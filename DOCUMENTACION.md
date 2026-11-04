@@ -1371,6 +1371,11 @@ Verificar con `GET /api/diagnostico/env` que las variables SMTP y NOTIFY estén 
 
 ## 24. Historial de cambios
 
+### Noviembre 2026 — Genéricos CO 012
+- **El flujo genérico ahora procesa también el CO 012** (sede Machado, cajas Z01 y Z02), igual que el 011. Se agregaron las 3 queries `_012_gen` y la variable `GEN_COS` (default `011,012`). Ver [sección 25](#25-flujo-011-genéricos-muestreo-diario-9pm).
+- **Muestreo por `caja|consec`** (antes solo `consec`): con dos cajas el mismo consecutivo podía colisionar. En el 011 (una caja) el resultado es equivalente.
+- Los documentos hacia Siesa siguen con CO `001` fijo para ambos COs.
+
 ### Agosto 2026 — Flujo 011 Genéricos
 - **Nuevo flujo `sync011Gen.js`** (fork de `syncVentas.js`): exclusivo CO 011 / caja Z01 / clientes genéricos (222222222222), muestreo del 10% diario, cron 10pm COT. Ver [sección 25](#25-flujo-011-genéricos-muestreo-diario-9pm).
 - **3 queries Connekta nuevas** `_011_gen` (ventas/impuestos/pagos): invierten el filtro de NIT (solo `= 222222222222`), acotan `CO=011` y `Z01`, y usan `LEFT OUTER JOIN` de clientes.
@@ -1444,7 +1449,9 @@ Verificar con `GET /api/diagnostico/env` que las variables SMTP y NOTIFY estén 
 
 ## 25. Flujo 011 Genéricos (muestreo diario 9pm)
 
-Flujo **independiente y adicional** al normal. Procesa las facturas de **clientes genéricos** (`222222222222`) del **CO 011 / caja Z01**, tomando una **muestra del 10%** de las del día, una vez al día a las **8:30 pm (COT)**.
+Flujo **independiente y adicional** al normal. Procesa las facturas de **clientes genéricos** (`222222222222`) de los COs de `GEN_COS` (default **011** caja Z01 y **012** cajas Z01 y Z02), tomando una **muestra del 10%** de las del día **por CO**, una vez al día a las **8:30 pm (COT)**. Los COs corren en secuencia y un fallo en uno no impide correr el otro.
+
+> ℹ️ **CO 012 (sede Machado):** se maneja igual que el 011. Los documentos hacia Siesa salen con **CO `001` fijo** (ID_CO, id_caja, movimientos, caja, descuentos, CPE) para ambos COs; el CO real solo identifica la query y la clave de idempotencia.
 
 > ⚠️ **El horario es crítico: el job DEBE correr ANTES del cierre del POS.** Las queries leen las tablas **vivas** (`t9820_pdv_d_*`, prefijo **"d"**), que **solo conservan el día en curso**: cuando el POS cierra el día, mueve los documentos a las tablas de **acumulados** (`t9920_pdv_a_*`) y la tabla viva queda vacía. El 21 y 22-ago-2026 el flujo corría a las 10pm y procesó **0 facturas** por esa razón (el 19-ago a las 10:17pm sí funcionó: ese día el cierre fue más tarde). Se bajó a las 8:30pm para tener margen. Ver [sección 23](#23-resolución-de-problemas-comunes).
 
@@ -1461,7 +1468,7 @@ El flujo normal (`syncVentas.js`) **excluye** los genéricos (`<> '222222222222'
 | Aspecto | Flujo normal | Flujo 011 genéricos |
 |---------|--------------|----------------------|
 | Archivo | `syncVentas.js` | `sync011Gen.js` (fork) |
-| CO / Caja | 001 (Z01,Z02) + 011 (Z01) | **011 / Z01 exclusivo** |
+| CO / Caja | 001 (Z01,Z02) + 011 (Z01) | **011 / Z01 y 012 / Z01+Z02** (según `GEN_COS`) |
 | Clientes | NIT reales (excluye 222222222222) | **Solo 222222222222** |
 | Cadencia | Cada 1 h | **Diaria, 8:30pm COT (antes del cierre)** |
 | Alcance | Todas las nuevas del día | **Muestra del 10%** de las genéricas del día |
@@ -1478,6 +1485,8 @@ Espejo de las normales, con 3 cambios: (1) `f9820_id_cliente_pdv = '222222222222
 | `merkahorro_imptos_pos_011_gen` | `merkahorro_imptos_pos_dev` | Impuestos por línea |
 | `merkahorro_pagos_pos_011_gen` | `merkahorro_pagos_pos_dev` | Medios de pago (EFE/TR) |
 
+Para el **CO 012** existen las mismas 3 queries con sufijo `_012_gen` (`merkahorro_venta_pos_012_gen`, `merkahorro_imptos_pos_012_gen`, `merkahorro_pagos_pos_012_gen`), con `f9820_id_co = '012'` y `f9820_id_tipo_docto IN ('Z01','Z02')` (dos cajas). Las URLs salen del mapa `CONFIG_GEN` de `sync011Gen.js`.
+
 **Nota sobre la ventana de fechas:** el `WHERE` usa `CAST(f9820_id_fecha_docto AS VARCHAR(8)) >= CONVERT(varchar(8), DATEADD(day,-2,GETDATE()), 112)`, pero ese `CAST` sobre un campo de fecha no produce `20260821` sino texto (`Aug 21 2`), así que **la comparación no filtra realmente**. No importa en la práctica: la tabla viva solo tiene el día en curso, y el día objetivo se recorta en Node.
 
 **Si alguna vez se necesita el día ya cerrado**, hay que leer las tablas de acumulados: `t9820_pdv_d_doctos`→`t9920_pdv_a_doctos` (`f9820_`→`f9920_`), `t9830`→`t9930`, `t9831`→`t9931`, `t9832`→`t9932`, `t9821_pdv_d_movto_mp`→`t9921_pdv_a_movto_mp`. Las maestras (`t9740_pdv_clientes`, `t150_mc_bodegas`, `v121`) no cambian.
@@ -1486,7 +1495,7 @@ Inventario y costo (`merkahorro_consulta_inventario`, `merkahorro_costo_promedio
 
 ### Muestreo del 10% (determinista distribuido)
 
-Se calcula UNA sola vez y se comparte entre CNZ y CFZ (ambos pasos procesan exactamente las mismas facturas). Sobre los consecutivos genéricos del día **ordenados**, toma el 10% repartido de punta a punta:
+Se calcula UNA sola vez por CO y se comparte entre CNZ y CFZ (ambos pasos procesan exactamente las mismas facturas). La factura se identifica por la **clave compuesta `caja|consec`** (ej. `Z01|10234`, en logs `Z01-10234`), porque con varias cajas (CO 012) el mismo consecutivo puede repetirse. Sobre las claves genéricas del día **ordenadas** (caja asc, consec numérico asc), toma el 10% repartido de punta a punta:
 
 ```
 target = max(1, round(total * 10 / 100))     // redondeo al más cercano, mínimo 1
@@ -1504,8 +1513,9 @@ El fork usa su **propio** switch `ENTORNO_SIESA_011` (default `QA`), distinto de
 | Variable | Default | Descripción |
 |----------|---------|-------------|
 | `ENTORNO_SIESA_011` | `QA` (código) / `PROD` (cron) | Entorno de ESCRITURA de este flujo. Default `QA` en el código (seguro para correr local); el cron del workflow lo setea a `PROD` |
-| `MUESTRA_PORCENTAJE_011` | `10` | Porcentaje del muestreo |
-| `MUESTRA_FECHA_011` | hoy Bogotá | Fecha a procesar (YYYY-MM-DD). **Solo sirve para días que sigan en la tabla viva** (el día en curso) |
+| `GEN_COS` | `011,012` | COs genéricos a procesar, separados por coma (en el workflow: variable de repo `vars.GEN_COS`) |
+| `MUESTRA_PORCENTAJE_011` | `10` | Porcentaje del muestreo (aplica a **todos** los COs) |
+| `MUESTRA_FECHA_011` | hoy Bogotá | Fecha a procesar (YYYY-MM-DD), para todos los COs. **Solo sirve para días que sigan en la tabla viva** (el día en curso) |
 | `MUESTRA_SOLO_CNZ` | `false` | Corta en CNZ (no envía CFZ) |
 | `MUESTRA_DRY_RUN` | `false` | Solo muestra la muestra y sale SIN escribir a Siesa |
 
@@ -1513,8 +1523,8 @@ El fork usa su **propio** switch `ENTORNO_SIESA_011` (default `QA`), distinto de
 
 | Archivo | Rol |
 |---------|-----|
-| `sync011Gen.js` | Motor (fork). Exporta `sync011Gen(opciones)` |
-| `scripts/runSync011GenCron.js` | Orquestador del job (para GitHub Actions) |
+| `sync011Gen.js` | Motor (fork). Exporta `sync011Gen(opciones)` (alias de `syncGen`); `opciones.co` elige el CO (default `011`) |
+| `scripts/runSync011GenCron.js` | Orquestador del job (para GitHub Actions): itera `GEN_COS` en secuencia, consolida totales y aplica la política de exit code sobre el conjunto |
 | `.github/workflows/sync-011-gen.yml` | Cron `30 1 * * *` (= **8:30pm COT**, antes del cierre del POS). El cron escribe a **PROD**; el dispatch manual usa el input `entorno` (default QA). Inputs: porcentaje, fecha, solo_cnz, dry_run, entorno |
 
 ### Cómo probar
@@ -1535,7 +1545,7 @@ NOTIFY_ERROR_EMAILS='' NOTIFY_CPE_EMAILS='' NOTIFY_EMAILS='' \
 
 ### Trazabilidad
 
-Los documentos de este flujo quedan en `sps_facturas` con id `{tipo}:011:Z01:{consec}`. Se identifican de forma **inequívoca** por **`cliente_nit = '222222222222'`** (el flujo normal nunca envía genéricos). El frontend usa ese marcador para mostrar la actividad exclusiva del flujo 011-genéricos.
+Los documentos de este flujo quedan en `sps_facturas` con id `{tipo}:{co}:{caja}:{consec}` (ej. `CFZ:011:Z01:{consec}`, `CFZ:012:Z02:{consec}`). Se identifican de forma **inequívoca** por **`cliente_nit = '222222222222'`** (el flujo normal nunca envía genéricos). El frontend usa ese marcador para mostrar la actividad exclusiva del flujo 011-genéricos.
 
 ---
 
