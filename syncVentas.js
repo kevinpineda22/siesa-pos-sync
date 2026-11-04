@@ -564,7 +564,7 @@ function formatDate(isoString) {
 
 // CO con el que se crea el documento en Siesa (encabezado, movimientos, impuestos, descuentos,
 // caja e id_caja). Desde CO_DOCUMENTO_DESDE Siesa tiene tipos de documento, consecutivos y caja
-// contable configurados por CO (la caja usa el mismo código del CO), así que el documento va en
+// contable configurados por CO (código de caja: ver cajaSiesa), así que el documento va en
 // el CO de la venta. Los documentos con fecha anterior siguen en 001 para no mover a otro CO
 // los reintentos de ventas viejas (ej. el cierre de mes de octubre 2026).
 // Se decide por la FECHA DEL DOCUMENTO, no por la fecha de la corrida.
@@ -575,6 +575,16 @@ function coDocumento(coVenta, fechaDocto) {
     const co = (coVenta ?? '').toString().trim();
     if (!fecha || !co || fecha < CO_DOCUMENTO_DESDE) return '001';
     return co.padStart(3, '0');
+}
+
+// Código de la caja contable en Siesa para el CO del documento. Casi todas las cajas usan el
+// mismo código del CO (001, 007, 011), pero la del CO 003 está creada como "03" y no se puede
+// crear una "003" (confirmado por la administradora de Siesa, nov-2026). Sin esta excepción
+// Siesa rechaza con "La caja 003-003-COP no tiene configurada un auxiliar".
+const CAJA_SIESA_POR_CO = { '003': '03' };
+
+function cajaSiesa(coDoc) {
+    return CAJA_SIESA_POR_CO[coDoc] || coDoc;
 }
 
 function formatDecimal(number, isQuantity = false) {
@@ -815,11 +825,9 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             "F_CONSEC_AUTO_REG": "1",
             "id_cond_pago": enc.id_cond_pago ? enc.id_cond_pago.toString().trim().padStart(3, '0') : "000",
             // id_caja: código de la caja contable en Siesa. Desde CO_DOCUMENTO_DESDE cada CO
-            // tiene su caja con el mismo código del CO (003 → caja 003); antes todo iba a la
-            // caja 001 (auxiliar 001-001-COP). Por eso se usa coDoc.
-            // OJO: NO usar merkahorro_cajas_pos_dev para esto: devuelve el código sin padding
-            // uniforme (003->"03", 007->"007", 011->"011").
-            "id_caja": coDoc
+            // tiene su propia caja (antes todo iba a la caja 001, auxiliar 001-001-COP). El código
+            // es el del CO salvo excepciones (CO 003 → caja "03"), ver cajaSiesa().
+            "id_caja": cajaSiesa(coDoc)
         });
 
         fac.items.forEach((det, index) => {
