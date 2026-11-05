@@ -1485,7 +1485,7 @@ Espejo de las normales, con 3 cambios: (1) `f9820_id_cliente_pdv = '222222222222
 | `merkahorro_imptos_pos_011_gen` | `merkahorro_imptos_pos_dev` | Impuestos por línea |
 | `merkahorro_pagos_pos_011_gen` | `merkahorro_pagos_pos_dev` | Medios de pago (EFE/TR) |
 
-Para el **CO 012** existen las mismas 3 queries con sufijo `_012_gen` (`merkahorro_venta_pos_012_gen`, `merkahorro_imptos_pos_012_gen`, `merkahorro_pagos_pos_012_gen`), con `f9820_id_co = '012'` y `f9820_id_tipo_docto IN ('Z01','Z02')` (dos cajas). Las URLs salen del mapa `CONFIG_GEN` de `sync011Gen.js`.
+Para el **CO 012** existen las mismas 3 queries con sufijo `_012_gen` (`merkahorro_merkahorro_venta_pos_012_gen`, `merkahorro_merkahorro_imptos_pos_012_gen`, `merkahorro_merkahorro_pagos_pos_012_gen`; el prefijo duplicado es intencional: así quedaron creadas en Connekta y la descripción no se puede editar), con `f9820_id_co = '012'` y `f9820_id_tipo_docto IN ('Z01','Z02')` (dos cajas). Las URLs salen del mapa `CONFIG_GEN` de `sync011Gen.js`.
 
 **Nota sobre la ventana de fechas:** el `WHERE` usa `CAST(f9820_id_fecha_docto AS VARCHAR(8)) >= CONVERT(varchar(8), DATEADD(day,-2,GETDATE()), 112)`, pero ese `CAST` sobre un campo de fecha no produce `20260821` sino texto (`Aug 21 2`), así que **la comparación no filtra realmente**. No importa en la práctica: la tabla viva solo tiene el día en curso, y el día objetivo se recorta en Node.
 

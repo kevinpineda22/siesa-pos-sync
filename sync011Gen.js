@@ -58,9 +58,11 @@ console.log(`🌍 [gen] ENTORNO_SIESA_011=${ENTORNO} | Connekta=${CONNEKTA_DOMAI
 //    a las 10pm y procesó 0 facturas porque el cierre ya había ocurrido (el 19-ago a las
 //    10:17pm sí funcionó: ese día el cierre fue más tarde). Se bajó a las 8:30pm para tener margen.
 //    Si algún día vuelve a dar 0, revisar a qué hora está cerrando el POS.
+// Las del 012 quedaron creadas en Connekta con el prefijo "merkahorro_" duplicado y la
+// descripción no se puede editar después de creada, así que se usan tal cual existen.
 const CONFIG_GEN = {
     '011': { label: '011', queries: { ventas: 'merkahorro_venta_pos_011_gen', pagos: 'merkahorro_pagos_pos_011_gen', impuestos: 'merkahorro_imptos_pos_011_gen' } },
-    '012': { label: '012', queries: { ventas: 'merkahorro_venta_pos_012_gen', pagos: 'merkahorro_pagos_pos_012_gen', impuestos: 'merkahorro_imptos_pos_012_gen' } },
+    '012': { label: '012', queries: { ventas: 'merkahorro_merkahorro_venta_pos_012_gen', pagos: 'merkahorro_merkahorro_pagos_pos_012_gen', impuestos: 'merkahorro_merkahorro_imptos_pos_012_gen' } },
 };
 const urlConnekta = (descripcion) => `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=${descripcion}`;
 // Contexto de un CO (URLs y etiquetas). Se arma por corrida: nada del CO queda fijo a nivel de módulo.
