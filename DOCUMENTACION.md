@@ -1449,7 +1449,7 @@ Verificar con `GET /api/diagnostico/env` que las variables SMTP y NOTIFY estén 
 
 ## 25. Flujo 011 Genéricos (muestreo diario 9pm)
 
-Flujo **independiente y adicional** al normal. Procesa las facturas de **clientes genéricos** (`222222222222`) de los COs de `GEN_COS` (default **011** caja Z01 y **012** cajas Z01 y Z02), tomando una **muestra del 10%** de las del día **por CO**, una vez al día a las **8:30 pm (COT)**. Los COs corren en secuencia y un fallo en uno no impide correr el otro.
+Flujo **independiente y adicional** al normal. Procesa las facturas de **clientes genéricos** (`222222222222`) de los COs de `GEN_COS` (default **011** caja Z01 y **012** cajas Z01 y Z02), tomando una **muestra del 10%** de las del día **por CO**, una vez al día a las **11 pm (COT)**, después de las transformaciones. Los COs corren en secuencia y un fallo en uno no impide correr el otro.
 
 > ℹ️ **CO 012 (sede Machado):** se maneja igual que el 011. Desde `CO_DOCUMENTO_DESDE` (2026-11-01, por fecha del documento) cada CO va en **su propio CO** en Siesa (ID_CO, id_caja, movimientos, impuestos, caja, descuentos, CPE): 011 → CO/caja `011`, 012 → CO/caja `012`, con la misma regla que el flujo normal (`coDocumento` / `cajaSiesa`). Los documentos con fecha anterior siguen en `001`.
 
@@ -1470,7 +1470,7 @@ El flujo normal (`syncVentas.js`) **excluye** los genéricos (`<> '222222222222'
 | Archivo | `syncVentas.js` | `sync011Gen.js` (fork) |
 | CO / Caja | 001 (Z01,Z02) + 011 (Z01) | **011 / Z01 y 012 / Z01+Z02** (según `GEN_COS`) |
 | Clientes | NIT reales (excluye 222222222222) | **Solo 222222222222** |
-| Cadencia | Cada 1 h | **Diaria, 8:30pm COT (antes del cierre)** |
+| Cadencia | Cada 1 h | **Diaria, 11pm COT (después de transformaciones)** |
 | Alcance | Todas las nuevas del día | **Muestra del 10%** de las genéricas del día |
 | Entorno escritura | `ENTORNO_SIESA` (PROD) | **`ENTORNO_SIESA_011` (default QA)** |
 | Estadísticas diarias | Las guarda | **No las toca** |
@@ -1525,7 +1525,7 @@ El fork usa su **propio** switch `ENTORNO_SIESA_011` (default `QA`), distinto de
 |---------|-----|
 | `sync011Gen.js` | Motor (fork). Exporta `sync011Gen(opciones)` (alias de `syncGen`); `opciones.co` elige el CO (default `011`) |
 | `scripts/runSync011GenCron.js` | Orquestador del job (para GitHub Actions): itera `GEN_COS` en secuencia, consolida totales y aplica la política de exit code sobre el conjunto |
-| `.github/workflows/sync-011-gen.yml` | Cron `30 1 * * *` (= **8:30pm COT**, antes del cierre del POS). El cron escribe a **PROD**; el dispatch manual usa el input `entorno` (default QA). Inputs: porcentaje, fecha, solo_cnz, dry_run, entorno |
+| `.github/workflows/sync-011-gen.yml` | Cron `0 4 * * *` (= **11pm COT**, después de las transformaciones; desde nov-2026, riesgo de tabla viva vacía aceptado). El cron escribe a **PROD**; el dispatch manual usa el input `entorno` (default QA). Inputs: porcentaje, fecha, solo_cnz, dry_run, entorno |
 
 ### Cómo probar
 
