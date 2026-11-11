@@ -1,4 +1,4 @@
-name: Sync 011/012 Genericos -> Siesa (diario 11pm)
+name: Sync 011/012 Genericos -> Siesa (diario 10:45pm)
 
 # Flujo de clientes genericos (222222222222) por CO: 011 (caja Z01) y 012 (cajas Z01 y Z02).
 # Los COs salen de GEN_COS (default 011,012) y corren en secuencia.
@@ -8,10 +8,14 @@ name: Sync 011/012 Genericos -> Siesa (diario 11pm)
 
 on:
   schedule:
-    # 11:00 pm hora Colombia (COT, UTC-5, sin horario de verano) = 04:00 UTC del dia siguiente.
+    # 10:45 pm hora Colombia (COT, UTC-5, sin horario de verano) = 03:45 UTC del dia siguiente.
     # Movido desde las 8:30pm (nov-2026) a pedido de inventarios: debe correr DESPUES de las
     # transformaciones (10pm) para que las facturas no pidan ajustes por inventario negativo.
     # Riesgo aceptado: a esta hora la tabla viva puede estar parcial o vacia (ver aviso abajo).
+    # Se adelanto de 11pm a 10:45pm porque el 06, 09 y 10-nov-2026 el web service de Siesa
+    # (wsmerkahorro.siesacloud.com) no respondio a las 11pm (timeout / conexion rechazada),
+    # mientras que el Sync POS (~10:15-10:31pm) si entro. 10:45pm deja margen despues del
+    # Sync POS para no cruzarse con el (ambos postean en el CO 011).
     #
     # ⚠️ DEBE correr ANTES del cierre del POS. Las queries leen las tablas VIVAS, que solo
     #    conservan el dia en curso: al cerrar el dia, el POS mueve todo a los acumulados y la
@@ -21,7 +25,7 @@ on:
     # OJO: el cron de GitHub es en UTC y puede retrasarse varios minutos bajo carga, asi que
     #      la corrida real puede caer despues de las 8:30pm. Tenerlo en cuenta si el cierre
     #      del POS es cerca de las 9pm.
-    - cron: '0 4 * * *'
+    - cron: '45 3 * * *'
   workflow_dispatch:
     inputs:
       porcentaje:
