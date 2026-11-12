@@ -26,6 +26,12 @@ console.log(`🌍 ENTORNO_SIESA=${ENTORNO} | Connekta=${CONNEKTA_DOMAIN} | Siesa
 const URL_VENTAS_DETALLE = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_venta_pos_dev`;
 const URL_VENTAS_PAGOS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_pagos_pos_dev`;
 const URL_VENTAS_IMPUESTOS = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_imptos_pos_dev`;
+// Queries sobre las tablas ACUMULADAS (últimos 7 días, cajas Z01/Z02). Mismas columnas y alias que
+// las queries "_dev" (tablas vivas, que se vacían en el cierre diario del POS). Solo se usan en el
+// reproceso manual (fuente='acumulado'); se leen paginadas porque superan el tamaño de una página.
+const URL_VENTAS_DETALLE_ACUM = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_venta_pos_acum`;
+const URL_VENTAS_PAGOS_ACUM = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_pagos_pos_acum`;
+const URL_VENTAS_IMPUESTOS_ACUM = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_imptos_pos_acum`;
 const URL_CONSULTA_INVENTARIO_BASE = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_consulta_inventario`;
 // OJO: el costo promedio se lee de PRODUCCIÓN (servicios, no serviciosqa) a propósito: solo se
 // CONSULTA (GET, no escribe nada) para tener el costo real.
@@ -106,7 +112,7 @@ async function fetchPaginaConReintento(baseUrl, pagina, etiqueta) {
             console.warn(`⚠️ ${etiqueta} pág ${pagina} (intento ${intento}/${MAX_REINTENTOS}): ${error.message}`);
             if (intento === MAX_REINTENTOS) {
                 console.error(`❌ ${etiqueta} pág ${pagina} falló ${MAX_REINTENTOS} veces. Se omite esa página.`);
-                return { registros: [], totalPaginas: null };
+                return { registros: [], totalPaginas: null, fallida: true };
             }
             await new Promise(r => setTimeout(r, 1000 * intento)); // backoff incremental
         }
@@ -120,12 +126,21 @@ async function fetchPaginaConReintento(baseUrl, pagina, etiqueta) {
 // El orden de los registros no importa (luego se indexan por item/bodega), así que
 // el paralelismo es seguro para la correctitud. El reintento+backoff por página
 // garantiza que ninguna página se pierda aunque Connekta dé ECONNRESET puntual.
-async function fetchPaginadoCompleto(baseUrl, etiqueta) {
+// opciones.estricto: si una página falla tras los reintentos, LANZA en vez de omitirla. Se usa
+// para las queries de facturas (fuente acumulada): una página perdida enviaría a Siesa facturas
+// con líneas o impuestos incompletos. Inventario y costos siguen tolerando la pérdida.
+async function fetchPaginadoCompleto(baseUrl, etiqueta, opciones = {}) {
     const CONC = Math.max(1, parseInt(process.env.PAGINACION_CONCURRENCIA || '4'));
     const TOPE_PAGINAS = 2000; // tope duro de seguridad
+    const verificar = (r, pagina) => {
+        if (opciones.estricto && r.fallida) {
+            throw new Error(`${etiqueta}: la página ${pagina} no se pudo descargar. Se aborta para no enviar facturas incompletas.`);
+        }
+    };
 
     // 1) Página 1 (secuencial) -> nos dice el total de páginas.
     const primera = await fetchPaginaConReintento(baseUrl, 1, etiqueta);
+    verificar(primera, 1);
     const todas = [...primera.registros];
 
     if (primera.registros.length === 0) {
@@ -148,6 +163,7 @@ async function fetchPaginadoCompleto(baseUrl, etiqueta) {
         const lote = [];
         for (let k = 0; k < CONC && cursor <= totalPaginas; k++, cursor++) lote.push(cursor);
         const resultados = await Promise.all(lote.map(p => fetchPaginaConReintento(baseUrl, p, etiqueta)));
+        resultados.forEach((r, i) => verificar(r, lote[i]));
         let registrosLote = 0;
         for (const r of resultados) {
             if (r.registros.length > 0) { todas.push(...r.registros); registrosLote += r.registros.length; }
@@ -623,12 +639,72 @@ function parseFilterParam(val, envKey, fallback = '') {
     return raw.split(',').map(s => s.trim()).filter(Boolean);
 }
 
+// Normaliza la lista de documentos del reproceso manual. Acepta un array de strings o un string
+// separado por comas, espacios o saltos de línea. Formato por ítem: CO-CAJA-CONSEC
+// (ej. "001-Z02-36298", "3-Z01-00011694"). Devuelve { validos: [{co, caja, consec, clave}], invalidos: [] }.
+function parsearDocumentos(raw) {
+    const items = Array.isArray(raw)
+        ? raw.map(x => String(x ?? '')).flatMap(x => x.split(/[\s,]+/))
+        : String(raw ?? '').split(/[\s,]+/);
+    const validos = [];
+    const invalidos = [];
+    const vistos = new Set();
+    for (const item of items.map(s => s.trim()).filter(Boolean)) {
+        const m = item.match(/^(\d{1,3})-([A-Za-z0-9]+)-(\d+)$/);
+        if (!m) { invalidos.push(item); continue; }
+        const co = m[1].padStart(3, '0');
+        const caja = m[2].toUpperCase();
+        const consec = String(parseInt(m[3], 10));
+        const clave = `${co}|${caja}|${consec}`;
+        if (vistos.has(clave)) continue;
+        vistos.add(clave);
+        validos.push({ co, caja, consec, clave });
+    }
+    return { validos, invalidos };
+}
+
+// Llave normalizada de un registro de venta: CO (3 dígitos) | caja (mayúsculas) | consec (entero sin ceros a la izquierda).
+function claveDocumento(d) {
+    const co = (d.CoDoc ?? '').toString().trim().padStart(3, '0');
+    const caja = (d.ID_TIPO_DOCTO ?? '').toString().trim().toUpperCase();
+    const n = parseInt(d.CONSEC_DOCTO, 10);
+    const consec = Number.isFinite(n) ? String(n) : String(d.CONSEC_DOCTO ?? '').trim();
+    return `${co}|${caja}|${consec}`;
+}
+
+// Lee las 3 queries ACUMULADAS (paginadas) UNA sola vez por corrida y reutiliza el resultado en
+// los pasos CNZ y CFZ. `cache` es un objeto creado por syncVentas (no hay estado global entre corridas).
+function leerAcumuladoUnaVez(cache) {
+    if (!cache.promesa) {
+        cache.promesa = (async () => {
+            console.log('📥 Fuente ACUMULADO: descargando las 3 queries _acum (una sola vez por corrida)...');
+            const detalles = await fetchPaginadoCompleto(URL_VENTAS_DETALLE_ACUM, 'Ventas acum', { estricto: true });
+            const pagos = await fetchPaginadoCompleto(URL_VENTAS_PAGOS_ACUM, 'Pagos acum', { estricto: true });
+            const impuestos = await fetchPaginadoCompleto(URL_VENTAS_IMPUESTOS_ACUM, 'Imptos acum', { estricto: true });
+            return { detalles, pagos, impuestos };
+        })();
+    }
+    return cache.promesa;
+}
+
 async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     console.log("==========================================");
     console.log("🚀 Iniciando Sincronización de Ventas POS");
     console.log("==========================================");
 
-    const detallesRaw = await fetchFromConnekta(URL_VENTAS_DETALLE);
+    const esAcumulado = filtros.fuente === 'acumulado';
+    const docsFiltro = Array.isArray(filtros.documentos) && filtros.documentos.length > 0 ? filtros.documentos : null;
+    const fechaFiltro = filtros.fecha || null;
+
+    let detallesRaw, pagosRaw, impuestosRaw;
+    if (esAcumulado) {
+        const acum = await leerAcumuladoUnaVez(filtros.cacheAcum || (filtros.cacheAcum = {}));
+        detallesRaw = acum.detalles;
+        pagosRaw = acum.pagos;
+        impuestosRaw = acum.impuestos;
+    } else {
+        detallesRaw = await fetchFromConnekta(URL_VENTAS_DETALLE);
+    }
     // El NIT del cliente viaja a Siesa (ID_TERCERO / TERCERO_REM) y debe coincidir con el
     // tercero que crea syncPOS: ambos se normalizan sin espacios.
     // IdTercero (código del cliente en el POS) se normaliza igual solo para compararlo con el NIT.
@@ -636,18 +712,33 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         d.NitTercero = normalizarDocumento(d.NitTercero);
         d.IdTercero = normalizarDocumento(d.IdTercero);
     });
-    const pagosRaw = await fetchFromConnekta(URL_VENTAS_PAGOS);
-    const impuestosRaw = await fetchFromConnekta(URL_VENTAS_IMPUESTOS);
+    if (!esAcumulado) {
+        pagosRaw = await fetchFromConnekta(URL_VENTAS_PAGOS);
+        impuestosRaw = await fetchFromConnekta(URL_VENTAS_IMPUESTOS);
+    }
 
     // --- FILTROS DINÁMICOS CO / CAJA / HOY ---
     // Si la corrida es por CONSECS específicos, NO se aplican filtros CO/Caja/hoy: el consec debe
     // encontrarse en SU PROPIO CO/Caja, sin que un filtro lo excluya. (El usuario puede dejar el
     // filtro puesto en el panel y aun así el consec se busca donde realmente está.)
     const consecsEnvActivos = (process.env.CONSEC_ESPECIFICOS || '').trim();
-    const hayConsecsEspecificos = (Array.isArray(consecsOverride) && consecsOverride.length > 0) || consecsEnvActivos.length > 0;
+    // `documentos` (CO-CAJA-CONSEC) tiene prioridad sobre `consecs`: si vienen ambos, se usa solo `documentos`.
+    const hayConsecsEspecificos = !docsFiltro && ((Array.isArray(consecsOverride) && consecsOverride.length > 0) || consecsEnvActivos.length > 0);
 
     let detalles = detallesRaw;
-    if (hayConsecsEspecificos) {
+    if (docsFiltro) {
+        // Reproceso por documento: se compara la llave COMPLETA (CO + caja + consec), no solo el consec.
+        const clavesPedidas = new Set(docsFiltro.map(d => d.clave));
+        detalles = detallesRaw.filter(d => clavesPedidas.has(claveDocumento(d)));
+        console.log(`🎯 Modo documentos (CO-CAJA-CONSEC): se IGNORAN los filtros CO/Caja/hoy → ${detalles.length} registros de ${docsFiltro.length} documento(s) solicitado(s)`);
+        if (pasoActual === 3) {
+            const encontrados = new Set(detalles.map(claveDocumento));
+            const noEncontrados = docsFiltro.filter(d => !encontrados.has(d.clave));
+            if (noEncontrados.length > 0) {
+                console.warn(`⚠️ Documentos solicitados que NO están en la fuente (¿fuera de la ventana de 7 días?): ${noEncontrados.map(d => `${d.co}-${d.caja}-${d.consec}`).join(', ')}`);
+            }
+        }
+    } else if (hayConsecsEspecificos) {
         console.log('🎯 Modo consec específico: se IGNORAN los filtros CO/Caja/hoy (el consec se busca en su propio CO/Caja).');
     } else {
         // CO: normalizamos AMBOS lados a 3 dígitos (ej. "1" → "001") para evitar fallos por padding.
@@ -664,7 +755,11 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         }
         // Filtro "solo hoy": facturas cuya FECHA_DOCTO sea hoy en America/Bogota.
         // 'en-CA' da formato YYYY-MM-DD para comparar directo contra FECHA_DOCTO ("2026-06-03T00:00:00" → "2026-06-03").
-        if (filtros.soloHoy) {
+        if (fechaFiltro) {
+            // Reproceso por fecha: tiene prioridad sobre soloHoy.
+            detalles = detalles.filter(d => (d.FECHA_DOCTO || '').toString().split('T')[0] === fechaFiltro);
+            console.log(`🔍 Filtrando por fecha = ${fechaFiltro} → ${detalles.length} registros de facturas`);
+        } else if (filtros.soloHoy) {
             const hoyBogota = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
             detalles = detalles.filter(d => (d.FECHA_DOCTO || '').toString().split('T')[0] === hoyBogota);
             console.log(`🔍 Filtrando por fecha = hoy (${hoyBogota}, America/Bogota) → ${detalles.length} registros de facturas`);
@@ -770,7 +865,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     // - filtros.todas (job automático): procesamos TODAS las filtradas (idempotencia evita repetir OK).
     // - modo normal: tope LIMITE_FACTURAS (las más recientes).
     const LIMITE = parseInt(process.env.LIMITE_FACTURAS || '1');
-    const sinTope = modoEspecificos || filtros.todas === true;
+    // `documentos` y `fecha` (reproceso manual) también procesan todo lo filtrado, sin tope.
+    const sinTope = modoEspecificos || filtros.todas === true || !!docsFiltro || !!fechaFiltro;
     const facturasOrdenadas = sinTope ? facturasFiltradas : facturasFiltradas.slice(0, LIMITE);
 
     // MOSTRAR LISTADO DE FACTURAS DETECTADAS (solo en el primer paso para no duplicar log)
@@ -1598,6 +1694,45 @@ module.exports = { syncVentas: async (opciones = {}) => {
     if (opciones.todas === true) filtrosCOCaja.todas = true;
     if (opciones.soloHoy === true) filtrosCOCaja.soloHoy = true;
 
+    // --- Reproceso manual desde las tablas ACUMULADAS ---
+    // opciones.fuente: 'vivo' (default, queries "_dev") o 'acumulado' (queries "_acum", últimos 7 días).
+    //   También puede venir de la variable de entorno FUENTE_VENTAS.
+    // opciones.documentos: array (o string separado por comas/espacios/saltos de línea) con llaves
+    //   CO-CAJA-CONSEC, ej. "001-Z02-36298". También de la variable de entorno DOCUMENTOS.
+    // opciones.fecha: 'YYYY-MM-DD'. También de la variable de entorno FECHA_REPROCESO.
+    const fuente = String(opciones.fuente ?? process.env.FUENTE_VENTAS ?? 'vivo').trim().toLowerCase() || 'vivo';
+    if (fuente !== 'vivo' && fuente !== 'acumulado') {
+        throw new Error(`fuente inválida: "${fuente}". Valores permitidos: vivo | acumulado.`);
+    }
+    const documentosRaw = opciones.documentos ?? process.env.DOCUMENTOS ?? '';
+    const { validos: documentosValidos, invalidos: documentosInvalidos } = parsearDocumentos(documentosRaw);
+    documentosInvalidos.forEach(i => console.warn(`⚠️ Documento con formato inválido, se omite: "${i}" (formato esperado CO-CAJA-CONSEC, ej. 001-Z02-36298).`));
+    const fechaRaw = String(opciones.fecha ?? process.env.FECHA_REPROCESO ?? '').trim();
+    if (fechaRaw && !/^\d{4}-\d{2}-\d{2}$/.test(fechaRaw)) {
+        throw new Error(`fecha inválida: "${fechaRaw}". Formato esperado YYYY-MM-DD.`);
+    }
+    const fechaReproceso = fechaRaw || null;
+    // Con `documentos` la fecha no aplica (los documentos mandan).
+    if (documentosValidos.length > 0 && fechaReproceso) {
+        console.warn('⚠️ Se recibieron `documentos` y `fecha`: se usa solo `documentos` y se ignora `fecha`.');
+    }
+    const usarDocumentos = documentosValidos.length > 0;
+    const usarFecha = !usarDocumentos && !!fechaReproceso;
+
+    // Seguridad: la fuente acumulada trae 7 días de facturas; sin documentos ni fecha no se procesa nada.
+    if (fuente === 'acumulado' && !usarDocumentos && !usarFecha) {
+        const msg = 'fuente=acumulado requiere `documentos` o `fecha`. Se aborta la corrida sin procesar nada (evita enviar 7 días de facturas).';
+        console.error(`❌ ${msg}`);
+        throw new Error(msg);
+    }
+
+    filtrosCOCaja.fuente = fuente;
+    if (usarDocumentos) filtrosCOCaja.documentos = documentosValidos;
+    if (usarFecha) filtrosCOCaja.fecha = fechaReproceso;
+    if (fuente === 'acumulado') filtrosCOCaja.cacheAcum = {}; // caché por corrida (compartido por CNZ y CFZ)
+
+    console.log(`📌 Fuente de ventas: ${fuente}${usarDocumentos ? ` | documentos=${documentosValidos.length}` : ''}${usarFecha ? ` | fecha=${fechaReproceso}` : ''}`);
+
     // opciones.limite: sobrescribe LIMITE_FACTURAS solo para esta corrida.
     // Útil para que el dashboard pida "procesar las próximas N facturas".
     // Se restablece al valor original al terminar (incluso si hay error).
@@ -1675,10 +1810,15 @@ module.exports = { syncVentas: async (opciones = {}) => {
 
     // Guardar estadísticas diarias (total POS, genéricas, por caja) en Supabase.
     // Esto permite consultar días anteriores aunque Connekta purgue datos históricos.
-    try {
-        await guardarEstadisticasDiarias(todos.length);
-    } catch (e) {
-        console.warn(`⚠️ Error guardando estadísticas diarias: ${e.message}`);
+    // En reproceso desde la fuente acumulada NO se guardan: las estadísticas pertenecen a la corrida nocturna (vivo).
+    if (fuente === 'acumulado') {
+        console.log('ℹ️ Fuente acumulado: se omite el guardado de estadísticas diarias.');
+    } else {
+        try {
+            await guardarEstadisticasDiarias(todos.length);
+        } catch (e) {
+            console.warn(`⚠️ Error guardando estadísticas diarias: ${e.message}`);
+        }
     }
 
     return { total: todos.length, ok: okCount, fail: failCount, detalle: todos };

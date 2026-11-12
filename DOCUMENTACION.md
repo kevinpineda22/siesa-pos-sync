@@ -40,6 +40,7 @@ Backend Node.js + Frontend React que sincroniza ventas de un sistema POS hacia e
 24. [Historial de cambios](#24-historial-de-cambios)
 25. [Flujo 011 Genéricos (muestreo diario 9pm)](#25-flujo-011-genéricos-muestreo-diario-9pm)
 26. [Flujo Transformación Tocino → Chicharrón (diario 10pm)](#26-flujo-transformación-tocino--chicharrón-diario-10pm)
+28. [Reproceso manual desde tablas acumuladas](#28-reproceso-manual-desde-tablas-acumuladas)
 
 ---
 
@@ -1910,6 +1911,51 @@ En GitHub: `workflow_dispatch` con `dry_run=true` (opcionalmente `cos=005`). La 
 - [ ] Primer envío real limitado con `cos` y resultados observados.
 - [ ] Confirmar columnas de la query de inventario y la política de costo del CSA (costo del origen).
 - [ ] PROD: confirmar `TRANSF_NEG_QUERY_INVENTARIO` y los destinatarios antes de dejar el cron con todas las tiendas.
+
+---
+
+## 28. Reproceso manual desde tablas acumuladas
+
+Las queries "vivas" (`merkahorro_*_pos_dev`) leen las tablas del POS que se vacían en el cierre diario de cada tienda: si una noche falla, esas facturas ya no se pueden reenviar desde ahí. Para recuperarlas existe un modo de reproceso **manual** que lee las tablas acumuladas. No cambia la corrida nocturna ni la opción `consecs` (usada por "Reprocesar" del frontend).
+
+### Queries `_acum`
+
+| Query | Contenido |
+|---|---|
+| `merkahorro_venta_pos_acum` | Detalle de ventas (mismas columnas y alias que `merkahorro_venta_pos_dev`) |
+| `merkahorro_pagos_pos_acum` | Pagos (igual que `merkahorro_pagos_pos_dev`) |
+| `merkahorro_imptos_pos_acum` | Impuestos (igual que `merkahorro_imptos_pos_dev`) |
+
+- Tablas acumuladas: t9920, t9921, t9930, t9931 y t9932.
+- Alcance: **últimos 7 días**, cajas **Z01/Z02**, genéricos excluidos.
+- Se leen **paginadas** (`fetchPaginadoCompleto`) y una sola vez por corrida; los pasos CNZ y CFZ reutilizan los datos.
+
+### Cómo reprocesar (GitHub Actions)
+
+Actions → "Sync POS -> Siesa" → *Run workflow*:
+
+- `fuente` = `acumulado`
+- y **una** de estas dos:
+  - `documentos`: lista `CO-CAJA-CONSEC` separada por comas, espacios o saltos de línea. Ej.: `001-Z02-36298,003-Z01-11694`.
+  - `fecha`: `YYYY-MM-DD` (aplica además los filtros `co` y `caja`).
+
+Equivalentes por variable de entorno: `FUENTE_VENTAS`, `DOCUMENTOS`, `FECHA_REPROCESO` (y opciones `fuente`, `documentos`, `fecha` de `syncVentas`). `documentos` también funciona con `fuente=vivo` (solo actúa como filtro).
+
+### Formato de documento
+
+`CO-CAJA-CONSEC`, ej. `001-Z02-36298` o `3-Z01-00011694`. Se normaliza: CO a 3 dígitos, caja en mayúsculas, consecutivo sin ceros a la izquierda. La coincidencia usa los tres campos (a diferencia de `consecs`, que solo compara el consecutivo). Los ítems inválidos se omiten con una advertencia. Con `documentos` se ignoran los filtros CO/caja/hoy y el tope `LIMITE_FACTURAS`; con `fecha` se ignora `soloHoy` y el tope. Si ambos vienen, manda `documentos`.
+
+Al final el log lista los documentos solicitados que **no** se encontraron en la fuente.
+
+### Limitaciones y reglas
+
+- **Ventana de 7 días:** un documento más antiguo no aparecerá en la fuente.
+- **Inventario y costo actuales:** el CPE usa el inventario y el costo promedio **vigentes al momento del reproceso**, no los del día original. La fecha del CPE sí usa `FECHA_DOCTO`.
+- **Aborto de seguridad:** con `fuente=acumulado` y sin `documentos` ni `fecha`, la corrida se aborta con error y no procesa nada (evita enviar 7 días de facturas).
+- **Descarga estricta:** las 3 queries `_acum` se descargan con `fetchPaginadoCompleto(..., { estricto: true })`. Si una página falla tras 3 intentos, la corrida **aborta** antes de enviar cualquier documento (una página perdida enviaría facturas con líneas o impuestos incompletos). Inventario y costos mantienen el comportamiento tolerante.
+- **Estadísticas diarias:** con `fuente=acumulado` no se ejecuta `guardarEstadisticasDiarias` (pertenecen a la corrida nocturna); se deja un log indicándolo.
+- **Idempotencia sin cambios:** los documentos ya OK en `sps_facturas` se omiten; los FALLO o inexistentes se envían.
+- En reproceso `runSyncCron.js` fuerza `soloHoy=false`. En la ejecución automática (`workflow_run`) los inputs resuelven a `vivo`/vacío y el comportamiento no cambia.
 
 ---
 

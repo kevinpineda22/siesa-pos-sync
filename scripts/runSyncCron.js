@@ -11,6 +11,11 @@
  * Configuración (variables de entorno, vienen de GitHub Secrets/Variables o del .env local):
  *   - CO_FILTER     : CO(s) a sincronizar, ej. "001" o "001,003". (Requerido para acotar.)
  *   - CAJA_FILTER   : caja(s)/tipo docto, ej. "P01,P03,P05" o "P05".
+ *   - FUENTE_VENTAS : "vivo" (default, tablas vivas) o "acumulado" (reproceso manual, últimos 7 días).
+ *   - DOCUMENTOS    : documentos CO-CAJA-CONSEC separados por comas/espacios/saltos de línea
+ *                     (ej. "001-Z02-36298,003-Z01-11694"). Reproceso manual.
+ *   - FECHA_REPROCESO : fecha YYYY-MM-DD a reprocesar. Reproceso manual. (fuente=acumulado exige
+ *                       DOCUMENTOS o FECHA_REPROCESO; si no, la corrida se aborta.)
  *   - CONNI_KEY, CONNI_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_KEY, CIA, ENTORNO_SIESA,
  *     CONCURRENCIA, PAGINACION_CONCURRENCIA, MAX_RONDAS_AJUSTE.
  *
@@ -39,18 +44,28 @@ const CAT_NO_CRITICAS = new Set([
     // CRON_SOLO_HOY="false" -> NO filtra por "hoy" (útil para probar si hoy aún no hay facturas).
     const limiteRaw = parseInt(process.env.CRON_LIMITE || '0', 10);
     const limite = Number.isFinite(limiteRaw) && limiteRaw > 0 ? limiteRaw : null;
-    const soloHoy = (process.env.CRON_SOLO_HOY || 'true').toLowerCase() !== 'false';
+    // --- Reproceso manual (opcional): fuente acumulada / documentos / fecha ---
+    const fuente = (process.env.FUENTE_VENTAS || '').trim().toLowerCase();
+    const documentos = (process.env.DOCUMENTOS || '').trim();
+    const fecha = (process.env.FECHA_REPROCESO || '').trim();
+    const esReproceso = fuente === 'acumulado' || !!documentos || !!fecha;
+    // En reproceso NO se filtra por "hoy": se busca por documento/fecha en la fuente indicada.
+    const soloHoy = esReproceso ? false : (process.env.CRON_SOLO_HOY || 'true').toLowerCase() !== 'false';
 
     const opciones = {};
     if (co) opciones.co = co;
     if (caja) opciones.caja = caja;
     if (soloHoy) opciones.soloHoy = true;
+    if (fuente) opciones.fuente = fuente;
+    if (documentos) opciones.documentos = documentos;
+    if (fecha) opciones.fecha = fecha;
     if (limite) opciones.limite = limite;   // modo prueba: tope de N
     else opciones.todas = true;             // producción: todas las nuevas del día
 
     console.log('==================================================');
     console.log(limite ? '🧪 JOB DE PRUEBA POS → Siesa' : '🤖 JOB AUTOMÁTICO POS → Siesa (diario)');
     console.log(`   CO=${co || '(default .env)'} | Caja=${caja || '(default .env)'} | soloHoy=${soloHoy} | ${limite ? `limite=${limite}` : 'todas=true'}`);
+    console.log(`   Fuente=${fuente || 'vivo'} | Documentos=${documentos ? documentos.split(/[\s,]+/).filter(Boolean).length : '(ninguno)'} | Fecha=${fecha || '(ninguna)'}`);
     console.log(`   Entorno=${process.env.ENTORNO_SIESA || 'QA'}`);
     console.log('==================================================');
 

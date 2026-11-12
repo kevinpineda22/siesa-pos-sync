@@ -33,6 +33,20 @@ on:
         type: choice
         options: ['true', 'false']
         default: 'true'
+      fuente:
+        description: 'Fuente de ventas: vivo = tablas vivas (normal); acumulado = reproceso desde los últimos 7 días (exige documentos o fecha).'
+        required: false
+        type: choice
+        options: ['vivo', 'acumulado']
+        default: 'vivo'
+      documentos:
+        description: 'Reproceso: documentos CO-CAJA-CONSEC separados por coma (ej. 001-Z02-36298,003-Z01-11694). Vacío = no filtra por documento.'
+        required: false
+        default: ''
+      fecha:
+        description: 'Reproceso: fecha a reprocesar en formato YYYY-MM-DD. Vacío = no filtra por fecha.'
+        required: false
+        default: ''
 
 # Evita que dos corridas se solapen (no cancela la que está en curso).
 concurrency:
@@ -86,6 +100,10 @@ jobs:
           # "hoy" ya sería el día siguiente y se saltaría todo el día. Procesa la ventana de
           # Connekta (~2 días); la idempotencia omite las OK y así se reintentan los FALLO de ayer.
           CRON_SOLO_HOY: ${{ github.event_name == 'workflow_run' && 'false' || github.event.inputs.solo_hoy || 'true' }}
+          # --- Reproceso manual (solo aplica en "Run workflow"; la corrida automática los deja en vivo/vacío) ---
+          FUENTE_VENTAS: ${{ github.event.inputs.fuente || 'vivo' }}
+          DOCUMENTOS: ${{ github.event.inputs.documentos || '' }}
+          FECHA_REPROCESO: ${{ github.event.inputs.fecha || '' }}
           # --- Notificaciones por correo (GitHub Secrets) ---
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
