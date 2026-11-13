@@ -2008,6 +2008,38 @@ El reproceso por `documentos` admite dos opciones adicionales (backend: `opcione
 
 **409 (sincronización en curso):** si el workflow tiene una corrida `queued`, `in_progress`, `waiting`, `pending` o `requested`, el endpoint responde 409 y no lanza nada. El `concurrency` de GitHub conserva solo UNA corrida pendiente por grupo y cancela las pendientes anteriores: un segundo dispatch cancelaría en silencio un reproceso en cola. Los errores de la API de GitHub se devuelven como 502, sin exponer el token.
 
+### Reproceso de facturas genéricas 011/012 (flujo `genericos`)
+
+El flujo normal excluye al cliente genérico `222222222222` y el CO 012 no está en su `CO_FILTER`, por lo que esas facturas no se pueden reprocesar con `sync-pos.yml`. El flujo genéricos (`sync011Gen.js`, workflow `sync-011-gen.yml`) ahora acepta un **modo documentos** sin muestreo.
+
+**Queries acumuladas nuevas (Connekta).** Replican las queries vivas `_gen` (mismas columnas y alias) pero leen las tablas acumuladas (t9920, t9930, t9931, t9932 y t9921). Las descripciones deben ser exactas:
+
+| CO | Ventas | Pagos | Impuestos |
+|---|---|---|---|
+| 011 | `merkahorro_venta_pos_011_gen_acum` | `merkahorro_pagos_pos_011_gen_acum` | `merkahorro_imptos_pos_011_gen_acum` |
+| 012 | `merkahorro_venta_pos_012_gen_acum` | `merkahorro_pagos_pos_012_gen_acum` | `merkahorro_imptos_pos_012_gen_acum` |
+
+(Las vivas del 012 conservan el prefijo duplicado `merkahorro_merkahorro_*`; las `_acum` no.)
+
+**Inputs nuevos de `sync-011-gen.yml`** (9 en total; el cron no los usa y conserva sus defaults):
+
+| Input | Env | Valores |
+|---|---|---|
+| `fuente` | `FUENTE_GEN` | `vivo` (default; tablas del día en curso, para genéricas de hoy) o `acumulado` (días pasados, requiere `documentos`). |
+| `documentos` | `DOCUMENTOS_GEN` | Llaves `CO-CAJA-CONSEC`. Solo corren los COs presentes en la lista. Vacío = flujo normal (muestreo 10%). |
+| `tipos` | `TIPOS_GEN` | `ambas` (default), `CNZ`, `CFZ`. |
+| `fecha_docto` | `FECHA_DOCTO_GEN` | `YYYY-MM-DD`, no futura. Vacío = fecha original. |
+
+**Reglas del modo documentos:**
+
+- Sin muestreo ni filtro de igualdad de fecha (solo se filtra por fecha si se envía `fecha`): se toman exactamente los documentos pedidos (coincidencia CO + caja + consec); los no encontrados se listan en el log.
+- `tipos` distinto de `ambas`, `fecha_docto` y `fuente=acumulado` exigen `documentos` (misma validación de `opcionesReproceso.js`); si no, la corrida lanza error sin procesar nada.
+- La descarga acumulada es estricta (aborta si falla cualquier página) y se hace una sola vez por corrida.
+- `fecha_docto` se aplica igual que en `syncVentas`: `FECHA_DOCTO` del encabezado, `FECHA_VCTO` de `Caja`, fecha y CO (`coDocumento`) del CPE de ajuste. El fallback de CNZ en elaboración (IND_ESTADO 0) y la idempotencia no cambian.
+- El `entorno` por defecto del workflow es `QA`; el endpoint siempre envía `entorno: 'PROD'`.
+
+**API.** `POST /api/reprocesar-acumulado` acepta `flujo` (`normal` por defecto | `genericos`). Con `genericos`: los documentos deben ser CO 011 o 012; `fuente` (`acumulado` por defecto, `vivo` para las de hoy) se valida y se despacha `sync-011-gen.yml` (variable `GITHUB_WORKFLOW_GENERICOS`, default `sync-011-gen.yml`) con `{ fuente, documentos, tipos, fecha_docto, entorno: 'PROD' }`. La verificación 409 y `GET /api/reprocesar-acumulado/estado?flujo=genericos` consultan el workflow del flujo pedido. El flujo `normal` no cambia (las facturas de hoy siguen por `/api/sync-ventas`).
+
 ---
 
 ## Contacto / Soporte

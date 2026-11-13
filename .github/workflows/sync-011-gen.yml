@@ -54,6 +54,27 @@ on:
         type: choice
         options: ['QA', 'PROD']
         default: 'QA'
+      # --- REPROCESO MANUAL de facturas genericas puntuales (sin muestreo) ---
+      fuente:
+        description: 'Reproceso: fuente de datos. vivo = tablas del dia en curso; acumulado = dias anteriores (requiere documentos).'
+        required: false
+        type: choice
+        options: ['vivo', 'acumulado']
+        default: 'vivo'
+      documentos:
+        description: 'Reproceso: llaves CO-CAJA-CONSEC separadas por coma (ej. 011-Z01-123,012-Z02-45). Vacio = flujo normal (muestreo 10%).'
+        required: false
+        default: ''
+      tipos:
+        description: 'Reproceso: tipos a enviar (requiere documentos).'
+        required: false
+        type: choice
+        options: ['ambas', 'CNZ', 'CFZ']
+        default: 'ambas'
+      fecha_docto:
+        description: 'Reproceso: fecha de insercion en Siesa YYYY-MM-DD (vacio = fecha original; requiere documentos).'
+        required: false
+        default: ''
 
 # Evita que dos corridas se solapen (no cancela la que esta en curso).
 concurrency:
@@ -103,6 +124,11 @@ jobs:
           MUESTRA_FECHA_011: ${{ github.event.inputs.fecha || '' }}
           MUESTRA_SOLO_CNZ: ${{ github.event.inputs.solo_cnz || 'false' }}
           MUESTRA_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          # --- Reproceso manual por documentos (el cron los deja vacios = flujo normal) ---
+          FUENTE_GEN: ${{ github.event.inputs.fuente || 'vivo' }}
+          DOCUMENTOS_GEN: ${{ github.event.inputs.documentos || '' }}
+          TIPOS_GEN: ${{ github.event.inputs.tipos || 'ambas' }}
+          FECHA_DOCTO_GEN: ${{ github.event.inputs.fecha_docto || '' }}
           # --- Notificaciones por correo (GitHub Secrets) ---
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}

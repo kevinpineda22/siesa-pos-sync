@@ -40,7 +40,22 @@ const CAT_NO_CRITICAS = new Set([
 ]);
 
 (async () => {
-    const cos = (process.env.GEN_COS || '011,012').split(',').map(s => s.trim()).filter(Boolean);
+    let cos = (process.env.GEN_COS || '011,012').split(',').map(s => s.trim()).filter(Boolean);
+
+    // Reproceso manual (workflow_dispatch): con DOCUMENTOS_GEN solo corren los COs presentes en la
+    // lista (CO-CAJA-CONSEC). Sin él, el job es el cron normal (muestreo 10% de la fuente viva).
+    // FUENTE_GEN, TIPOS_GEN y FECHA_DOCTO_GEN los lee y valida sync011Gen directamente.
+    const documentosGen = (process.env.DOCUMENTOS_GEN || '').trim();
+    if (documentosGen) {
+        const cosDocs = new Set(
+            documentosGen.split(/[\s,]+/).map(s => s.trim()).filter(Boolean)
+                .map(d => (d.match(/^(\d{1,3})-/) || [])[1])
+                .filter(Boolean)
+                .map(c => c.padStart(3, '0'))
+        );
+        cos = cos.filter(c => cosDocs.has(c.padStart(3, '0')));
+        console.log(`🎯 Reproceso manual de genéricos: fuente=${process.env.FUENTE_GEN || 'vivo'} | tipos=${process.env.TIPOS_GEN || 'ambas'} | fecha de inserción=${process.env.FECHA_DOCTO_GEN || '(original)'}`);
+    }
 
     console.log('==================================================');
     console.log('🌙 JOB GENÉRICOS → Siesa (diario 10:45pm COT)');

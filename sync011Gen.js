@@ -20,6 +20,7 @@
 // ============================================================================
 const axios = require('axios');
 const { syncPOS } = require('./syncPOS');
+const { normalizarTipos, validarFechaDocto, exigirDocumentos } = require('./opcionesReproceso');
 const logger = require('./logger');
 const notifier = require('./notifier');
 require('dotenv').config();
@@ -60,21 +61,35 @@ console.log(`🌍 [gen] ENTORNO_SIESA_011=${ENTORNO} | Connekta=${CONNEKTA_DOMAI
 //    Si algún día vuelve a dar 0, revisar a qué hora está cerrando el POS.
 // Las del 012 quedaron creadas en Connekta con el prefijo "merkahorro_" duplicado y la
 // descripción no se puede editar después de creada, así que se usan tal cual existen.
+//
+// `queriesAcum`: queries ACUMULADAS (t9920/t9930/t9931/t9932/t9921) para el reproceso manual de
+// días pasados (fuente=acumulado). Replican las queries vivas `_gen` (mismas columnas y alias) pero
+// leyendo los acumulados. Deben existir en Connekta con estas descripciones exactas.
 const CONFIG_GEN = {
-    '011': { label: '011', queries: { ventas: 'merkahorro_venta_pos_011_gen', pagos: 'merkahorro_pagos_pos_011_gen', impuestos: 'merkahorro_imptos_pos_011_gen' } },
-    '012': { label: '012', queries: { ventas: 'merkahorro_merkahorro_venta_pos_012_gen', pagos: 'merkahorro_merkahorro_pagos_pos_012_gen', impuestos: 'merkahorro_merkahorro_imptos_pos_012_gen' } },
+    '011': {
+        label: '011',
+        queries: { ventas: 'merkahorro_venta_pos_011_gen', pagos: 'merkahorro_pagos_pos_011_gen', impuestos: 'merkahorro_imptos_pos_011_gen' },
+        queriesAcum: { ventas: 'merkahorro_venta_pos_011_gen_acum', pagos: 'merkahorro_pagos_pos_011_gen_acum', impuestos: 'merkahorro_imptos_pos_011_gen_acum' },
+    },
+    '012': {
+        label: '012',
+        queries: { ventas: 'merkahorro_merkahorro_venta_pos_012_gen', pagos: 'merkahorro_merkahorro_pagos_pos_012_gen', impuestos: 'merkahorro_merkahorro_imptos_pos_012_gen' },
+        queriesAcum: { ventas: 'merkahorro_venta_pos_012_gen_acum', pagos: 'merkahorro_pagos_pos_012_gen_acum', impuestos: 'merkahorro_imptos_pos_012_gen_acum' },
+    },
 };
 const urlConnekta = (descripcion) => `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=${descripcion}`;
 // Contexto de un CO (URLs y etiquetas). Se arma por corrida: nada del CO queda fijo a nivel de módulo.
-function contextoGen(co) {
+function contextoGen(co, fuente = 'vivo') {
     const cfg = CONFIG_GEN[co];
     if (!cfg) throw new Error(`CO genérico no soportado: "${co}". Soportados: ${Object.keys(CONFIG_GEN).join(', ')}`);
+    const q = fuente === 'acumulado' ? cfg.queriesAcum : cfg.queries;
     return {
         co,
         label: cfg.label,
-        urlDetalle: urlConnekta(cfg.queries.ventas),
-        urlPagos: urlConnekta(cfg.queries.pagos),
-        urlImpuestos: urlConnekta(cfg.queries.impuestos),
+        fuente,
+        urlDetalle: urlConnekta(q.ventas),
+        urlPagos: urlConnekta(q.pagos),
+        urlImpuestos: urlConnekta(q.impuestos),
     };
 }
 const URL_CONSULTA_INVENTARIO_BASE = `https://${CONNEKTA_DOMAIN}/api/connekta/v3/ejecutarconsulta?idCompania=${CIA}&descripcion=merkahorro_consulta_inventario`;
@@ -173,7 +188,9 @@ async function fetchPaginaConReintento(baseUrl, pagina, etiqueta) {
 // El orden de los registros no importa (luego se indexan por item/bodega), así que
 // el paralelismo es seguro para la correctitud. El reintento+backoff por página
 // garantiza que ninguna página se pierda aunque Connekta dé ECONNRESET puntual.
-async function fetchPaginadoCompleto(baseUrl, etiqueta) {
+// opciones.estricto: si una página falla tras los reintentos, LANZA en vez de omitirla. Se usa en la
+// fuente acumulada: una página perdida enviaría a Siesa facturas con líneas o impuestos incompletos.
+async function fetchPaginadoCompleto(baseUrl, etiqueta, opciones = {}) {
     const CONC = Math.max(1, parseInt(process.env.PAGINACION_CONCURRENCIA || '4'));
     const TOPE_PAGINAS = 2000; // tope duro de seguridad
 
@@ -208,6 +225,12 @@ async function fetchPaginadoCompleto(baseUrl, etiqueta) {
         const lote = [];
         for (let k = 0; k < CONC && cursor <= totalPaginas; k++, cursor++) lote.push(cursor);
         const resultados = await Promise.all(lote.map(p => fetchPaginaConReintento(baseUrl, p, etiqueta)));
+        if (opciones.estricto) {
+            const idxFallida = resultados.findIndex(r => r.error);
+            if (idxFallida >= 0) {
+                throw new Error(`${etiqueta}: la página ${lote[idxFallida]} no se pudo descargar. Se aborta para no enviar facturas incompletas.`);
+            }
+        }
         let registrosLote = 0;
         for (const r of resultados) {
             if (r.registros.length > 0) { todas.push(...r.registros); registrosLote += r.registros.length; }
@@ -289,10 +312,15 @@ async function getCostoCached() {
     return _costoPromise;
 }
 
-async function ajustarInventario(errores, itemsFactura, consecDocto) {
-    const fecha = new Date().toISOString().split('T')[0].replace(/-/g, '');
+// Reproceso manual (`fechaDoctoForzada` o `usarFechaDocumento`): igual que syncVentas, el CPE usa la
+// fecha de inserción forzada o, si no hay, la fecha del documento (no la de la corrida). El cron
+// nocturno no pasa estos parámetros y conserva el comportamiento original.
+async function ajustarInventario(errores, itemsFactura, consecDocto, fechaDoctoForzada = null, usarFechaDocumento = false) {
+    const fechaBase = fechaDoctoForzada || (usarFechaDocumento ? itemsFactura[0]?.FECHA_DOCTO : null);
+    const fecha = (fechaBase ? formatDate(fechaBase) : '')
+        || new Date().toISOString().split('T')[0].replace(/-/g, '');
     // El CPE va en el mismo CO que la factura que lo necesita (ver coDocumento).
-    const coDocCPE = coDocumento(itemsFactura[0]?.CoDoc, itemsFactura[0]?.FECHA_DOCTO);
+    const coDocCPE = coDocumento(itemsFactura[0]?.CoDoc, fechaBase || itemsFactura[0]?.FECHA_DOCTO);
     const baseConsec = parseInt(consecDocto) || 99999;
     const itemsMap = {};
     itemsFactura.forEach(det => { itemsMap[det.id_item] = det; });
@@ -661,6 +689,60 @@ const claveMuestra = (d) => `${String(d.ID_TIPO_DOCTO ?? '').trim() || '000'}|${
 // Etiqueta legible de una clave de muestreo: "Z01|10234" -> "Z01-10234".
 const etiquetaMuestra = (clave) => clave.replace('|', '-');
 
+// Llave normalizada de un registro de venta: CO (3 dígitos) | caja (mayúsculas) | consec (entero sin
+// ceros a la izquierda). Misma normalización que syncVentas (claveDocumento / parsearDocumentos).
+function claveDocumento(d) {
+    const co = (d.CoDoc ?? '').toString().trim().padStart(3, '0');
+    const caja = (d.ID_TIPO_DOCTO ?? '').toString().trim().toUpperCase();
+    const n = parseInt(d.CONSEC_DOCTO, 10);
+    const consec = Number.isFinite(n) ? String(n) : String(d.CONSEC_DOCTO ?? '').trim();
+    return `${co}|${caja}|${consec}`;
+}
+
+// Normaliza la lista de documentos (array o string separado por comas/espacios/saltos de línea).
+// Formato por ítem: CO-CAJA-CONSEC. Devuelve { validos: [{co, caja, consec, clave}], invalidos: [] }.
+function parsearDocumentos(raw) {
+    const items = Array.isArray(raw)
+        ? raw.map(x => String(x ?? '')).flatMap(x => x.split(/[\s,]+/))
+        : String(raw ?? '').split(/[\s,]+/);
+    const validos = [];
+    const invalidos = [];
+    const vistos = new Set();
+    for (const item of items.map(s => s.trim()).filter(Boolean)) {
+        const m = item.match(/^(\d{1,3})-([A-Za-z0-9]+)-(\d+)$/);
+        if (!m) { invalidos.push(item); continue; }
+        const co = m[1].padStart(3, '0');
+        const caja = m[2].toUpperCase();
+        const consec = String(parseInt(m[3], 10));
+        const clave = `${co}|${caja}|${consec}`;
+        if (vistos.has(clave)) continue;
+        vistos.add(clave);
+        validos.push({ co, caja, consec, clave });
+    }
+    return { validos, invalidos };
+}
+
+// true si no hay fecha de filtro o si FECHA_DOCTO del registro coincide con ella.
+function fechaCoincide(d, fecha) {
+    if (!fecha) return true;
+    return (d.FECHA_DOCTO || '').toString().split('T')[0] === fecha;
+}
+
+// Descarga las 3 queries ACUMULADAS UNA sola vez por corrida (compartido por CNZ y CFZ). Estricto:
+// si falla cualquier página se aborta. `ctx.cacheAcum` lo crea syncGen (sin estado global).
+function leerAcumuladoUnaVez(ctx) {
+    if (!ctx.cacheAcum.promesa) {
+        ctx.cacheAcum.promesa = (async () => {
+            console.log(`📥 Fuente ACUMULADO (${ctx.label}-gen): descargando las 3 queries _gen_acum (una sola vez por corrida)...`);
+            const detalles = await fetchPaginadoCompleto(ctx.urlDetalle, `Ventas${ctx.label} acum`, { estricto: true });
+            const pagos = await fetchPaginadoCompleto(ctx.urlPagos, `Pagos${ctx.label} acum`, { estricto: true });
+            const impuestos = await fetchPaginadoCompleto(ctx.urlImpuestos, `Impuestos${ctx.label} acum`, { estricto: true });
+            return { detalles, pagos, impuestos };
+        })();
+    }
+    return ctx.cacheAcum.promesa;
+}
+
 async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
     console.log("==========================================");
     console.log(`🚀 Iniciando Sincronización ${ctx.label}-GENÉRICOS`);
@@ -669,18 +751,41 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
     // Fork gen: paginación completa (tamPag=1000) en vez de fetchFromConnekta (que solo
     // trae la 1ª página de 100). Así ninguna línea de la muestra se pierde si el día tiene
     // más de 100 líneas de detalle / impuestos / pagos.
-    const detallesRaw = await fetchPaginadoCompleto(ctx.urlDetalle, `Ventas${ctx.label}`);
-    const pagosRaw = await fetchPaginadoCompleto(ctx.urlPagos, `Pagos${ctx.label}`);
-    const impuestosRaw = await fetchPaginadoCompleto(ctx.urlImpuestos, `Impuestos${ctx.label}`);
+    let detallesRaw, pagosRaw, impuestosRaw;
+    if (ctx.fuente === 'acumulado') {
+        const acum = await leerAcumuladoUnaVez(ctx);
+        detallesRaw = acum.detalles;
+        pagosRaw = acum.pagos;
+        impuestosRaw = acum.impuestos;
+    } else {
+        detallesRaw = await fetchPaginadoCompleto(ctx.urlDetalle, `Ventas${ctx.label}`);
+        pagosRaw = await fetchPaginadoCompleto(ctx.urlPagos, `Pagos${ctx.label}`);
+        impuestosRaw = await fetchPaginadoCompleto(ctx.urlImpuestos, `Impuestos${ctx.label}`);
+    }
 
     // --- FILTRO A LA MUESTRA DEL 10% ---
     // La query _<co>_gen ya restringe al CO / cajas / cliente 222222222222 / últimos ~2 días.
     // Acá nos quedamos SOLO con las facturas (caja|consec) que entraron en la muestra del día
     // (calculada una vez en sync011Gen y compartida entre CNZ y CFZ, para que ambos pasos procesen
     // EXACTAMENTE las mismas facturas).
-    const setMuestra = muestraClaves instanceof Set ? muestraClaves : new Set(muestraClaves || []);
-    const detalles = detallesRaw.filter(d => setMuestra.has(claveMuestra(d)));
-    console.log(`🎯 Muestra ${ctx.label}-gen: ${setMuestra.size} factura(s) objetivo → ${detalles.length} líneas de detalle.`);
+    let detalles;
+    if (ctx.modoDocumentos) {
+        // Reproceso manual: SIN muestreo, exactamente los documentos pedidos (CO+caja+consec).
+        const clavesPedidas = new Set(ctx.documentos.map(d => d.clave));
+        detalles = detallesRaw.filter(d => clavesPedidas.has(claveDocumento(d)) && fechaCoincide(d, ctx.fechaFiltro));
+        console.log(`🎯 Modo documentos ${ctx.label}-gen: ${ctx.documentos.length} documento(s) solicitado(s) → ${detalles.length} líneas de detalle.`);
+        if (pasoActual === ctx.pasoLog) {
+            const encontrados = new Set(detalles.map(claveDocumento));
+            const noEncontrados = ctx.documentos.filter(d => !encontrados.has(d.clave));
+            if (noEncontrados.length > 0) {
+                console.warn(`⚠️ Documentos solicitados que NO están en la fuente (${ctx.fuente}): ${noEncontrados.map(d => `${d.co}-${d.caja}-${d.consec}`).join(', ')}`);
+            }
+        }
+    } else {
+        const setMuestra = muestraClaves instanceof Set ? muestraClaves : new Set(muestraClaves || []);
+        detalles = detallesRaw.filter(d => setMuestra.has(claveMuestra(d)));
+        console.log(`🎯 Muestra ${ctx.label}-gen: ${setMuestra.size} factura(s) objetivo → ${detalles.length} líneas de detalle.`);
+    }
     if (detalles.length === 0) {
         console.log("⚠️ No hay facturas de la muestra para este paso.");
         return [];
@@ -786,7 +891,11 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
         // Para diferenciar las consecuciones y que Siesa no se confunda, a la simulacion le ponemos el mismo consecutivo
         // Ya que ID_TIPO_DOCTO es distinto, Siesa las agrupa por separado.
         const consecDoc = enc.CONSEC_DOCTO;
-        const coDoc = coDocumento(enc.CoDoc, enc.FECHA_DOCTO);
+        // Fecha de inserción forzada (solo reproceso manual): manda sobre la fecha original del POS y
+        // decide también el CO (ver coDocumento). Sin ella todo queda igual que antes.
+        const fechaDoctoForzada = ctx.fechaDocto || null;
+        const fechaDocumento = fechaDoctoForzada || enc.FECHA_DOCTO;
+        const coDoc = coDocumento(enc.CoDoc, fechaDocumento);
 
         const absIfCNZ = (val) => {
             if (val === null || val === undefined) return val;
@@ -797,7 +906,7 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
             "ID_CO": coDoc,
             "ID_TIPO_DOCTO": tipoDoctoSiesa,
             "CONSEC_DOCTO": consecDoc,
-            "FECHA_DOCTO": formatDate(enc.FECHA_DOCTO),
+            "FECHA_DOCTO": formatDate(fechaDocumento),
             "ID_TERCERO": enc.NitTercero,
             "ID_CLASE_DOCTO": esSimulacionCNZ ? 525 : 522,
             "SUCURSAL_CLIENTE": "001",
@@ -1025,7 +1134,7 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
                 "REFERENCIA": "1",
                 "COD_SEGURIDAD": 1,
                 "NRO_AUTORIZACION": "1",
-                "FECHA_VCTO": enc.FECHA ? formatDate(enc.FECHA) : formatDate(new Date().toISOString())
+                "FECHA_VCTO": fechaDoctoForzada ? formatDate(fechaDoctoForzada) : (enc.FECHA ? formatDate(enc.FECHA) : formatDate(new Date().toISOString()))
             });
         }
         Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0).forEach(pago => {
@@ -1046,7 +1155,7 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
                 "REFERENCIA": "1",
                 "COD_SEGURIDAD": pago.COD_SEGURIDAD || 1,
                 "NRO_AUTORIZACION": pago.NRO_AUTORIZACION || "1",
-                "FECHA_VCTO": formatDate(pago.FECHA_VCTO)
+                "FECHA_VCTO": fechaDoctoForzada ? formatDate(fechaDoctoForzada) : formatDate(pago.FECHA_VCTO)
             });
         });
 
@@ -1059,7 +1168,9 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
         // MISMA caja desde bloques distintos; esa interacción rompió consecs en el flujo principal.
         if (ajusteEfeExtra !== null && ajusteEfeExtra > 0 && posCaja > 0) {
             const plantillaEfe = cajaConsolidada["EFE"];
-            const fechaVcto = plantillaEfe ? formatDate(plantillaEfe.FECHA_VCTO) : formatDate(enc.FECHA);
+            const fechaVcto = fechaDoctoForzada
+                ? formatDate(fechaDoctoForzada)
+                : (plantillaEfe ? formatDate(plantillaEfe.FECHA_VCTO) : formatDate(enc.FECHA));
             Caja.push({
                 "ID_CO": coDoc,
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
@@ -1089,6 +1200,7 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
     // Función que envía 1 factura a Siesa con reintento automático ante cliente/inventario faltante.
     const enviarFacturaASiesa = async (consecutivo, payload, detallesFactura, tipoDoctoSiesa, meta, conversiones = []) => {
         const automatizaciones = [...conversiones];
+        if (ctx.fechaDocto) automatizaciones.push(`fecha_docto:${ctx.fechaDocto}`);
         const registrar = async (resultado) => {
             await logger.registrarResultado(resultado, { ...meta, automatizaciones });
             // Notificar por correo si es un error final
@@ -1288,7 +1400,7 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
                     automatizaciones.push(`ajuste_inventario:${consecutivo}`);
                     try {
                         const consecAjuste = parseInt(Date.now().toString().slice(-7));
-                        const itemsInyectados = await ajustarInventario(errores, detallesFactura, consecAjuste) || [];
+                        const itemsInyectados = await ajustarInventario(errores, detallesFactura, consecAjuste, ctx.fechaDocto || null, ctx.modoDocumentos === true) || [];
                         if (itemsInyectados.length > 0) {
                             meta.cpeItems = [...(meta.cpeItems || []), ...itemsInyectados];
                             // Notificar ajuste de inventario
@@ -1477,8 +1589,46 @@ const COS_GEN_SOPORTADOS = Object.keys(CONFIG_GEN);
 // Corre el flujo genérico de UN CO (opciones.co, default '011').
 async function syncGen(opciones = {}) {
     const co = String(opciones.co || '011').trim();
-    const ctx = contextoGen(co); // lanza si el CO no está soportado
+
+    // --- Reproceso manual (opciones o env): fuente, documentos, tipos, fechaDocto ---
+    // Sin estas entradas el comportamiento es EXACTAMENTE el del cron (muestreo 10% de la fuente viva).
+    const fuente = String(opciones.fuente ?? process.env.FUENTE_GEN ?? 'vivo').trim().toLowerCase() || 'vivo';
+    if (fuente !== 'vivo' && fuente !== 'acumulado') {
+        throw new Error(`fuente inválida: "${fuente}". Valores permitidos: vivo | acumulado.`);
+    }
+    const documentosRaw = opciones.documentos ?? process.env.DOCUMENTOS_GEN ?? '';
+    const { validos: documentosValidos, invalidos: documentosInvalidos } = parsearDocumentos(documentosRaw);
+    documentosInvalidos.forEach(i => console.warn(`⚠️ Documento con formato inválido, se omite: "${i}" (formato esperado CO-CAJA-CONSEC, ej. 011-Z01-36298).`));
+    // Se pidieron documentos pero ninguno es válido: se aborta. Sin esta guarda el flujo caería al
+    // muestreo diario y enviaría facturas que nadie pidió.
+    const hayDocumentosPedidos = Array.isArray(documentosRaw) ? documentosRaw.length > 0 : String(documentosRaw).trim() !== '';
+    if (hayDocumentosPedidos && documentosValidos.length === 0) {
+        throw new Error('Se recibieron documentos pero ninguno tiene formato válido (CO-CAJA-CONSEC). No se procesa nada.');
+    }
+    // Solo se procesan los documentos del CO que se está corriendo.
+    const coNorm = co.padStart(3, '0');
+    const documentosDelCo = documentosValidos.filter(d => d.co === coNorm);
+    const modoDocumentos = documentosValidos.length > 0;
+    const tiposSeleccionados = normalizarTipos(opciones.tipos ?? process.env.TIPOS_GEN ?? '');
+    const fechaDoctoForzada = validarFechaDocto(opciones.fechaDocto ?? process.env.FECHA_DOCTO_GEN ?? '');
+    exigirDocumentos({ tipos: tiposSeleccionados, fechaDocto: fechaDoctoForzada, hayDocumentos: modoDocumentos });
+    if (fuente === 'acumulado' && !modoDocumentos) {
+        throw new Error('fuente=acumulado requiere `documentos`. Se aborta la corrida sin procesar nada (evita enviar días completos de facturas).');
+    }
+    if (modoDocumentos && documentosDelCo.length === 0) {
+        console.log(`ℹ️ Ningún documento solicitado pertenece al CO ${co}. Nada que procesar.`);
+        return { total: 0, ok: 0, fail: 0, detalle: [], muestra: 0, genericasDia: 0, co };
+    }
+
+    const ctx = contextoGen(co, fuente); // lanza si el CO no está soportado
     const L = ctx.label;
+    ctx.modoDocumentos = modoDocumentos;
+    ctx.documentos = documentosDelCo;
+    ctx.fechaDocto = fechaDoctoForzada;
+    // En modo documentos la fecha solo filtra si se pidió explícitamente (opciones.fecha / MUESTRA_FECHA_011).
+    ctx.fechaFiltro = modoDocumentos ? (String(opciones.fecha || process.env.MUESTRA_FECHA_011 || '').trim() || null) : null;
+    ctx.cacheAcum = {}; // caché por corrida de la fuente acumulada (compartido por CNZ y CFZ)
+    ctx.pasoLog = tiposSeleccionados.includes('CFZ') ? 3 : 1;
 
     // Resetear caché de inventario y costos al inicio de cada corrida (también entre COs del mismo
     // proceso): el CO anterior pudo inyectar ajustes de inventario en Siesa, y la caché tiene TTL de
@@ -1513,8 +1663,10 @@ async function syncGen(opciones = {}) {
     //    quedamos con las facturas del día objetivo y tomamos el 10% distribuido.
     //    Las facturas se identifican por CAJA|CONSEC (no solo consec): con varias cajas el mismo
     //    consecutivo puede existir en cada una. Orden: caja asc, luego consec numérico asc.
-    const detalleRaw = await fetchPaginadoCompleto(ctx.urlDetalle, `Ventas${L}`);
-    const consecsDelDia = [...new Set(
+    // Modo documentos (reproceso manual): NO hay muestreo ni lectura previa; la "muestra" son
+    // exactamente los documentos pedidos de este CO y cada paso los busca en la fuente.
+    const detalleRaw = modoDocumentos ? [] : await fetchPaginadoCompleto(ctx.urlDetalle, `Ventas${L}`);
+    const consecsDelDia = modoDocumentos ? documentosDelCo.map(d => `${d.caja}|${d.consec}`) : [...new Set(
         (Array.isArray(detalleRaw) ? detalleRaw : [])
             .filter(d => (d.FECHA_DOCTO || '').toString().split('T')[0] === fechaObjetivo)
             .filter(d => String(d.CONSEC_DOCTO ?? '').trim())
@@ -1526,12 +1678,17 @@ async function syncGen(opciones = {}) {
         return (parseInt(consecA, 10) || 0) - (parseInt(consecB, 10) || 0);
     });
 
-    const muestra = muestreoDistribuido(consecsDelDia, porcentaje);
+    const muestra = modoDocumentos ? consecsDelDia : muestreoDistribuido(consecsDelDia, porcentaje);
     const muestraClaves = new Set(muestra);
     const muestraEtiquetas = muestra.map(etiquetaMuestra);
 
-    console.log(`📊 Genéricas del día ${fechaObjetivo}: ${consecsDelDia.length} factura(s)`);
-    console.log(`🎯 Muestra (${porcentaje}% distribuido, mín 1): ${muestra.length} → [${muestraEtiquetas.join(', ')}]`);
+    if (modoDocumentos) {
+        console.log(`📌 Reproceso manual de ${L}: fuente=${fuente} | tipos=${tiposSeleccionados.join('+')} | fecha de inserción=${fechaDoctoForzada || '(original)'}${ctx.fechaFiltro ? ` | fecha=${ctx.fechaFiltro}` : ''}`);
+        console.log(`🎯 Documentos solicitados (sin muestreo): ${muestra.length} → [${muestraEtiquetas.join(', ')}]`);
+    } else {
+        console.log(`📊 Genéricas del día ${fechaObjetivo}: ${consecsDelDia.length} factura(s)`);
+        console.log(`🎯 Muestra (${porcentaje}% distribuido, mín 1): ${muestra.length} → [${muestraEtiquetas.join(', ')}]`);
+    }
 
     if (muestra.length === 0) {
         // Diagnóstico: si la query trajo datos pero NINGUNO del día objetivo, mostramos qué días
@@ -1569,9 +1726,12 @@ async function syncGen(opciones = {}) {
     //    MUESTRA_SOLO_CNZ=true corta en CNZ (para pruebas).
     console.log("   Ejecutando primero Notas Crédito (CNZ) y luego Facturas (CFZ)...");
     const soloCNZ = (process.env.MUESTRA_SOLO_CNZ || 'false').toLowerCase() === 'true';
-    const resCNZ = (await ejecutarPaso(1, muestraClaves, ctx)) || [];
+    // `tipos` (reproceso manual) puede omitir CNZ o CFZ; por default ambos (comportamiento del cron).
+    const resCNZ = tiposSeleccionados.includes('CNZ') ? ((await ejecutarPaso(1, muestraClaves, ctx)) || []) : [];
     let resCFZ = [];
-    if (!soloCNZ) {
+    if (!tiposSeleccionados.includes('CFZ')) {
+        console.log("ℹ️ Tipos seleccionados sin CFZ — se omite el paso CFZ.");
+    } else if (!soloCNZ) {
         resCFZ = (await ejecutarPaso(3, muestraClaves, ctx)) || [];
     } else {
         console.log("🧪 Modo SOLO CNZ activado — se omite el paso CFZ.");
