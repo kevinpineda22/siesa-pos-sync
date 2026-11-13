@@ -47,6 +47,16 @@ on:
         description: 'Reproceso: fecha a reprocesar en formato YYYY-MM-DD. Vacío = no filtra por fecha.'
         required: false
         default: ''
+      tipos:
+        description: 'Reproceso (exige documentos): tipo de documento a enviar. ambas = CNZ y CFZ.'
+        required: false
+        type: choice
+        options: ['ambas', 'CNZ', 'CFZ']
+        default: 'ambas'
+      fecha_docto:
+        description: 'Reproceso (exige documentos): fecha de inserción en Siesa YYYY-MM-DD (no futura). Vacío = fecha original de la factura.'
+        required: false
+        default: ''
 
 # Evita que dos corridas se solapen (no cancela la que está en curso).
 concurrency:
@@ -104,6 +114,8 @@ jobs:
           FUENTE_VENTAS: ${{ github.event.inputs.fuente || 'vivo' }}
           DOCUMENTOS: ${{ github.event.inputs.documentos || '' }}
           FECHA_REPROCESO: ${{ github.event.inputs.fecha || '' }}
+          TIPOS_REPROCESO: ${{ github.event.inputs.tipos || '' }}
+          FECHA_DOCTO_REPROCESO: ${{ github.event.inputs.fecha_docto || '' }}
           # --- Notificaciones por correo (GitHub Secrets) ---
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}

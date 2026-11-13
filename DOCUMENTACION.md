@@ -1971,10 +1971,31 @@ El botón "Reprocesar" del frontend usa dos endpoints que lanzan el workflow `sy
 
 | Endpoint | Función |
 |---|---|
-| `POST /api/reprocesar-acumulado` | Body `{ documentos: ["001-Z02-36298", ...] }` (máx. 300). Valida y normaliza los documentos, verifica que no haya una corrida activa y hace `workflow_dispatch`. Responde `202 { success, documentos, actionsUrl }`. |
+| `POST /api/reprocesar-acumulado` | Body `{ documentos: ["001-Z02-36298", ...], tipos?, fechaDocto? }` (máx. 300 documentos). Valida y normaliza los documentos, verifica que no haya una corrida activa y hace `workflow_dispatch`. Responde `202 { success, documentos, actionsUrl }`. |
 | `GET /api/reprocesar-acumulado/estado` | Devuelve la última corrida `workflow_dispatch`: `{ success, run: { id, status, conclusion, html_url, created_at, updated_at } }` (`run` es `null` si no hay). |
 
 Además, `POST /api/sync-ventas` acepta `documentos` (array `CO-CAJA-CONSEC`) con prioridad sobre `consecs`; permite reprocesar facturas de hoy sin la ambigüedad del consecutivo solo. Este endpoint sigue sin autenticación.
+
+### Tipo de documento y fecha de inserción (opcionales)
+
+El reproceso por `documentos` admite dos opciones adicionales (backend: `opcionesReproceso.js` + `syncVentas`):
+
+| Opción | Input del workflow | Variable de entorno | Valores |
+|---|---|---|---|
+| `tipos` | `tipos` (choice) | `TIPOS_REPROCESO` | `ambas` (default), `CNZ`, `CFZ`. Se ejecuta solo el paso elegido; el orden sigue siendo CNZ y luego CFZ. |
+| `fechaDocto` | `fecha_docto` | `FECHA_DOCTO_REPROCESO` | `YYYY-MM-DD`, fecha real y no futura (hoy en America/Bogota). Vacío = fecha original de la factura. |
+
+`POST /api/reprocesar-acumulado` y `POST /api/sync-ventas` aceptan `tipos` y `fechaDocto` en el body (error 400 si son inválidos). El workflow suma 9 inputs (límite de `workflow_dispatch` según el plan de GitHub: 10, o 25 en planes recientes).
+
+**Reglas:**
+
+- `fechaDocto` y un `tipos` distinto de `ambas` **solo** se permiten junto con una lista explícita de `documentos`. Sin ella, `syncVentas` aborta la corrida con error y no procesa nada: nunca aplican a la corrida nocturna ni a corridas de día completo.
+- Fechas que se sobrescriben con `fechaDocto`: `FECHA_DOCTO` del encabezado (CNZ y CFZ), `FECHA_VCTO` de todas las líneas de `Caja` (el movimiento de caja debe quedar en el mismo día que el documento) y la `FECHA_DOCTO` del CPE de ajuste automático de inventario, para que el inventario se valide y ajuste el mismo día en que queda el documento.
+- El CO del documento (`coDocumento`) también se decide con la fecha efectiva: forzar una fecha anterior a `CO_DOCUMENTO_DESDE` envía el documento al CO 001; una posterior, al CO de la venta.
+- La fecha original del POS se conserva en `sps_facturas.fecha_factura` (y en los correos). La fecha forzada queda en `automatizaciones_aplicadas` como `fecha_docto:YYYY-MM-DD` y el log de inicio muestra `Fecha de inserción forzada=...`.
+- Los pasos CNZ y CFZ son independientes entre sí (cada uno arma su payload y su idempotencia propia): se puede reprocesar solo uno. Ojo con el inventario: la CNZ entra como entrada y la CFZ como salida; enviar solo la CFZ puede disparar el ajuste automático (CPE) si no hay stock.
+
+> **Advertencia contable:** cambiar la fecha mueve la venta a otro día en contabilidad, inventario y caja (y puede caer en un período cerrado, lo que Siesa rechaza). La CNZ y la CFZ de una misma factura deben quedar con la **misma fecha**: si se reprocesa una con fecha forzada, la otra debe usar la misma.
 
 **Autenticación:** ambos endpoints nuevos exigen `Authorization: Bearer <access_token>` con el token de la sesión de Supabase del usuario. Se valida con `supabase.auth.getUser(token)` y se registra el correo. Sin token válido responden 401.
 

@@ -8,6 +8,7 @@ const { syncVentas } = require('./syncVentas');
 const logger = require('./logger');
 const reportes = require('./reportes');
 const { requireSupabaseUser, reprocesarAcumulado, estadoReprocesoAcumulado } = require('./reprocesoAcumulado');
+const { TIPOS_DOCUMENTO, normalizarTipos, validarFechaDocto, exigirDocumentos } = require('./opcionesReproceso');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -75,6 +76,7 @@ app.post('/api/sync-ventas', async (req, res) => {
         //   { limite: 5 }                   → procesa los próximos 5 (sobrescribe LIMITE_FACTURAS solo esta vez).
         //   { co: "001,003" }              → filtrar por centros de operación.
         //   { caja: "P05,P03" }            → filtrar por tipo de caja/tipo de documento.
+        //   { tipos: "CNZ"|"CFZ"|"ambas", fechaDocto: "YYYY-MM-DD" } → solo junto con `documentos`.
         // Si no se envía nada, corre el flujo normal con LIMITE_FACTURAS del .env.
         const consecs = Array.isArray(req.body?.consecs) ? req.body.consecs.filter(Boolean).map(String) : null;
         const documentos = Array.isArray(req.body?.documentos) ? req.body.documentos.filter(Boolean).map(String) : null;
@@ -93,6 +95,18 @@ app.post('/api/sync-ventas', async (req, res) => {
         if (co) opciones.co = co;
         if (caja) opciones.caja = caja;
         if (soloCNZ) opciones.soloCNZ = true;
+
+        // Tipo de documento (AMBAS | CNZ | CFZ) y fecha de inserción forzada: solo con `documentos`.
+        // Se validan aquí para responder 400 (error del cliente) en vez de 500.
+        try {
+            const tipos = normalizarTipos(req.body?.tipos);
+            const fechaDocto = validarFechaDocto(req.body?.fechaDocto);
+            exigirDocumentos({ tipos, fechaDocto, hayDocumentos: !!opciones.documentos });
+            if (tipos.length !== TIPOS_DOCUMENTO.length) opciones.tipos = tipos;
+            if (fechaDocto) opciones.fechaDocto = fechaDocto;
+        } catch (e) {
+            return res.status(400).json({ success: false, error: e.message });
+        }
 
         if (opciones.documentos) {
             console.log(`--- 🔄 Recibida petición HTTP para reprocesar documentos: ${opciones.documentos.join(', ')} ---`);

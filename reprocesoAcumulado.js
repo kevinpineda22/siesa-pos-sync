@@ -4,6 +4,7 @@
 // por eso se delega al workflow sync-pos.yml mediante workflow_dispatch.
 const axios = require('axios');
 const logger = require('./logger');
+const { TIPOS_DOCUMENTO, normalizarTipos, validarFechaDocto, exigirDocumentos } = require('./opcionesReproceso');
 
 const REGEX_DOCUMENTO = /^\d{1,3}-[A-Za-z0-9]+-\d+$/;
 const MAX_DOCUMENTOS = 300;
@@ -70,7 +71,7 @@ function normalizarDocumento(doc) {
 
 /**
  * POST /api/reprocesar-acumulado
- * Body: { documentos: ["001-Z02-36298", ...] }
+ * Body: { documentos: ["001-Z02-36298", ...], tipos?: 'ambas'|'CNZ'|'CFZ', fechaDocto?: 'YYYY-MM-DD' }
  * Lanza el workflow con fuente=acumulado. Responde 202.
  */
 async function reprocesarAcumulado(req, res) {
@@ -97,7 +98,18 @@ async function reprocesarAcumulado(req, res) {
             });
         }
 
-        console.log(`--- 🔄 Reproceso acumulado solicitado por ${req.user.email || req.user.id}: ${docs.length} documento(s): ${docs.join(', ')} ---`);
+        // Opciones opcionales: tipo de documento y fecha de inserción forzada (mismas reglas que syncVentas).
+        let tipos, fechaDocto;
+        try {
+            tipos = normalizarTipos(req.body?.tipos);
+            fechaDocto = validarFechaDocto(req.body?.fechaDocto);
+            exigirDocumentos({ tipos, fechaDocto, hayDocumentos: docs.length > 0 });
+        } catch (e) {
+            return res.status(400).json({ success: false, error: e.message });
+        }
+        const tiposInput = tipos.length === TIPOS_DOCUMENTO.length ? 'ambas' : tipos[0];
+
+        console.log(`--- 🔄 Reproceso acumulado solicitado por ${req.user.email || req.user.id}: ${docs.length} documento(s): ${docs.join(', ')} | tipos=${tiposInput} | fecha de inserción=${fechaDocto || '(original)'} ---`);
 
         // GitHub concurrency conserva UNA sola corrida pendiente por grupo y cancela las pendientes
         // anteriores: un segundo dispatch podría cancelar en silencio un reproceso en cola.
@@ -114,7 +126,13 @@ async function reprocesarAcumulado(req, res) {
 
         await axios.post(`${cfg.apiBase}/dispatches`, {
             ref: cfg.ref,
-            inputs: { fuente: 'acumulado', documentos: docs.join(','), solo_hoy: 'false' }
+            inputs: {
+                fuente: 'acumulado',
+                documentos: docs.join(','),
+                solo_hoy: 'false',
+                tipos: tiposInput,
+                fecha_docto: fechaDocto || ''
+            }
         }, { headers: headersGithub(cfg.token) });
 
         res.status(202).json({ success: true, documentos: docs.length, actionsUrl: cfg.actionsUrl });

@@ -16,6 +16,9 @@
  *                     (ej. "001-Z02-36298,003-Z01-11694"). Reproceso manual.
  *   - FECHA_REPROCESO : fecha YYYY-MM-DD a reprocesar. Reproceso manual. (fuente=acumulado exige
  *                       DOCUMENTOS o FECHA_REPROCESO; si no, la corrida se aborta.)
+ *   - TIPOS_REPROCESO : "AMBAS" (default/vacío), "CNZ" o "CFZ". Solo con DOCUMENTOS.
+ *   - FECHA_DOCTO_REPROCESO : fecha YYYY-MM-DD que se envía a Siesa como fecha del documento
+ *                       (vacío = la original del POS). Solo con DOCUMENTOS; no puede ser futura.
  *   - CONNI_KEY, CONNI_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_KEY, CIA, ENTORNO_SIESA,
  *     CONCURRENCIA, PAGINACION_CONCURRENCIA, MAX_RONDAS_AJUSTE.
  *
@@ -48,6 +51,10 @@ const CAT_NO_CRITICAS = new Set([
     const fuente = (process.env.FUENTE_VENTAS || '').trim().toLowerCase();
     const documentos = (process.env.DOCUMENTOS || '').trim();
     const fecha = (process.env.FECHA_REPROCESO || '').trim();
+    // Tipo de documento (AMBAS | CNZ | CFZ) y fecha de inserción forzada: solo con `documentos`
+    // (syncVentas aborta la corrida si vienen sin documentos).
+    const tipos = (process.env.TIPOS_REPROCESO || '').trim();
+    const fechaDocto = (process.env.FECHA_DOCTO_REPROCESO || '').trim();
     const esReproceso = fuente === 'acumulado' || !!documentos || !!fecha;
     // En reproceso NO se filtra por "hoy": se busca por documento/fecha en la fuente indicada.
     const soloHoy = esReproceso ? false : (process.env.CRON_SOLO_HOY || 'true').toLowerCase() !== 'false';
@@ -59,6 +66,8 @@ const CAT_NO_CRITICAS = new Set([
     if (fuente) opciones.fuente = fuente;
     if (documentos) opciones.documentos = documentos;
     if (fecha) opciones.fecha = fecha;
+    if (tipos) opciones.tipos = tipos;
+    if (fechaDocto) opciones.fechaDocto = fechaDocto;
     if (limite) opciones.limite = limite;   // modo prueba: tope de N
     else opciones.todas = true;             // producción: todas las nuevas del día
 
@@ -66,6 +75,7 @@ const CAT_NO_CRITICAS = new Set([
     console.log(limite ? '🧪 JOB DE PRUEBA POS → Siesa' : '🤖 JOB AUTOMÁTICO POS → Siesa (diario)');
     console.log(`   CO=${co || '(default .env)'} | Caja=${caja || '(default .env)'} | soloHoy=${soloHoy} | ${limite ? `limite=${limite}` : 'todas=true'}`);
     console.log(`   Fuente=${fuente || 'vivo'} | Documentos=${documentos ? documentos.split(/[\s,]+/).filter(Boolean).length : '(ninguno)'} | Fecha=${fecha || '(ninguna)'}`);
+    console.log(`   Tipos=${tipos || 'AMBAS'} | Fecha de inserción=${fechaDocto || '(original del POS)'}`);
     console.log(`   Entorno=${process.env.ENTORNO_SIESA || 'QA'}`);
     console.log('==================================================');
 

@@ -3,6 +3,7 @@ const { syncPOS } = require('./syncPOS');
 const { normalizarDocumento, compararIdNitCliente } = require('./documento');
 const logger = require('./logger');
 const notifier = require('./notifier');
+const { TIPOS_DOCUMENTO, normalizarTipos, validarFechaDocto, exigirDocumentos } = require('./opcionesReproceso');
 require('dotenv').config();
 
 const CIA = process.env.CIA || '7375';
@@ -245,13 +246,16 @@ async function getCostoCached() {
     return _costoPromise;
 }
 
-async function ajustarInventario(errores, itemsFactura, consecDocto) {
+async function ajustarInventario(errores, itemsFactura, consecDocto, fechaDoctoForzada = null) {
     // El CPE va con la fecha de la factura que lo necesita: el sync corre de noche (10pm COT =
     // día siguiente en UTC) y con la fecha de la corrida el ajuste quedaba un día después.
-    const fecha = formatDate(itemsFactura[0]?.FECHA_DOCTO)
+    // Si el reproceso fuerza una fecha de inserción, el CPE usa esa misma fecha: el inventario
+    // se valida contra el día en que quedará el documento, no contra el día original del POS.
+    const fechaBase = fechaDoctoForzada || itemsFactura[0]?.FECHA_DOCTO;
+    const fecha = formatDate(fechaBase)
         || new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' }).replace(/-/g, '');
     // El CPE va en el mismo CO que la factura que lo necesita (ver coDocumento).
-    const coDocCPE = coDocumento(itemsFactura[0]?.CoDoc, itemsFactura[0]?.FECHA_DOCTO);
+    const coDocCPE = coDocumento(itemsFactura[0]?.CoDoc, fechaBase);
     const baseConsec = parseInt(consecDocto) || 99999;
     const itemsMap = {};
     itemsFactura.forEach(det => { itemsMap[det.id_item] = det; });
@@ -695,6 +699,11 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     const esAcumulado = filtros.fuente === 'acumulado';
     const docsFiltro = Array.isArray(filtros.documentos) && filtros.documentos.length > 0 ? filtros.documentos : null;
     const fechaFiltro = filtros.fecha || null;
+    // Fecha de inserción forzada (YYYY-MM-DD) del reproceso manual; null = fecha original del POS.
+    const fechaDoctoForzada = filtros.fechaDocto || null;
+    // Los avisos de la corrida (documentos no encontrados, listado) se imprimen una sola vez,
+    // en el primer paso que se ejecute (CFZ por defecto; CNZ si solo se corre CNZ).
+    const esPasoLog = pasoActual === (filtros.pasoLog ?? 3);
 
     let detallesRaw, pagosRaw, impuestosRaw;
     if (esAcumulado) {
@@ -731,7 +740,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         const clavesPedidas = new Set(docsFiltro.map(d => d.clave));
         detalles = detallesRaw.filter(d => clavesPedidas.has(claveDocumento(d)));
         console.log(`🎯 Modo documentos (CO-CAJA-CONSEC): se IGNORAN los filtros CO/Caja/hoy → ${detalles.length} registros de ${docsFiltro.length} documento(s) solicitado(s)`);
-        if (pasoActual === 3) {
+        if (esPasoLog) {
             const encontrados = new Set(detalles.map(claveDocumento));
             const noEncontrados = docsFiltro.filter(d => !encontrados.has(d.clave));
             if (noEncontrados.length > 0) {
@@ -855,7 +864,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         // Avisar si alguno solicitado no se encontró en el pool de Connekta.
         const encontradosConsecs = new Set(facturasFiltradas.map(k => parseKey(k).consec));
         const faltantes = lista.filter(c => !encontradosConsecs.has(c));
-        if (pasoActual === 3 && faltantes.length > 0) {
+        if (esPasoLog && faltantes.length > 0) {
             console.warn(`⚠️ Consecs solicitados que NO están en el rango de Connekta: ${faltantes.join(', ')}`);
         }
     }
@@ -870,7 +879,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     const facturasOrdenadas = sinTope ? facturasFiltradas : facturasFiltradas.slice(0, LIMITE);
 
     // MOSTRAR LISTADO DE FACTURAS DETECTADAS (solo en el primer paso para no duplicar log)
-    if (pasoActual === 3) {
+    if (esPasoLog) {
         const modoLabel = modoEspecificos
             ? `modo CONSEC_ESPECIFICOS: ${facturasOrdenadas.length} grupos`
             : `procesando ${facturasOrdenadas.length} de ${todasLasFacturas.length} disponibles`;
@@ -901,7 +910,10 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         // Para diferenciar las consecuciones y que Siesa no se confunda, a la simulacion le ponemos el mismo consecutivo
         // Ya que ID_TIPO_DOCTO es distinto, Siesa las agrupa por separado.
         const consecDoc = enc.CONSEC_DOCTO;
-        const coDoc = coDocumento(enc.CoDoc, enc.FECHA_DOCTO);
+        // Fecha contable del documento: la original del POS o la forzada por el reproceso manual.
+        // Decide también el CO (ver coDocumento), porque ambos dependen de la fecha del documento.
+        const fechaDocumento = fechaDoctoForzada || enc.FECHA_DOCTO;
+        const coDoc = coDocumento(enc.CoDoc, fechaDocumento);
 
         const absIfCNZ = (val) => {
             if (val === null || val === undefined) return val;
@@ -912,7 +924,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             "ID_CO": coDoc,
             "ID_TIPO_DOCTO": tipoDoctoSiesa,
             "CONSEC_DOCTO": consecDoc,
-            "FECHA_DOCTO": formatDate(enc.FECHA_DOCTO),
+            "FECHA_DOCTO": formatDate(fechaDocumento),
             "ID_TERCERO": enc.NitTercero,
             "ID_CLASE_DOCTO": esSimulacionCNZ ? 525 : 522,
             "SUCURSAL_CLIENTE": "001",
@@ -1159,7 +1171,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 "REFERENCIA": "1",
                 "COD_SEGURIDAD": 1,
                 "NRO_AUTORIZACION": "1",
-                "FECHA_VCTO": enc.FECHA ? formatDate(enc.FECHA) : formatDate(new Date().toISOString())
+                "FECHA_VCTO": fechaDoctoForzada ? formatDate(fechaDoctoForzada) : (enc.FECHA ? formatDate(enc.FECHA) : formatDate(new Date().toISOString()))
             });
         }
         Object.values(cajaConsolidada).filter(p => esSimulacionCNZ ? Math.abs(p.neto) > 0 : p.neto > 0).forEach(pago => {
@@ -1180,7 +1192,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 "REFERENCIA": "1",
                 "COD_SEGURIDAD": pago.COD_SEGURIDAD || 1,
                 "NRO_AUTORIZACION": pago.NRO_AUTORIZACION || "1",
-                "FECHA_VCTO": formatDate(pago.FECHA_VCTO)
+                "FECHA_VCTO": fechaDoctoForzada ? formatDate(fechaDoctoForzada) : formatDate(pago.FECHA_VCTO)
             });
         });
 
@@ -1198,7 +1210,9 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
         // que rompió los consec 4184 y 4177 el 2026-09-02.
         if (ajusteEfeExtra !== null && ajusteEfeExtra > 0 && posCaja > 0) {
             const plantillaEfe = cajaConsolidada["EFE"];
-            const fechaVcto = plantillaEfe ? formatDate(plantillaEfe.FECHA_VCTO) : formatDate(enc.FECHA);
+            const fechaVcto = fechaDoctoForzada
+                ? formatDate(fechaDoctoForzada)
+                : (plantillaEfe ? formatDate(plantillaEfe.FECHA_VCTO) : formatDate(enc.FECHA));
             Caja.push({
                 "ID_CO": coDoc,
                 "ID_TIPO_DOCTO": tipoDoctoSiesa,
@@ -1228,6 +1242,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
     // Función que envía 1 factura a Siesa con reintento automático ante cliente/inventario faltante.
     const enviarFacturaASiesa = async (consecutivo, payload, detallesFactura, tipoDoctoSiesa, meta, conversiones = [], alertaCliente = null) => {
         const automatizaciones = [...conversiones];
+        // Se registra aparte de `conversiones` para no disparar el correo de conversiones.
+        if (fechaDoctoForzada) automatizaciones.push(`fecha_docto:${fechaDoctoForzada}`);
         if (alertaCliente) {
             console.warn(`⚠️ [${tipoDoctoSiesa} ${consecutivo}] CO ${meta.co} | Caja ${meta.caja} | Consec ${consecutivo}: cliente con código y NIT distintos en el POS (IdTercero=${alertaCliente.idTercero}, NitTercero=${alertaCliente.nitTercero}). Se envía a Siesa con el NIT.`);
             automatizaciones.push(`cliente_id_nit_distinto:id=${alertaCliente.idTercero},nit=${alertaCliente.nitTercero}`);
@@ -1420,7 +1436,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                     automatizaciones.push(`ajuste_inventario:${consecutivo}`);
                     try {
                         const consecAjuste = parseInt(Date.now().toString().slice(-7));
-                        const itemsInyectados = await ajustarInventario(errores, detallesFactura, consecAjuste) || [];
+                        const itemsInyectados = await ajustarInventario(errores, detallesFactura, consecAjuste, fechaDoctoForzada) || [];
                         if (itemsInyectados.length > 0) {
                             meta.cpeItems = [...(meta.cpeItems || []), ...itemsInyectados];
                             // Notificar ajuste de inventario
@@ -1721,6 +1737,23 @@ module.exports = { syncVentas: async (opciones = {}) => {
     const usarDocumentos = documentosValidos.length > 0;
     const usarFecha = !usarDocumentos && !!fechaReproceso;
 
+    // --- Tipos de documento y fecha de inserción (solo reproceso manual por `documentos`) ---
+    // opciones.tipos: subconjunto de ['CNZ','CFZ'] (default ambos). También TIPOS_REPROCESO.
+    // opciones.fechaDocto: 'YYYY-MM-DD' que se envía a Siesa como fecha del documento.
+    //   También FECHA_DOCTO_REPROCESO. Ambas opciones exigen una lista explícita de `documentos`:
+    //   nunca aplican a la corrida nocturna ni a corridas de día completo.
+    const tiposSeleccionados = normalizarTipos(opciones.tipos ?? process.env.TIPOS_REPROCESO ?? '');
+    const fechaDoctoForzada = validarFechaDocto(opciones.fechaDocto ?? process.env.FECHA_DOCTO_REPROCESO ?? '');
+    const tiposNoDefault = tiposSeleccionados.length !== TIPOS_DOCUMENTO.length;
+    try {
+        exigirDocumentos({ tipos: tiposSeleccionados, fechaDocto: fechaDoctoForzada, hayDocumentos: usarDocumentos });
+    } catch (e) {
+        console.error(`❌ ${e.message} Se aborta la corrida sin procesar nada.`);
+        throw e;
+    }
+    const ejecutarCNZ = tiposSeleccionados.includes('CNZ');
+    const ejecutarCFZ = tiposSeleccionados.includes('CFZ');
+
     // Seguridad: la fuente acumulada trae 7 días de facturas; sin documentos ni fecha no se procesa nada.
     if (fuente === 'acumulado' && !usarDocumentos && !usarFecha) {
         const msg = 'fuente=acumulado requiere `documentos` o `fecha`. Se aborta la corrida sin procesar nada (evita enviar 7 días de facturas).';
@@ -1732,6 +1765,11 @@ module.exports = { syncVentas: async (opciones = {}) => {
     if (usarDocumentos) filtrosCOCaja.documentos = documentosValidos;
     if (usarFecha) filtrosCOCaja.fecha = fechaReproceso;
     if (fuente === 'acumulado') filtrosCOCaja.cacheAcum = {}; // caché por corrida (compartido por CNZ y CFZ)
+    if (fechaDoctoForzada) filtrosCOCaja.fechaDocto = fechaDoctoForzada;
+    // Los avisos de la corrida se imprimen en el primer paso que se ejecute.
+    filtrosCOCaja.pasoLog = ejecutarCFZ ? 3 : 1;
+    if (fechaDoctoForzada) console.log(`📅 Fecha de inserción forzada=${fechaDoctoForzada} (la fecha original del POS se conserva en sps_facturas.fecha_factura).`);
+    if (tiposNoDefault) console.log(`📑 Tipos de documento a reprocesar: ${tiposSeleccionados.join(', ')}`);
 
     console.log(`📌 Fuente de ventas: ${fuente}${usarDocumentos ? ` | documentos=${documentosValidos.length}` : ''}${usarFecha ? ` | fecha=${fechaReproceso}` : ''}`);
 
@@ -1770,9 +1808,15 @@ module.exports = { syncVentas: async (opciones = {}) => {
     if (opciones.soloCNZ === true && !soloCNZ) {
         console.log(`ℹ️ soloCNZ ignorado: solo aplica para CO 011 (recibido: "${coFilter || '(vacío)'}").`);
     }
-    resCNZ = (await ejecutarPaso(1, consecsOverride, filtrosCOCaja)) || []; // CNZ - Notas crédito
-    if (!soloCNZ) {
+    if (ejecutarCNZ) {
+        resCNZ = (await ejecutarPaso(1, consecsOverride, filtrosCOCaja)) || []; // CNZ - Notas crédito
+    } else {
+        console.log('ℹ️ Tipo CNZ no seleccionado: se omite el paso CNZ.');
+    }
+    if (ejecutarCFZ && !soloCNZ) {
         resCFZ = (await ejecutarPaso(3, consecsOverride, filtrosCOCaja)) || []; // CFZ - Facturas de venta
+    } else if (!ejecutarCFZ) {
+        console.log('ℹ️ Tipo CFZ no seleccionado: se omite el paso CFZ.');
     } else {
         console.log("🧪 Modo SOLO CNZ activado — se omite el paso CFZ.");
     }
