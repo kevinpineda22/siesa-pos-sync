@@ -1957,6 +1957,28 @@ Al final el log lista los documentos solicitados que **no** se encontraron en la
 - **Idempotencia sin cambios:** los documentos ya OK en `sps_facturas` se omiten; los FALLO o inexistentes se envían.
 - En reproceso `runSyncCron.js` fuerza `soloHoy=false`. En la ejecución automática (`workflow_run`) los inputs resuelven a `vivo`/vacío y el comportamiento no cambia.
 
+### Reproceso desde el panel (API)
+
+El botón "Reprocesar" del frontend usa dos endpoints que lanzan el workflow `sync-pos.yml` con `fuente=acumulado` (esa lectura es pesada y no cabe en el límite de tiempo de Vercel). Implementación en `reprocesoAcumulado.js`.
+
+| Endpoint | Función |
+|---|---|
+| `POST /api/reprocesar-acumulado` | Body `{ documentos: ["001-Z02-36298", ...] }` (máx. 300). Valida y normaliza los documentos, verifica que no haya una corrida activa y hace `workflow_dispatch`. Responde `202 { success, documentos, actionsUrl }`. |
+| `GET /api/reprocesar-acumulado/estado` | Devuelve la última corrida `workflow_dispatch`: `{ success, run: { id, status, conclusion, html_url, created_at, updated_at } }` (`run` es `null` si no hay). |
+
+Además, `POST /api/sync-ventas` acepta `documentos` (array `CO-CAJA-CONSEC`) con prioridad sobre `consecs`; permite reprocesar facturas de hoy sin la ambigüedad del consecutivo solo. Este endpoint sigue sin autenticación.
+
+**Autenticación:** ambos endpoints nuevos exigen `Authorization: Bearer <access_token>` con el token de la sesión de Supabase del usuario. Se valida con `supabase.auth.getUser(token)` y se registra el correo. Sin token válido responden 401.
+
+**Variables de entorno (Vercel):**
+
+- `GITHUB_TOKEN` (obligatoria): fine-grained PAT restringido al repo `siesa-pos-sync`, permiso **Actions: Read and write**.
+- `GITHUB_REPO` (opcional, default `kevinpineda22/siesa-pos-sync`).
+- `GITHUB_WORKFLOW_SYNC_POS` (opcional, default `sync-pos.yml`).
+- `GITHUB_REF` (opcional, default `main`).
+
+**409 (sincronización en curso):** si el workflow tiene una corrida `queued`, `in_progress`, `waiting`, `pending` o `requested`, el endpoint responde 409 y no lanza nada. El `concurrency` de GitHub conserva solo UNA corrida pendiente por grupo y cancela las pendientes anteriores: un segundo dispatch cancelaría en silencio un reproceso en cola. Los errores de la API de GitHub se devuelven como 502, sin exponer el token.
+
 ---
 
 ## Contacto / Soporte

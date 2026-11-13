@@ -7,6 +7,7 @@ const { syncPOS } = require('./syncPOS');
 const { syncVentas } = require('./syncVentas');
 const logger = require('./logger');
 const reportes = require('./reportes');
+const { requireSupabaseUser, reprocesarAcumulado, estadoReprocesoAcumulado } = require('./reprocesoAcumulado');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -62,15 +63,21 @@ app.post('/api/sync-clientes', async (req, res) => {
     }
 });
 
+// Reproceso desde tablas acumuladas: dispara GitHub Actions (requiere sesión Supabase).
+app.post('/api/reprocesar-acumulado', requireSupabaseUser, reprocesarAcumulado);
+app.get('/api/reprocesar-acumulado/estado', requireSupabaseUser, estadoReprocesoAcumulado);
+
 app.post('/api/sync-ventas', async (req, res) => {
     try {
         // Body opcional:
         //   { consecs: ["63951", "63952"] } → reprocesa esos consecs (ignora límite).
+        //   { documentos: ["001-Z02-36298"] } → reprocesa esos documentos CO-CAJA-CONSEC (prioridad sobre consecs).
         //   { limite: 5 }                   → procesa los próximos 5 (sobrescribe LIMITE_FACTURAS solo esta vez).
         //   { co: "001,003" }              → filtrar por centros de operación.
         //   { caja: "P05,P03" }            → filtrar por tipo de caja/tipo de documento.
         // Si no se envía nada, corre el flujo normal con LIMITE_FACTURAS del .env.
         const consecs = Array.isArray(req.body?.consecs) ? req.body.consecs.filter(Boolean).map(String) : null;
+        const documentos = Array.isArray(req.body?.documentos) ? req.body.documentos.filter(Boolean).map(String) : null;
         const limiteRaw = req.body?.limite;
         const limite = Number.isFinite(Number(limiteRaw)) && Number(limiteRaw) > 0
             ? parseInt(limiteRaw, 10)
@@ -80,13 +87,16 @@ app.post('/api/sync-ventas', async (req, res) => {
         const soloCNZ = req.body?.soloCNZ === true;
 
         const opciones = {};
-        if (consecs && consecs.length > 0) opciones.consecs = consecs;
-        if (limite && !opciones.consecs) opciones.limite = limite; // consecs tiene prioridad
+        if (documentos && documentos.length > 0) opciones.documentos = documentos; // documentos tiene prioridad sobre consecs
+        if (consecs && consecs.length > 0 && !opciones.documentos) opciones.consecs = consecs;
+        if (limite && !opciones.consecs && !opciones.documentos) opciones.limite = limite; // consecs/documentos tienen prioridad
         if (co) opciones.co = co;
         if (caja) opciones.caja = caja;
         if (soloCNZ) opciones.soloCNZ = true;
 
-        if (opciones.consecs) {
+        if (opciones.documentos) {
+            console.log(`--- 🔄 Recibida petición HTTP para reprocesar documentos: ${opciones.documentos.join(', ')} ---`);
+        } else if (opciones.consecs) {
             console.log(`--- 🔄 Recibida petición HTTP para reprocesar consecs: ${opciones.consecs.join(', ')} ---`);
         } else if (opciones.limite) {
             console.log(`--- 🔄 Recibida petición HTTP para sincronizar ${opciones.limite} factura(s) ---`);
