@@ -919,6 +919,8 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             "id_co_fact": enc.CoDoc,
             "TERCERO_REM": enc.NitTercero,
             "F_CONSEC_AUTO_REG": "1",
+            // IND_ESTADO -> F350_IND_ESTADO del conector (0=Elaboración, 1=Aprobado, 2=Anulado).
+            "IND_ESTADO": 1,
             "id_cond_pago": enc.id_cond_pago ? enc.id_cond_pago.toString().trim().padStart(3, '0') : "000",
             // id_caja: código de la caja contable en Siesa. Desde CO_DOCUMENTO_DESDE cada CO
             // tiene su propia caja (antes todo iba a la caja 001, auxiliar 001-001-COP). El código

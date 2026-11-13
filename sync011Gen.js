@@ -804,6 +804,9 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
             "id_co_fact": enc.CoDoc,
             "TERCERO_REM": enc.NitTercero,
             "F_CONSEC_AUTO_REG": "1",
+            // IND_ESTADO -> F350_IND_ESTADO del conector (0=Elaboración, 1=Aprobado, 2=Anulado).
+            // Siempre 1; solo el fallback de CNZ sin saldo de caja lo cambia a 0 (ver enviarFacturaASiesa).
+            "IND_ESTADO": 1,
             "id_cond_pago": enc.id_cond_pago ? enc.id_cond_pago.toString().trim().padStart(3, '0') : "000",
             // id_caja: código de la caja contable en Siesa. Desde CO_DOCUMENTO_DESDE cada CO
             // tiene su propia caja (ver cajaSiesa), igual que en el flujo normal.
@@ -1113,6 +1116,8 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
         let clientesSincronizados = false;
         let fallosInyeccion = 0; // fallos CONSECUTIVOS del ajuste de inventario
         let cxcConvergido = false; // ya se aplicó UNA vez el ajuste de redondeo cartera↔CxC
+        let cnzSinCajaIntentado = false; // ya se probó UNA vez la CNZ en elaboración y sin Caja
+        let cnzEnElaboracion = false;    // el payload vigente va en elaboración (IND_ESTADO 0, sin Caja)
         for (let ronda = 0; ronda <= MAX_RONDAS; ronda++) {
             try {
                 const responseSiesa = await axios.post(URL_SIESA_POST, payload, {
@@ -1122,6 +1127,15 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
                         'Content-Type': 'application/json'
                     }
                 });
+                if (cnzEnElaboracion) {
+                    // Se registra como OK a propósito: la nota YA existe en Siesa (en elaboración), y
+                    // solo el estado OK la excluye de obtenerConsecsExitosos. Dejarla como FALLO la
+                    // reenviaría en la próxima corrida y la duplicaría.
+                    const msgElaboracion = 'Nota crédito insertada EN ELABORACIÓN y sin caja (saldo de caja insuficiente). Debe completarse en Siesa.';
+                    automatizaciones.push('cnz_en_elaboracion_sin_caja');
+                    console.log(`📝 [${tipoDoctoSiesa} ${consecutivo}] ${msgElaboracion}`);
+                    return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: true, mensaje: msgElaboracion });
+                }
                 const sufijo = automatizaciones.length > 0 ? ' (tras automatización)' : '';
                 if (conversiones.length > 0) {
                     notifier.sendConversionNotification({
@@ -1205,6 +1219,26 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
                                 accionTomada = true; // NO retornamos: el for re-POSTea con el IVA ya alineado
                             }
                         }
+                    }
+                    // FALLBACK CNZ sin saldo de caja (regla del jefe de tienda): si Siesa rechaza la
+                    // nota crédito porque la caja no tiene saldo, se inserta EN ELABORACIÓN
+                    // (IND_ESTADO 0) y SIN el bloque Caja, solo con los movimientos. Una sola vez,
+                    // solo CNZ (CFZ no aplica) y sin consumir ronda: es un reintento aparte del
+                    // bucle de cliente/inventario, y el flag impide que se repita.
+                    const faltaSaldoCaja = Array.isArray(errores) && errores.some(e =>
+                        e.f_detalle && /saldo de caja del auxiliar .* debe ser mayor o igual a 0/i.test(e.f_detalle)
+                    );
+                    if (!accionTomada && tipoDoctoSiesa === 'CNZ' && faltaSaldoCaja && !cnzSinCajaIntentado && payload.Caja) {
+                        cnzSinCajaIntentado = true;
+                        cnzEnElaboracion = true;
+                        console.log(`📝 [${tipoDoctoSiesa} ${consecutivo}] Saldo de caja insuficiente. Reintentando EN ELABORACIÓN (IND_ESTADO 0) y sin Caja...`);
+                        // Copia: no se muta el payload original. Se reasigna para que cualquier
+                        // reintento posterior (ej. deadlock) siga enviando la versión sin Caja.
+                        const { Caja: _cajaOmitida, ...payloadSinCaja } = payload;
+                        payloadSinCaja["Docto. ventas comercial"] = (payload["Docto. ventas comercial"] || []).map(h => ({ ...h, "IND_ESTADO": 0 }));
+                        payload = payloadSinCaja;
+                        ronda--; // no consume ronda de automatización
+                        continue;
                     }
                     if (!accionTomada) {
                         return await registrar({ consecutivo, tipo: tipoDoctoSiesa, ok: false, mensaje: JSON.stringify(error.response.data) });

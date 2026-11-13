@@ -1548,6 +1548,14 @@ NOTIFY_ERROR_EMAILS='' NOTIFY_CPE_EMAILS='' NOTIFY_EMAILS='' \
 
 Los documentos de este flujo quedan en `sps_facturas` con id `{tipo}:{co}:{caja}:{consec}` (ej. `CFZ:011:Z01:{consec}`, `CFZ:012:Z02:{consec}`). Se identifican de forma **inequívoca** por **`cliente_nit = '222222222222'`** (el flujo normal nunca envía genéricos). El frontend usa ese marcador para mostrar la actividad exclusiva del flujo 011-genéricos.
 
+### `IND_ESTADO` y fallback de CNZ sin saldo de caja
+
+- El bloque `"Docto. ventas comercial"` (flujo normal y genéricos) envía `"IND_ESTADO": 1`, que el conector `idDocumento=242756 FACTURA_DEV` mapea a `F350_IND_ESTADO` (0=Elaboración, 1=Aprobado, 2=Anulado).
+- **Fallback (solo `sync011Gen.js`, solo CNZ):** si Siesa rechaza una nota crédito con `El saldo de caja del auxiliar ... debe ser mayor o igual a 0`, se reintenta **una sola vez** con `IND_ESTADO = 0` y **sin el bloque `Caja`** (solo movimientos): la nota queda **en elaboración** y debe completarse manualmente en Siesa. No aplica a CFZ ni al flujo normal.
+- Se registra como `OK` con la automatización `cnz_en_elaboracion_sin_caja` y un mensaje explícito, para que la idempotencia (que solo omite `estado = 'OK'`) no la reenvíe y la duplique. El paso CFZ no depende del resultado de la CNZ.
+- **Configuración requerida en el conector:** mapear `F350_IND_ESTADO` -> variable `IND_ESTADO` y **quitar el valor fijo**.
+- **Orden de despliegue:** primero el código (enviar `IND_ESTADO` antes del mapeo es inocuo: el conector ignora llaves no mapeadas) y después el cambio en el conector.
+
 ---
 
 ## 26. Flujo Transformación Tocino → Chicharrón (diario 10pm)
