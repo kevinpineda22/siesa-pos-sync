@@ -1779,5 +1779,6 @@ module.exports = {
     // Alias retrocompatible: sync011Gen({}) sigue corriendo el CO 011 por default.
     sync011Gen: syncGen,
     COS_GEN_SOPORTADOS,
+    contextoGen,
 };
 

@@ -8,6 +8,7 @@ const { syncVentas } = require('./syncVentas');
 const logger = require('./logger');
 const reportes = require('./reportes');
 const { requireSupabaseUser, reprocesarAcumulado, estadoReprocesoAcumulado } = require('./reprocesoAcumulado');
+const { facturasOmitidas } = require('./facturasOmitidas');
 const { TIPOS_DOCUMENTO, normalizarTipos, validarFechaDocto, exigirDocumentos } = require('./opcionesReproceso');
 
 const app = express();
@@ -67,6 +68,9 @@ app.post('/api/sync-clientes', async (req, res) => {
 // Reproceso desde tablas acumuladas: dispara GitHub Actions (requiere sesión Supabase).
 app.post('/api/reprocesar-acumulado', requireSupabaseUser, reprocesarAcumulado);
 app.get('/api/reprocesar-acumulado/estado', requireSupabaseUser, estadoReprocesoAcumulado);
+
+// Facturas del POS que nunca llegaron a sps_facturas (solo lectura; requiere sesión Supabase).
+app.get('/api/facturas-omitidas', requireSupabaseUser, facturasOmitidas);
 
 app.post('/api/sync-ventas', async (req, res) => {
     try {

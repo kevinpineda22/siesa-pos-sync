@@ -1974,6 +1974,17 @@ El botón "Reprocesar" del frontend usa dos endpoints que lanzan el workflow `sy
 | `POST /api/reprocesar-acumulado` | Body `{ documentos: ["001-Z02-36298", ...], tipos?, fechaDocto? }` (máx. 300 documentos). Valida y normaliza los documentos, verifica que no haya una corrida activa y hace `workflow_dispatch`. Responde `202 { success, documentos, actionsUrl }`. |
 | `GET /api/reprocesar-acumulado/estado` | Devuelve la última corrida `workflow_dispatch`: `{ success, run: { id, status, conclusion, html_url, created_at, updated_at } }` (`run` es `null` si no hay). |
 
+### Facturas omitidas (API)
+
+`GET /api/facturas-omitidas?desde=YYYY-MM-DD&hasta=YYYY-MM-DD` (requiere sesión Supabase, solo lectura; implementación en `facturasOmitidas.js`). Lista los documentos del POS que **no tienen ninguna fila** en `sps_facturas` para CFZ y/o CNZ, es decir, los que la sincronización saltó por completo y el panel no puede mostrar.
+
+- **Fuente:** descarga una vez por petición, en paralelo y de forma estricta, `merkahorro_venta_pos_acum` (normal) y `merkahorro_venta_pos_011_gen_acum` / `merkahorro_venta_pos_012_gen_acum` (genéricos). Agrega por documento (el neto `VrNetoDocto` es del documento, no se suma por línea), filtra por `FECHA_DOCTO` en el rango y cajas Z01/Z02.
+- **Comparación:** llave `{tipo}:{co}:{caja}:{consec}` con el CO **del POS** (`CoDoc`), igual que `logger.registrarResultado`, no el CO de `coDocumento`. El consecutivo se normaliza sin ceros a la izquierda. Cualquier estado (OK, FALLO, SIN_RECAUDO, ...) cuenta como registrado. `sps_facturas` se lee paginado (1000) filtrando por `fecha_factura`, CO y caja.
+- **Validaciones (400):** `desde` y `hasta` obligatorios, `desde <= hasta`, rango máximo de 31 días y `desde` no anterior a `2026-11-01` (constante temporal `FECHA_MINIMA_ACUM`, configurable con `FACTURAS_OMITIDAS_DESDE`).
+- **Respuesta:** `{ desde, hasta, total, data: [{ co, caja, consec, llave, fecha, nit, razon_social, neto, faltan: ['CFZ','CNZ'], flujo: 'normal'|'genericos' }] }`, ordenada por fecha, CO, caja y consecutivo.
+- **Genéricos:** el flujo de genéricos procesa por diseño solo una muestra (10 %) del día, por lo que la mayoría de las genéricas aparecerán como omitidas; usar el campo `flujo` para distinguirlas.
+- **Tiempo:** la descarga de las tres queries acumuladas puede ser pesada; `vercel.json` no define `maxDuration`, por lo que aplica el límite por defecto del plan.
+
 Además, `POST /api/sync-ventas` acepta `documentos` (array `CO-CAJA-CONSEC`) con prioridad sobre `consecs`; permite reprocesar facturas de hoy sin la ambigüedad del consecutivo solo. Este endpoint sigue sin autenticación.
 
 ### Tipo de documento y fecha de inserción (opcionales)

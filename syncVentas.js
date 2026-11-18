@@ -1881,3 +1881,6 @@ module.exports = { syncVentas: async (opciones = {}) => {
     }
 }};
 
+// Helpers de solo lectura reutilizados por facturasOmitidas.js.
+module.exports.fetchPaginadoCompleto = fetchPaginadoCompleto;
+module.exports.URL_VENTAS_DETALLE_ACUM = URL_VENTAS_DETALLE_ACUM;
