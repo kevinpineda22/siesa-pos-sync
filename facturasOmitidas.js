@@ -161,6 +161,37 @@ function fusionarDocumentos(mapas) {
     return docs;
 }
 
+/**
+ * Consolida los resultados (Promise.allSettled) de las fuentes en documentos, cobertura y fuentes fallidas.
+ * - La fuente 'normal' es obligatoria: si falló, se relanza su error.
+ * - Una fuente de genéricos fallida se EXCLUYE completa (nunca parcial) y se reporta; solo puede
+ *   ocultar documentos, nunca hacer que uno se reporte como omitido sin serlo.
+ * - Prioridad: genéricos primero (un CO 011/012 genérico nunca queda como 'normal').
+ * @param {Array<{id: string, flujo: string}>} fuentes
+ * @param {Array<PromiseSettledResult<Array>>} resultados mismo orden que `fuentes`
+ */
+function consolidarFuentes(fuentes, resultados, { desde, hasta }) {
+    const cobertura = {};
+    const fuentesFallidas = [];
+    const mapas = [];
+    const indices = fuentes.map((f, i) => i).sort((a, b) =>
+        (fuentes[a].flujo === 'genericos' ? 0 : 1) - (fuentes[b].flujo === 'genericos' ? 0 : 1));
+    for (const i of indices) {
+        const f = fuentes[i];
+        const r = resultados[i];
+        if (r.status === 'rejected') {
+            const mensaje = String(r.reason?.message ?? r.reason ?? 'Error desconocido');
+            if (f.flujo === 'normal') throw (r.reason instanceof Error ? r.reason : new Error(mensaje));
+            fuentesFallidas.push({ fuente: f.id, error: mensaje });
+            cobertura[f.id] = null;
+            continue;
+        }
+        cobertura[f.id] = coberturaDesde(r.value);
+        mapas.push(agruparDocumentos(r.value, { desde, hasta, flujo: f.flujo }));
+    }
+    return { documentos: fusionarDocumentos(mapas), cobertura, fuentes_fallidas: fuentesFallidas };
+}
+
 /** Ids exactos `{tipo}:{co}:{caja}:{consec}` (con variantes de CO) de lo que falta en cada candidata. */
 function idsCandidatos(omitidas) {
     const ids = new Set();
@@ -236,21 +267,19 @@ async function facturasOmitidas(req, res) {
             }))
         ];
 
-        // Descarga estricta (si una página falla, aborta: un resultado parcial daría falsos "omitidas").
-        const descargas = await Promise.all(
-            fuentes.map(f => fetchPaginadoCompleto(f.url, f.etiqueta, { estricto: true }))
-        );
-
-        // Prioridad: genéricos primero, así un CO 011/012 genérico nunca queda como 'normal'.
-        const orden = fuentes.map((f, i) => i).sort((a, b) =>
-            (fuentes[a].flujo === 'genericos' ? 0 : 1) - (fuentes[b].flujo === 'genericos' ? 0 : 1));
-        const documentos = fusionarDocumentos(
-            orden.map(i => agruparDocumentos(descargas[i], { desde, hasta, flujo: fuentes[i].flujo }))
-        );
-
-        // Qué cubrió realmente cada fuente: las queries acumuladas pueden empezar después de "desde".
-        const cobertura = {};
-        fuentes.forEach((f, i) => { cobertura[f.id] = coberturaDesde(descargas[i]); });
+        // Cada fuente es estricta (completa o excluida, nunca parcial). La normal es obligatoria;
+        // las de genéricos no bloquean: si fallan se excluyen y se reportan en `fuentes_fallidas`.
+        // Se descargan de a una: en paralelo, Connekta rechazaba al azar la página 1 de alguna
+        // fuente (las tres queries acumuladas son pesadas). Mismo formato que Promise.allSettled.
+        const resultados = [];
+        for (const f of fuentes) {
+            try {
+                resultados.push({ status: 'fulfilled', value: await fetchPaginadoCompleto(f.url, f.etiqueta, { estricto: true }) });
+            } catch (error) {
+                resultados.push({ status: 'rejected', reason: error });
+            }
+        }
+        const { documentos, cobertura, fuentes_fallidas } = consolidarFuentes(fuentes, resultados, { desde, hasta });
 
         const cos = [...new Set([...documentos.values()].map(d => d.co))];
         const registradas = await leerRegistradas(logger.supabase, { desde, hasta, cos });
@@ -260,7 +289,7 @@ async function facturasOmitidas(req, res) {
             data = compararConRegistradas(data.map(o => documentos.get(`${o.co}|${o.caja}|${o.consec}`)), new Set([...registradas, ...porId]));
         }
 
-        res.status(200).json({ desde, hasta, cobertura_desde: cobertura.normal, cobertura, total: data.length, data });
+        res.status(200).json({ desde, hasta, cobertura_desde: cobertura.normal, cobertura, fuentes_fallidas, total: data.length, data });
     } catch (error) {
         console.error('❌ /api/facturas-omitidas:', error.message);
         res.status(500).json({ success: false, error: error.message });
@@ -276,6 +305,7 @@ module.exports = {
     variantesCo,
     coberturaDesde,
     fusionarDocumentos,
+    consolidarFuentes,
     idsCandidatos,
     compararConRegistradas,
     facturasOmitidas

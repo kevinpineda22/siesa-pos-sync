@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const {
     validarRango, agruparDocumentos, claveRegistrada, compararConRegistradas,
-    variantesCo, coberturaDesde, fusionarDocumentos, idsCandidatos
+    variantesCo, coberturaDesde, fusionarDocumentos, idsCandidatos, consolidarFuentes
 } = require('../facturasOmitidas');
 
 const linea = (o = {}) => ({
@@ -125,4 +125,37 @@ test('fusionarDocumentos gives priority to the first source (generics first)', (
 test('coberturaDesde returns the earliest FECHA_DOCTO or null', () => {
     assert.strictEqual(coberturaDesde([linea({ FECHA_DOCTO: '2026-11-05T00:00:00' }), linea({ FECHA_DOCTO: '2026-11-03T00:00:00' })]), '2026-11-03');
     assert.strictEqual(coberturaDesde([]), null);
+});
+
+const FUENTES = [
+    { id: 'normal', flujo: 'normal' },
+    { id: 'genericos_011', flujo: 'genericos' },
+    { id: 'genericos_012', flujo: 'genericos' }
+];
+const RANGO = { desde: '2026-11-01', hasta: '2026-11-30' };
+
+test('consolidarFuentes excludes a failed generic source and reports it', () => {
+    const r = consolidarFuentes(FUENTES, [
+        { status: 'fulfilled', value: [linea({ CONSEC_DOCTO: '1' })] },
+        { status: 'rejected', reason: new Error('la página 1 no se pudo descargar') },
+        { status: 'fulfilled', value: [linea({ CoDoc: '012', CONSEC_DOCTO: '2', NitTercero: '222222222222' })] }
+    ], RANGO);
+    assert.deepStrictEqual(r.fuentes_fallidas, [{ fuente: 'genericos_011', error: 'la página 1 no se pudo descargar' }]);
+    assert.strictEqual(r.cobertura.genericos_011, null);
+    assert.deepStrictEqual([...r.documentos.keys()].sort(), ['001|Z01|1', '012|Z01|2']);
+    assert.strictEqual(r.documentos.get('012|Z01|2').flujo, 'genericos');
+});
+
+test('consolidarFuentes rethrows when the normal source failed', () => {
+    assert.throws(() => consolidarFuentes(FUENTES, [
+        { status: 'rejected', reason: new Error('normal caída') },
+        { status: 'fulfilled', value: [] },
+        { status: 'fulfilled', value: [] }
+    ], RANGO), /normal caída/);
+});
+
+test('consolidarFuentes with all sources ok reports no failures', () => {
+    const r = consolidarFuentes(FUENTES, FUENTES.map(() => ({ status: 'fulfilled', value: [] })), RANGO);
+    assert.deepStrictEqual(r.fuentes_fallidas, []);
+    assert.strictEqual(r.documentos.size, 0);
 });
