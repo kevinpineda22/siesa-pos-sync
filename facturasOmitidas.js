@@ -22,6 +22,9 @@ const TAM_LOTE_IDS = 200;
 // Fecha mínima que cubren las queries acumuladas (temporal). Configurable por entorno.
 const FECHA_MINIMA_ACUM = (process.env.FACTURAS_OMITIDAS_DESDE || '2026-11-01').trim();
 
+// Query de Connekta con las cabeceras de facturas acumuladas (ver queries_connekta).
+const QUERY_FACTURAS_ACUM = 'merkahorro_facturas_pos_acum';
+
 const REGEX_FECHA = /^\d{4}-\d{2}-\d{2}$/;
 
 function esFechaValida(valor) {
@@ -257,20 +260,18 @@ async function facturasOmitidas(req, res) {
         // require diferido: mantiene este módulo puro y testeable sin cargar los flujos de sync.
         const logger = require('./logger');
         const { fetchPaginadoCompleto, URL_VENTAS_DETALLE_ACUM } = require('./syncVentas');
-        const { contextoGen } = require('./sync011Gen');
 
+        // Única fuente: query liviana de CABECERAS (una fila por factura, sin líneas). Trae los NIT
+        // reales de todos los CO y los genéricos solo de 011/012; agruparDocumentos los clasifica por
+        // NIT + CO. Las queries de detalle (venta/gen acum) eran demasiado pesadas: el endpoint
+        // superaba el timeout aunque se pidiera un solo día (Connekta no filtra por fecha).
+        const urlFacturas = new URL(URL_VENTAS_DETALLE_ACUM);
+        urlFacturas.searchParams.set('descripcion', QUERY_FACTURAS_ACUM);
         const fuentes = [
-            { id: 'normal', flujo: 'normal', etiqueta: 'Omitidas normal', url: URL_VENTAS_DETALLE_ACUM },
-            ...COS_GENERICOS.map(co => ({
-                id: `genericos_${co}`, flujo: 'genericos', etiqueta: `Omitidas gen ${co}`,
-                url: contextoGen(co, 'acumulado').urlDetalle
-            }))
+            { id: 'normal', flujo: 'normal', etiqueta: 'Omitidas', url: urlFacturas.toString() }
         ];
 
-        // Cada fuente es estricta (completa o excluida, nunca parcial). La normal es obligatoria;
-        // las de genéricos no bloquean: si fallan se excluyen y se reportan en `fuentes_fallidas`.
-        // Se descargan de a una: en paralelo, Connekta rechazaba al azar la página 1 de alguna
-        // fuente (las tres queries acumuladas son pesadas). Mismo formato que Promise.allSettled.
+        // La fuente es estricta: completa o error, nunca parcial. Mismo formato que Promise.allSettled.
         const resultados = [];
         for (const f of fuentes) {
             try {
