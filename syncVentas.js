@@ -603,9 +603,10 @@ function coDocumento(coVenta, fechaDocto) {
 // Siesa rechaza con "La caja 003-003-COP no tiene configurada un auxiliar".
 const CAJA_SIESA_POR_CO = { '003': '03' };
 
-// Documentos (CO|CAJA|CONSEC) en los que se omiten las líneas con valor bruto 0. Autorización
-// puntual, caso por caso: 007|Z01|9527 (2026-11-23, ítem 16660 en $0 pendiente de aclarar en el POS).
-const DOCS_OMITIR_LINEAS_CERO = new Set(['007|Z01|9527']);
+// Motivo de inventario para las líneas con valor bruto 0 (obsequios del POS). Con el motivo
+// por defecto ("03") Siesa rechaza el plano con "Movto Inventario: el valor bruto debe ser
+// mayor a 0"; el resto de líneas del documento conserva su motivo.
+const MOTIVO_LINEA_VALOR_CERO = "02";
 
 function cajaSiesa(coDoc) {
     return CAJA_SIESA_POR_CO[coDoc] || coDoc;
@@ -944,24 +945,18 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
             "id_caja": cajaSiesa(coDoc)
         });
 
-        // Excepción puntual: en los documentos autorizados se omiten las líneas con VALOR_BRUTO 0
-        // (Siesa rechaza el plano completo con "Movto Inventario: el valor bruto debe ser mayor a 0").
-        // Fuera de la lista la línea se envía igual y el documento falla, a propósito: cada caso
-        // se revisa con el negocio antes de omitirlo. La omisión queda en automatizaciones_aplicadas.
-        const llaveDocumento = `${String(co).trim().padStart(3, '0')}|${String(caja).trim().toUpperCase()}|${String(Number(consecDoc))}`;
-        const omitirLineasCero = DOCS_OMITIR_LINEAS_CERO.has(llaveDocumento);
-        const itemsEnviar = fac.items.filter(det => {
-            if (!omitirLineasCero || parseFloat(det.VALOR_BRUTO) > 0) return true;
-            console.warn(`⚠️ [${tipoDoctoSiesa} ${consecDoc}] Línea con valor bruto 0 omitida (excepción autorizada): ítem ${det.id_item} ${String(det.DescItem || '').trim()}.`);
-            conversiones.push(`linea_valor_cero_omitida:${det.id_item}`);
-            return false;
-        });
-
-        itemsEnviar.forEach((det, index) => {
+        fac.items.forEach((det, index) => {
             const lineaItem = index + 1;
             const cant = absIfCNZ(det.CANTIDAD || det.cant_1);
             const vrBruto = absIfCNZ(det.VALOR_BRUTO);
             const precioUnit = Number(cant) > 0 ? vrBruto / cant : 0;
+
+            // Líneas en $0 (obsequios): se envían con MOTIVO_LINEA_VALOR_CERO en CFZ y CNZ.
+            const esLineaValorCero = !(Number(vrBruto) > 0);
+            if (esLineaValorCero) {
+                console.warn(`⚠️ [${tipoDoctoSiesa} ${consecDoc}] Línea con valor bruto 0 enviada con motivo ${MOTIVO_LINEA_VALOR_CERO}: ítem ${det.id_item} ${String(det.DescItem || '').trim()}.`);
+                conversiones.push(`linea_valor_cero_motivo_${MOTIVO_LINEA_VALOR_CERO}:${det.id_item}`);
+            }
 
             Movimientos.push({
                 "id_co": coDoc,
@@ -970,7 +965,7 @@ async function ejecutarPaso(pasoActual, consecsOverride = null, filtros = {}) {
                 "nro_registro": lineaItem,
                 "BODEGA": det.BODEGA || "MG001",
                 "id_concepto": esSimulacionCNZ ? 502 : ({"1201": 501, "1202": 502}[det.Concepto] || 501),
-                "id_motivo": "03",
+                "id_motivo": esLineaValorCero ? MOTIVO_LINEA_VALOR_CERO : "03",
                 "ind_naturaleza": esSimulacionCNZ ? 1 : 2,
                 "id_co_movto": enc.CoDoc,
                 "UNIDAD_MEDIDA": normalizarUM(det.UNIDAD_MEDIDA),

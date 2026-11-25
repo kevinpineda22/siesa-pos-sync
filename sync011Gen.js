@@ -642,6 +642,10 @@ function coDocumento(coVenta, fechaDocto) {
 // Casi todas usan el código del CO; la del CO 003 está creada como "03".
 const CAJA_SIESA_POR_CO = { '003': '03' };
 
+// Motivo de inventario para las líneas con valor bruto 0 (obsequios del POS), igual que en el
+// flujo normal: con "03" Siesa rechaza el plano con "el valor bruto debe ser mayor a 0".
+const MOTIVO_LINEA_VALOR_CERO = "02";
+
 function cajaSiesa(coDoc) {
     return CAJA_SIESA_POR_CO[coDoc] || coDoc;
 }
@@ -928,6 +932,12 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
             const vrBruto = absIfCNZ(det.VALOR_BRUTO);
             const precioUnit = Number(cant) > 0 ? vrBruto / cant : 0;
 
+            // Líneas en $0 (obsequios): se envían con MOTIVO_LINEA_VALOR_CERO en CFZ y CNZ.
+            const esLineaValorCero = !(Number(vrBruto) > 0);
+            if (esLineaValorCero) {
+                console.warn(`⚠️ [${tipoDoctoSiesa} ${consecDoc}] Línea con valor bruto 0 enviada con motivo ${MOTIVO_LINEA_VALOR_CERO}: ítem ${det.id_item} ${String(det.DescItem || '').trim()}.`);
+            }
+
             Movimientos.push({
                 "id_co": coDoc,
                 "id_tipo_docto": tipoDoctoSiesa,
@@ -935,7 +945,7 @@ async function ejecutarPaso(pasoActual, muestraClaves, ctx) {
                 "nro_registro": lineaItem,
                 "BODEGA": det.BODEGA || "MG001",
                 "id_concepto": esSimulacionCNZ ? 502 : ({"1201": 501, "1202": 502}[det.Concepto] || 501),
-                "id_motivo": "03",
+                "id_motivo": esLineaValorCero ? MOTIVO_LINEA_VALOR_CERO : "03",
                 "ind_naturaleza": esSimulacionCNZ ? 1 : 2,
                 "id_co_movto": enc.CoDoc,
                 "UNIDAD_MEDIDA": normalizarUM(det.UNIDAD_MEDIDA),
